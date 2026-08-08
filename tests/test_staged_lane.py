@@ -3,7 +3,7 @@ unblocked/selection and rendered in their own lane; update_task can strip tags
 (the release path)."""
 from __future__ import annotations
 
-from skcoord.card import _swimlane_for_tags, LANE_ORDER, _LANE_META
+from skcoord.card import _LANE_META, LANE_ORDER, _swimlane_for_tags
 from skcoord.coordination import Board, Task
 
 
