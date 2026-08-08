@@ -398,6 +398,7 @@ class Board:
         description: str | None = None,
         acceptance_criteria: list[str] | None = None,
         add_tags: list[str] | None = None,
+        remove_tags: list[str] | None = None,
         run_id: str | None = None,
     ) -> Path:
         """Rewrite task fields and snapshot each change for reversibility.
@@ -436,9 +437,11 @@ class Board:
                     }
                 )
                 d["acceptance_criteria"] = acceptance_criteria
-            if add_tags:
+            if add_tags or remove_tags:
                 existing = list(d.get("tags", []))
-                merged = existing + [t for t in add_tags if t not in existing]
+                merged = existing + [t for t in (add_tags or []) if t not in existing]
+                if remove_tags:
+                    merged = [t for t in merged if t not in set(remove_tags)]
                 if merged != existing:
                     edits.append(
                         {
@@ -512,7 +515,13 @@ class Board:
         completed: set[str] = set()
         for ag in self.load_agents():
             completed.update(ag.completed_tasks)
-        return {t.id for t in self.load_tasks() if set(t.dependencies).issubset(completed)}
+        # ``autopilot-staged`` children live in the "Proposed" lane: decomposed but
+        # not yet released by a human. They must never be selected, assessed, or
+        # built, so they are excluded from the unblocked set until
+        # ``skos autopilot release <epic>`` strips the tag.
+        return {t.id for t in self.load_tasks()
+                if set(t.dependencies).issubset(completed)
+                and "autopilot-staged" not in (t.tags or [])}
 
     def release_stale_claims(self, agent: str, older_than_seconds: int) -> list[str]:
         """Release an agent's uncompleted claims if it has gone stale.

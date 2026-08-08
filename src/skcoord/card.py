@@ -201,6 +201,8 @@ _STATUS_TO_COLUMN = {
 def _swimlane_for_tags(tags: list[str]) -> str:
     """Pick a swimlane for a coord task from its tags."""
     lowered = {t.lower() for t in tags}
+    if "autopilot-staged" in lowered:
+        return "proposed"
     if "bug" in lowered:
         return "bug"
     if "security" in lowered:
@@ -311,7 +313,7 @@ def card_from_change(ch) -> Card:
 # ---------------------------------------------------------------------------
 
 COLUMN_ORDER = [c.value for c in Column]  # backlog, ready, doing, review, done
-LANE_ORDER = ["feature", "bug", "security", "expedite", "change", "problem"]
+LANE_ORDER = ["feature", "bug", "security", "expedite", "change", "problem", "proposed"]
 _PRIORITY_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3}
 
 # WIP limits per column (backlog/done are unlimited). The expedite/incident
@@ -457,6 +459,7 @@ _LANE_META = {
     "expedite": ("Expedite", "kind: incident"),
     "change": ("Change", "kind: change"),
     "problem": ("Problem", "kind: problem"),
+    "proposed": ("Proposed", "autopilot-staged: decomposed, awaiting release"),
 }
 _COLUMN_LABEL = {
     "backlog": "Backlog",
