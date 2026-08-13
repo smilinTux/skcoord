@@ -106,6 +106,7 @@ class ChangeStatus(str, Enum):
     PROPOSED = "proposed"
     REVIEWING = "reviewing"
     APPROVED = "approved"
+    SCHEDULED = "scheduled"
     REJECTED = "rejected"
     IMPLEMENTING = "implementing"
     DEPLOYED = "deployed"
@@ -156,7 +157,14 @@ _PROBLEM_TRANSITIONS: dict[str, set[str]] = {
 _CHANGE_TRANSITIONS: dict[str, set[str]] = {
     "proposed": {"reviewing", "approved", "rejected"},
     "reviewing": {"approved", "rejected"},
-    "approved": {"implementing", "rejected"},
+    # "scheduled" added (CR change-mgmt P1.1): approved -> scheduled via a
+    # dedicated `schedule` event (see _fold_change); "approved -> implementing"
+    # stays legal untouched so the existing manual-implementer path is unchanged.
+    "approved": {"implementing", "rejected", "scheduled"},
+    # New row: scheduled -> implementing is the DEPLOY edge (change-deploy-runner,
+    # a later phase, appends a plain "status" event); scheduled -> approved is
+    # unschedule / a missed window, both dedicated event kinds in _fold_change.
+    "scheduled": {"implementing", "approved", "rejected"},
     "rejected": {"closed"},
     "implementing": {"deployed", "failed"},
     "deployed": {"verified", "failed"},
@@ -246,6 +254,15 @@ class Change(BaseModel):
     gtd_item_ids: list[str] = Field(default_factory=list)
     timeline: list[dict[str, Any]] = Field(default_factory=list)
     tags: list[str] = Field(default_factory=list)
+    # Change-mgmt P1.1 additions (CAB + AI prepare/deploy/scheduling design,
+    # docs/specs/2026-08-13-change-management-cab-ai-arch.md section 4.2).
+    # All optional / default None: a change record whose event log carries
+    # none of the five new event kinds (pr_link/validation/schedule/
+    # unschedule/window_missed) folds byte-identically to before this card.
+    prepared_pr: Optional[dict[str, Any]] = None
+    prepared_by: Optional[str] = None
+    validation: Optional[dict[str, Any]] = None
+    scheduled_window: Optional[dict[str, Any]] = None
 
 
 class KEDBEntry(BaseModel):
@@ -312,6 +329,76 @@ def _auto_incident_id(service: str, failure_class: str, day_bucket: str) -> str:
     """
     key = f"{service}|{failure_class}|{day_bucket}"
     return "inc-" + hashlib.blake2b(key.encode("utf-8"), digest_size=4).hexdigest()
+
+
+def _cab_resolved_status(
+    status: str,
+    change_type: str,
+    tags: list[str],
+    core: dict,
+    votes: list["CABDecision"],
+    prepared_by: Optional[str],
+) -> str:
+    """Return the CAB/standard/auto-normal fold-time derivation of *status*.
+
+    ``_fold_change`` applies this exact derivation once, after its main event
+    loop, to produce the record's headline status (never stored, pure
+    read-time). Some events - the pre-existing generic ``status`` kind, and
+    the new ``schedule``/``unschedule``/``window_missed`` kinds (change-mgmt
+    P1.1) - need to validate a transition *against* that derived state
+    mid-loop: e.g. can a change move to "implementing" or "scheduled" when
+    its "approved" status only ever existed as a fold-time derivation, never
+    an explicit ``status`` event? Before this helper existed, it could not -
+    the loop's own ``status`` local stayed "proposed" for any change whose
+    approval came purely from CAB votes or a standard/auto-normal
+    auto-approve, so a subsequent explicit event (even the pre-existing,
+    untouched "approved -> implementing" manual path) always folded as
+    conflicted. This closes that pre-existing gap; it is read-only /
+    advisory and never appends timeline entries itself - the post-loop block
+    in ``_fold_change`` still owns the record's own approval timeline entry
+    and its exact wording, duplicating these same conditions (kept in sync
+    by hand; see that block's comments).
+
+    No-self-approval (change-mgmt P1.4): an APPROVE vote whose voter equals
+    *prepared_by* is excluded here exactly as it is in the post-loop block,
+    so a drafter's self-approval can never gate a mid-fold transition either.
+
+    Args:
+        status: The loop's current status at this point in the replay.
+        change_type: The change's ``ChangeType`` value.
+        tags: Tags accumulated by the loop so far.
+        core: The change's immutable birth-facts dict.
+        votes: All CAB votes for this change (order-independent).
+        prepared_by: The drafter identity from the latest ``pr_link`` event
+            processed so far in the loop, or ``None``.
+
+    Returns:
+        ``status`` unchanged if it is not "proposed"/"reviewing", or if no
+        derivation currently applies; otherwise the derived "approved" or
+        "rejected".
+    """
+    if status not in ("proposed", "reviewing"):
+        return status
+    if change_type == "standard":
+        return "approved"
+    if (
+        change_type == "normal"
+        and "auto-normal" in tags
+        and core.get("created_by") == "operator"
+        and core.get("risk", "medium") != "high"
+        and (core.get("rollback_plan") or "").strip()
+        and not any(v.decision == CABDecisionValue.REJECTED for v in votes)
+    ):
+        return "approved"
+    rejections = [v for v in votes if v.decision == CABDecisionValue.REJECTED]
+    if rejections:
+        return "rejected"
+    approvals = [
+        v for v in votes if v.decision == CABDecisionValue.APPROVED and v.agent != prepared_by
+    ]
+    if any(v.agent == "human" for v in approvals):
+        return "approved"
+    return status
 
 
 # ---------------------------------------------------------------------------
@@ -819,6 +906,15 @@ class ITILManager:
         title = core.get("title", "")
         related_problem_id = core.get("related_problem_id")
         seen_created = False
+        # Change-mgmt P1.1: event-only fields, never seeded from core (a
+        # change is never created with a draft PR / verdict / schedule
+        # already attached), so they start unset and stay unset for every
+        # pre-existing record whose event log carries none of the five new
+        # kinds below - the fold-invariance guarantee.
+        prepared_pr: Optional[dict[str, Any]] = None
+        prepared_by: Optional[str] = None
+        validation: Optional[dict[str, Any]] = None
+        scheduled_window: Optional[dict[str, Any]] = None
 
         for e in events:
             kind = e.get("kind")
@@ -832,12 +928,22 @@ class ITILManager:
                 timeline.append({"ts": ts, "agent": agent, "action": "proposed", "note": note})
             elif kind == "status":
                 to = e.get("to")
-                if to in _CHANGE_TRANSITIONS.get(status, set()):
+                # gate_status resolves a CAB/standard/auto-normal derivation
+                # that already promoted this change past proposed/reviewing
+                # even though no explicit `status` event ever recorded it -
+                # closes a pre-existing gap where e.g. the untouched
+                # "approved -> implementing" manual path silently conflicted
+                # for any change approved purely by CAB vote (see
+                # _cab_resolved_status docstring).
+                gate_status = _cab_resolved_status(
+                    status, change_type, tags, core, votes, prepared_by
+                )
+                if to in _CHANGE_TRANSITIONS.get(gate_status, set()):
                     timeline.append(
                         {
                             "ts": ts,
                             "agent": agent,
-                            "action": f"status:{status}->{to}",
+                            "action": f"status:{gate_status}->{to}",
                             "note": note,
                         }
                     )
@@ -847,7 +953,7 @@ class ITILManager:
                         {
                             "ts": ts,
                             "agent": agent,
-                            "action": f"status:{status}->{to}",
+                            "action": f"status:{gate_status}->{to}",
                             "note": note,
                             "conflicted": True,
                         }
@@ -872,6 +978,144 @@ class ITILManager:
             elif kind in ("note", "auto-approved"):
                 action = "auto-approved" if kind == "auto-approved" else "note"
                 timeline.append({"ts": ts, "agent": agent, "action": action, "note": note})
+            elif kind == "pr_link":
+                # Appended by the AI runner when a PREPARE run on this change
+                # finishes with a draft PR. Last-write-wins on re-prepare;
+                # `prepared_by` is the writer, never a claimed field on the
+                # payload, so it cannot be spoofed by event content.
+                prepared_pr = {
+                    "url": e.get("url"),
+                    "branch": e.get("branch"),
+                    "run_id": e.get("run_id"),
+                    "head_sha": e.get("head_sha"),
+                }
+                prepared_by = agent
+                timeline.append(
+                    {"ts": ts, "agent": agent, "action": "pr_link", "note": e.get("url", "")}
+                )
+            elif kind == "validation":
+                # CI verdict attached to the draft PR. Latest event wins. A
+                # PASS while still `proposed` is ready-for-CAB: fold-append
+                # the `reviewing` transition, mirroring how `reopen` performs
+                # a direct status move for incidents.
+                validation = {
+                    "passed": bool(e.get("passed")),
+                    "head_sha": e.get("head_sha"),
+                    "url": e.get("url"),
+                    "summary": e.get("summary"),
+                    "checks": e.get("checks"),
+                }
+                timeline.append(
+                    {
+                        "ts": ts,
+                        "agent": agent,
+                        "action": "validation",
+                        "note": "passed" if validation["passed"] else "failed",
+                    }
+                )
+                if validation["passed"] and status == "proposed":
+                    timeline.append(
+                        {
+                            "ts": ts,
+                            "agent": agent,
+                            "action": "status:proposed->reviewing",
+                            "note": "validation passed",
+                        }
+                    )
+                    status = "reviewing"
+            elif kind == "schedule":
+                # Valid only while approved (same fail-closed treatment as an
+                # invalid `status` event: recorded conflicted, no transition).
+                # A re-schedule is unschedule + schedule again, so this stays
+                # a single, table-driven edge. Uses gate_status (see the
+                # `status` kind above) so a change approved purely by CAB
+                # vote / standard-auto can be scheduled without ever having
+                # carried an explicit "status -> approved" event.
+                to = "scheduled"
+                gate_status = _cab_resolved_status(
+                    status, change_type, tags, core, votes, prepared_by
+                )
+                if gate_status == "approved" and to in _CHANGE_TRANSITIONS.get(gate_status, set()):
+                    scheduled_window = {
+                        "window_start": e.get("window_start"),
+                        "window_end": e.get("window_end"),
+                        "asap": bool(e.get("asap", False)),
+                        "deploy_mode": e.get("deploy_mode") or "confirm",
+                    }
+                    timeline.append(
+                        {
+                            "ts": ts,
+                            "agent": agent,
+                            "action": f"status:{gate_status}->{to}",
+                            "note": note or ("ASAP" if scheduled_window["asap"] else ""),
+                        }
+                    )
+                    status = to
+                else:
+                    timeline.append(
+                        {
+                            "ts": ts,
+                            "agent": agent,
+                            "action": f"schedule:{gate_status}",
+                            "note": note,
+                            "conflicted": True,
+                        }
+                    )
+            elif kind == "unschedule":
+                # scheduled -> approved, operator-initiated. Clears the window
+                # so a subsequent `schedule` event is a clean re-schedule.
+                to = "approved"
+                if status == "scheduled" and to in _CHANGE_TRANSITIONS.get(status, set()):
+                    timeline.append(
+                        {
+                            "ts": ts,
+                            "agent": agent,
+                            "action": f"status:{status}->{to}",
+                            "note": note or "unscheduled",
+                        }
+                    )
+                    status = to
+                    scheduled_window = None
+                else:
+                    timeline.append(
+                        {
+                            "ts": ts,
+                            "agent": agent,
+                            "action": f"unschedule:{status}",
+                            "note": note,
+                            "conflicted": True,
+                        }
+                    )
+            elif kind == "window_missed":
+                # Appended by the deploy runner when now > window_end without
+                # a deploy. Fold has no clock of its own - it trusts the event
+                # exists in the log at all; the runner is what must never
+                # append this late (that invariant lives in the runner, a
+                # later phase, not here). Same scheduled -> approved edge as
+                # unschedule, with the miss called out distinctly on the
+                # timeline and it demands an explicit re-schedule.
+                to = "approved"
+                if status == "scheduled" and to in _CHANGE_TRANSITIONS.get(status, set()):
+                    timeline.append(
+                        {
+                            "ts": ts,
+                            "agent": agent,
+                            "action": f"status:{status}->{to}",
+                            "note": note or "window missed",
+                        }
+                    )
+                    status = to
+                    scheduled_window = None
+                else:
+                    timeline.append(
+                        {
+                            "ts": ts,
+                            "agent": agent,
+                            "action": f"window_missed:{status}",
+                            "note": note,
+                            "conflicted": True,
+                        }
+                    )
 
         # Standard changes auto-approve at fold time (never stored).
         if change_type == "standard" and status == "proposed":
@@ -913,9 +1157,24 @@ class ITILManager:
 
         # CAB derivation - mirrors the old _evaluate_cab guard exactly:
         # any rejection blocks; else >=1 human approval unblocks.
+        #
+        # No-self-approval (CR change-mgmt P1.4, CRITICAL): an APPROVE vote
+        # whose voter identity equals `prepared_by` (the drafter of this
+        # change's PR) is dropped from the approvals pool before the "any
+        # human approval" check runs, regardless of caller - this holds even
+        # if a future PEP layer's identity binding is bypassed or buggy. The
+        # same drafter's REJECT vote is left in `rejections` untouched: a
+        # drafter's veto is always safe and must still block. When
+        # `prepared_by` is None (no `pr_link` event, i.e. every change
+        # record that predates this card) the filter is a no-op, preserving
+        # the fold-invariance guarantee.
         if status in ("proposed", "reviewing") and votes:
             rejections = [v for v in votes if v.decision == CABDecisionValue.REJECTED]
-            approvals = [v for v in votes if v.decision == CABDecisionValue.APPROVED]
+            approvals = [
+                v
+                for v in votes
+                if v.decision == CABDecisionValue.APPROVED and v.agent != prepared_by
+            ]
             if rejections:
                 status = "rejected"
                 timeline.append(
@@ -955,6 +1214,10 @@ class ITILManager:
             gtd_item_ids=gtd_ids,
             timeline=timeline,
             tags=tags,
+            prepared_pr=prepared_pr,
+            prepared_by=prepared_by,
+            validation=validation,
+            scheduled_window=scheduled_window,
         )
 
     # ── Incidents ─────────────────────────────────────────────────────
@@ -1375,20 +1638,50 @@ class ITILManager:
         agent: str,
         decision: str = "abstain",
         conditions: str = "",
+        subject: str | None = None,
     ) -> CABDecision:
         """Submit a CAB vote for a change (per-agent file, already conflict-free).
 
         The change's approved/rejected status is now a pure fold-time
         derivation from these vote files - no write back to the change record.
+
+        CR change-mgmt P1.4 (CRITICAL): ``agent`` is free text - historically
+        nothing bound a vote to an authenticated identity, so any caller could
+        write ``agent="human"`` and unblock a change. ``subject`` is the fix's
+        skcoord half: pass the caller's authenticated identity here and it -
+        never the free-text ``agent`` - becomes the voter of record that
+        ``_fold_change`` (and its no-self-approval guard) reads. The upper PEP
+        layer (MCP tool / dashboard route, a later card) is responsible for
+        resolving the real authenticated subject and always passing it; this
+        method does not silently trust a self-declared voter once a subject is
+        expected of it - it only ever records what the caller explicitly
+        binds. Leaving ``subject`` unset keeps today's free-text behavior for
+        direct/legacy callers (CLI, tests), so this is a non-breaking addition.
+
+        Args:
+            change_id: The change record this vote applies to.
+            agent: Free-text vote label. Used as the voter identity only when
+                ``subject`` is not supplied.
+            decision: One of ``CABDecisionValue`` (``approved``/``rejected``/
+                ``abstain``).
+            conditions: Optional free-text conditions attached to the vote.
+            subject: Caller-supplied authenticated identity. When set, this
+                value - not ``agent`` - is recorded as the voter and used for
+                both the vote's filename and its identity in the fold.
+
+        Returns:
+            The recorded ``CABDecision`` (``.agent`` is the bound voter
+            identity: ``subject`` if given, else ``agent``).
         """
         self.ensure_dirs()
+        voter = subject if subject else agent
         vote = CABDecision(
             change_id=change_id,
-            agent=agent,
+            agent=voter,
             decision=CABDecisionValue(decision),
             conditions=conditions,
         )
-        filename = f"{change_id}-{agent}.json"
+        filename = f"{change_id}-{voter}.json"
         path = self.cab_dir / filename
         atomic_write_text(path, json.dumps(vote.model_dump(), indent=2, default=str) + "\n")
         return vote
@@ -1490,7 +1783,7 @@ class ITILManager:
         pending_changes = [
             c
             for c in changes
-            if c.status.value in ("proposed", "reviewing", "approved", "implementing")
+            if c.status.value in ("proposed", "reviewing", "approved", "scheduled", "implementing")
         ]
 
         return {
