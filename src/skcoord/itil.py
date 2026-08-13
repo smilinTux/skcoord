@@ -938,7 +938,20 @@ class ITILManager:
                 gate_status = _cab_resolved_status(
                     status, change_type, tags, core, votes, prepared_by
                 )
-                if to in _CHANGE_TRANSITIONS.get(gate_status, set()):
+                # CM P3.3 PIR lifecycle guard (design doc section 3, "deployed
+                # -> verified: post-implementation review"): two edges demand
+                # a non-empty note on the SAME status event, or they fold as
+                # a conflict entry, fail-closed, same treatment as an invalid
+                # transition. Neither edge is a new row in _CHANGE_TRANSITIONS
+                # (both already existed pre-P3.3); this only narrows when an
+                # otherwise-legal transition is accepted.
+                #   - deployed -> verified needs a PIR / smoke-check note.
+                #   - failed -> closed needs a rollback note.
+                pir_gated = gate_status == "deployed" and to == "verified"
+                rollback_gated = gate_status == "failed" and to == "closed"
+                if to in _CHANGE_TRANSITIONS.get(gate_status, set()) and not (
+                    (pir_gated or rollback_gated) and not note.strip()
+                ):
                     timeline.append(
                         {
                             "ts": ts,
@@ -948,6 +961,19 @@ class ITILManager:
                         }
                     )
                     status = to
+                elif (pir_gated or rollback_gated) and not note.strip():
+                    timeline.append(
+                        {
+                            "ts": ts,
+                            "agent": agent,
+                            "action": f"status:{gate_status}->{to}",
+                            "note": note,
+                            "conflicted": True,
+                            "conflict_reason": (
+                                "PIR note required" if pir_gated else "rollback note required"
+                            ),
+                        }
+                    )
                 else:
                     timeline.append(
                         {
@@ -1925,8 +1951,7 @@ class ITILManager:
                     i["severity"], "?"
                 )
                 lines.append(
-                    f"- **[{i['id']}]** {sev_icon} {i['title']} "
-                    f"({i['status']}) @{i['managed_by']}"
+                    f"- **[{i['id']}]** {sev_icon} {i['title']} ({i['status']}) @{i['managed_by']}"
                 )
         else:
             lines.append("*No open incidents*")
