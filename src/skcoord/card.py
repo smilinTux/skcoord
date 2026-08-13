@@ -255,16 +255,22 @@ _PROBLEM_COLUMN = {
     "known_error": Column.REVIEW,
     "resolved": Column.DONE,
 }
+# Change-mgmt P2.4 (docs/specs/2026-08-13-change-management-cab-ai-arch.md
+# section 8): "scheduled" joins the ready column alongside reviewing/approved
+# (a scheduled change is still awaiting its deploy window, not yet doing).
+# The full lane: backlog=proposed; ready=reviewing/approved/scheduled;
+# doing=implementing/failed; review=deployed; done=verified/closed/rejected.
 _CHANGE_COLUMN = {
     "proposed": Column.BACKLOG,
     "reviewing": Column.READY,
     "approved": Column.READY,
+    "scheduled": Column.READY,
     "implementing": Column.DOING,
+    "failed": Column.DOING,
     "deployed": Column.REVIEW,
     "verified": Column.DONE,
-    "failed": Column.DOING,
-    "rejected": Column.DONE,
     "closed": Column.DONE,
+    "rejected": Column.DONE,
 }
 
 
@@ -295,15 +301,66 @@ def card_from_problem(p) -> Card:
     )
 
 
-def card_from_change(ch) -> Card:
-    """Project an ITIL ``Change`` into a kanban ``Card`` (change lane)."""
+def _change_window_missed(events: list[dict]) -> bool:
+    """True if this change's most recent schedule-lifecycle event was a miss.
+
+    ``scheduled_window`` is cleared by BOTH an explicit ``unschedule`` and a
+    missed window (see ``_fold_change`` in skcoord.itil), so its mere absence
+    on the folded ``Change`` cannot distinguish "operator unscheduled it" from
+    "the window came and went". The folded timeline collapses both to the
+    same generic ``status:scheduled->approved`` action string too. This walks
+    the RAW event log instead (``ITILManager._read_events``, already sorted
+    the same way the fold replays it), which still carries each event's
+    original ``kind`` - precise, no note-text guessing required.
+
+    Args:
+        events: This change's raw events, e.g.
+            ``ITILManager._read_events(mgr.changes_dir, change_id)``.
+
+    Returns:
+        bool: Whether the last ``schedule``/``unschedule``/``window_missed``
+        event in the log was specifically a ``window_missed``. Only
+        meaningful when the folded change currently has no
+        ``scheduled_window``; callers check that first.
+    """
+    lifecycle = {"schedule", "unschedule", "window_missed"}
+    last_kind = None
+    for e in events:
+        if e.get("kind") in lifecycle:
+            last_kind = e.get("kind")
+    return last_kind == "window_missed"
+
+
+def card_from_change(ch, events: list[dict] | None = None) -> Card:
+    """Project an ITIL ``Change`` into a kanban ``Card`` (change lane).
+
+    Change-mgmt P2.4: passes the P1.1 fold fields (``prepared_pr``,
+    ``prepared_by``, ``validation``, ``scheduled_window``) through into
+    ``meta`` so a dashboard client (chips, popout) renders the change's full
+    state without a second fetch of the raw ITIL record.
+
+    Args:
+        ch: The folded ``Change``.
+        events: This change's raw event log (see ``_change_window_missed``),
+            or ``None`` when the caller has not fetched it - the
+            ``window_missed`` meta flag then conservatively defaults to
+            ``False`` rather than guessing.
+    """
+    window_missed = _change_window_missed(events) if events is not None else False
     return Card(
         id=ch.id,
         kind=Kind.CHANGE,
         title=ch.title,
         status=_CHANGE_COLUMN.get(ch.status.value, Column.BACKLOG),
         swimlane="change",
-        meta={"itil_status": ch.status.value},
+        meta={
+            "itil_status": ch.status.value,
+            "prepared_pr": ch.prepared_pr,
+            "prepared_by": ch.prepared_by,
+            "validation": ch.validation,
+            "scheduled_window": ch.scheduled_window,
+            "window_missed": window_missed,
+        },
         source="itil",
     )
 
@@ -373,7 +430,9 @@ class KanbanBoard:
             mgr = ITILManager(self.home)
             out += [card_from_incident(i) for i in mgr.list_incidents()]
             out += [card_from_problem(p) for p in mgr.list_problems()]
-            out += [card_from_change(c) for c in mgr.list_changes()]
+            for c in mgr.list_changes():
+                events = mgr._read_events(mgr.changes_dir, c.id)
+                out.append(card_from_change(c, events))
         except Exception:  # ITIL store may be absent; projection stays task-only
             pass
 
