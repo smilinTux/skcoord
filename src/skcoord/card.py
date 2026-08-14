@@ -76,7 +76,8 @@ class Card(BaseModel):
 
 
 class CardEvent(BaseModel):
-    """One kanban overlay event (move, order, label, link, priority, swimlane).
+    """One kanban overlay event (move, order, label, link, priority, swimlane,
+    describe).
 
     Overlay events let a human or agent operate the board (move a card to a
     column, order it, tag it) without touching coord's claim-based write path.
@@ -95,6 +96,8 @@ class CardEvent(BaseModel):
     link_key: str | None = None
     link_value: str | None = None
     owner: str | None = None
+    title: str | None = None
+    description: str | None = None
 
 
 class CardEventLog:
@@ -142,7 +145,9 @@ def fold_overlay(events: list[CardEvent]) -> dict[str, dict]:
     (last wins), ``set_priority``/``set_swimlane`` last wins, ``add_label``/
     ``remove_label`` accumulate, ``link`` merges into ``links``, ``assign``/
     ``unassign`` set/clear owner (``owner_set`` marks an explicit change so
-    None-from-unassign is distinguishable from never-touched).
+    None-from-unassign is distinguishable from never-touched), ``describe``
+    sets title/description last-wins (only the keys the event actually carries,
+    so None stays "never touched" and "" is a deliberate clear).
     """
     ordered = sorted(events, key=lambda e: (e.ts, e.writer, e.seq))
     overlay: dict[str, dict] = {}
@@ -158,6 +163,8 @@ def fold_overlay(events: list[CardEvent]) -> dict[str, dict]:
                 "links": {},
                 "owner": None,
                 "owner_set": False,
+                "title": None,
+                "description": None,
             },
         )
         if e.action == "move":
@@ -181,6 +188,11 @@ def fold_overlay(events: list[CardEvent]) -> dict[str, dict]:
         elif e.action == "unassign":
             patch["owner"] = None
             patch["owner_set"] = True
+        elif e.action == "describe":
+            if e.title is not None:
+                patch["title"] = e.title
+            if e.description is not None:
+                patch["description"] = e.description
     return overlay
 
 
@@ -457,6 +469,10 @@ class KanbanBoard:
             c.links.update(patch["links"])
             if patch.get("owner_set"):
                 c.owner = patch["owner"]
+            if patch.get("title") is not None:
+                c.title = patch["title"]
+            if patch.get("description") is not None:
+                c.description = patch["description"]
 
         if include_archived:
             return out

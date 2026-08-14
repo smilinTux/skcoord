@@ -91,6 +91,7 @@ _OVERLAY_TO_STORE_ACTION = {
     "link": "link",
     "assign": "assign",
     "unassign": "unassign",
+    "describe": "describe",
 }
 
 _OVERLAY_PAYLOAD_KEYS = (
@@ -102,6 +103,8 @@ _OVERLAY_PAYLOAD_KEYS = (
     "link_key",
     "link_value",
     "owner",
+    "title",
+    "description",
 )
 
 
@@ -355,6 +358,14 @@ class CardStore:
                 card.labels.remove(e["label"])
             elif action == "link" and e.get("link_key") is not None:
                 card.links[e["link_key"]] = e.get("link_value")
+            elif action == "describe":
+                # SPE P3.1: title/description are folded, not frozen. Only the
+                # keys actually present are applied, so an empty string is a
+                # deliberate clear while an omitted key leaves the field alone.
+                if e.get("title") is not None:
+                    card.title = e["title"]
+                if e.get("description") is not None:
+                    card.description = e["description"]
             elif action == "note" and e.get("text"):
                 card.meta.setdefault("comments", []).append(
                     {"ts": e.get("ts"), "writer": e.get("writer"), "text": e["text"]}
@@ -604,6 +615,28 @@ def mirror_coord_move(
 ) -> None:
     """Mirror a kanban move into the CardStore."""
     CardStore(home).append_event(task_id, "move", agent or "mcp", column=column, order=order)
+
+
+def mirror_coord_describe(
+    home: Path,
+    task_id: str,
+    agent: str,
+    title: Optional[str] = None,
+    description: Optional[str] = None,
+) -> None:
+    """Mirror a describe (title/description edit) into the CardStore.
+
+    Only the fields actually supplied are written, so a caller editing just the
+    description never emits a null title that would blank the folded one.
+    """
+    payload: dict[str, str] = {}
+    if title is not None:
+        payload["title"] = title
+    if description is not None:
+        payload["description"] = description
+    if not payload:
+        return
+    CardStore(home).append_event(task_id, "describe", agent or "mcp", **payload)
 
 
 def mirror_coord_archive(home: Path, task_id: str, agent: str) -> None:
