@@ -1,0 +1,18 @@
+name: docs-check
+
+# Shared DOCS_FRESHNESS_STANDARD gate (sk-standards).
+#
+# tiers 1,2 = the 7 required docs exist, and a PR touching src/ or pyproject.toml
+# also touches CHANGELOG.md. SOP.md already carries a docs-evidence block, so
+# tier 3 is available; it moves to "1,2,3" as a follow-up once this gate has run
+# clean, rather than landing red on day one.
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  docs:
+    uses: smilinTux/sk-standards/.github/workflows/docs-check.yml@main
+    with:
+      tiers: "1,2"
