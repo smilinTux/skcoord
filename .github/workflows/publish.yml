@@ -146,6 +146,14 @@ jobs:
 
   pypi-publish:
     needs: build
+    # Same `always()` guard the build job needs, and for the same reason one
+    # level further down. GitHub propagates a skip THROUGH a job: `tag` is
+    # skipped on the tag-push path, `build` survives it with always(), but a
+    # bare `needs: build` here still evaluates to skipped. Since PR #4 made the
+    # trigger tags-only, `tag` can never run, so this job could never run
+    # either: v0.1.4 built cleanly, passed every guard, and published nothing.
+    if: >-
+      always() && !cancelled() && needs.build.result == 'success'
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
