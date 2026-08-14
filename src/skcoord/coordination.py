@@ -392,6 +392,83 @@ class Board:
 
         return self._write_task_raw(task_id, _mutate)
 
+    # -- cross-run failure memory (meta.autopilot.attempts[]) ------------------
+    # Sibling of scores[]/edits[]: a terminal non-pass of an autopilot build used
+    # to vanish when the run returned, so the next run walked into the identical
+    # wall. These two methods are the STORAGE half only; skcoord holds the facts
+    # and skharness decides what an agent ever reads (and owns the run journal).
+    _MAX_ATTEMPTS = 10
+
+    def record_attempt(
+        self,
+        task_id: str,
+        run_id: str,
+        round: int,
+        outcome: str,
+        tried: str,
+        why_failed: str,
+        replacement_hint: str = "",
+    ) -> Path:
+        """Record one distilled terminal non-pass on a task (meta.autopilot.attempts[]).
+
+        Each entry is ONE line per field, already distilled by the caller: raw
+        logs, diffs, and tracebacks stay in the run journal, which `run_id`
+        points at. `outcome` is a closed vocabulary (no_op | ci_red |
+        direct_fail).
+
+        Idempotent: a re-record of the same (run_id, outcome) replaces that entry
+        in place rather than appending a duplicate, so a retried finalize or a
+        crash-resume cannot double-count one failure. Mirrors score_task's
+        (round, harness) match. Goes through _write_task_raw, so sibling keys are
+        preserved.
+
+        The trailing cap is a corruption guard, not the forgetting policy: the
+        reader (skharness build_prior_feedback) bounds what reaches a prompt.
+        """
+
+        def _mutate(d: dict) -> None:
+            ap = d.setdefault("meta", {}).setdefault("autopilot", {})
+            attempts = ap.setdefault("attempts", [])
+            entry = {
+                "run_id": run_id,
+                "ts": _now_iso(),
+                "round": round,
+                "outcome": outcome,
+                "tried": tried,
+                "why_failed": why_failed,
+                "replacement_hint": replacement_hint,
+            }
+            for i, existing in enumerate(attempts):
+                if (existing.get("run_id") == run_id
+                        and existing.get("outcome") == outcome):
+                    attempts[i] = entry
+                    break
+            else:
+                attempts.append(entry)
+            if len(attempts) > self._MAX_ATTEMPTS:
+                attempts[:] = attempts[-self._MAX_ATTEMPTS:]
+
+        return self._write_task_raw(task_id, _mutate)
+
+    def clear_attempts(self, task_id: str) -> list[dict]:
+        """Wipe the card's failure memory and hand the removed entries back.
+
+        Called on a final PASS so a flaky-CI false failure cannot haunt every
+        future run of the card. Deliberately does NOT write the run journal:
+        skcoord has no journal code, and the autopilot run journal is
+        skharness-owned. The caller archives what it gets back, which keeps the
+        "skcoord stores facts, skharness decides" split intact.
+        """
+        removed: list[dict] = []
+
+        def _mutate(d: dict) -> None:
+            ap = d.setdefault("meta", {}).setdefault("autopilot", {})
+            removed.extend(ap.get("attempts") or [])
+            ap["attempts"] = []
+
+        self._write_task_raw(task_id, _mutate)
+        return removed
+
     def update_task(
         self,
         task_id: str,
