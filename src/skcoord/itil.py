@@ -949,8 +949,35 @@ class ITILManager:
                 #   - failed -> closed needs a rollback note.
                 pir_gated = gate_status == "deployed" and to == "verified"
                 rollback_gated = gate_status == "failed" and to == "closed"
-                if to in _CHANGE_TRANSITIONS.get(gate_status, set()) and not (
-                    (pir_gated or rollback_gated) and not note.strip()
+                # CAB bypass guard: a raw `status` event may never be the thing
+                # that grants approval. `_cab_resolved_status` above already
+                # derives "approved" for every LEGITIMATE route (a qualifying
+                # CAB vote, with the drafter's self-approval excluded, plus the
+                # standard/auto-normal auto-approve), so if the gate still
+                # reads proposed/reviewing here then no such route applied and
+                # this event is trying to self-promote. Without this, any
+                # caller of `update_change(..., new_status="approved")` -- the
+                # MCP tool and CLI included -- could approve its own change
+                # with a free-text agent string and no vote, silently routing
+                # around submit_cab_vote() and its no-self-approval fold guard.
+                # EXEMPTION - historical replay: `itil_migrate_events.py` maps a
+                # legacy "status:proposed->approved" timeline entry onto this
+                # same `status` kind, stamping node="migrated" (_MIGRATED_NODE).
+                # Those approvals were granted under the pre-event-sourcing
+                # regime and their vote records no longer exist to re-derive, so
+                # re-gating them would silently demote every migrated change
+                # back to proposed. Live events always carry the real hostname
+                # (verified), and forging this marker requires direct write
+                # access to the event JSONL, which is already game-over.
+                cab_gated = (
+                    to == "approved"
+                    and gate_status in ("proposed", "reviewing")
+                    and e.get("node") != "migrated"
+                )
+                if (
+                    to in _CHANGE_TRANSITIONS.get(gate_status, set())
+                    and not ((pir_gated or rollback_gated) and not note.strip())
+                    and not cab_gated
                 ):
                     timeline.append(
                         {
@@ -961,6 +988,22 @@ class ITILManager:
                         }
                     )
                     status = to
+                elif cab_gated:
+                    timeline.append(
+                        {
+                            "ts": ts,
+                            "agent": agent,
+                            "action": f"status:{gate_status}->{to}",
+                            "note": note,
+                            "conflicted": True,
+                            "conflict_reason": (
+                                "CAB approval required: approval comes from a "
+                                "qualifying vote (submit_cab_vote) or a "
+                                "standard/auto-normal derivation, never from a "
+                                "raw status event"
+                            ),
+                        }
+                    )
                 elif (pir_gated or rollback_gated) and not note.strip():
                     timeline.append(
                         {
