@@ -9,10 +9,23 @@ version (setuptools-scm); a release is cut by pushing a `v*` tag.
 ## [Unreleased]
 
 ### Added
+- **Full SK_REPO_DOC_STANDARD doc set.** `SOP.md` (9 sections, architecture
+  diagram, and an executed `docs-evidence` block of 10 hermetic drift checks),
+  `CONTRIBUTING.md`, and `CODE_OF_CONDUCT.md`, plus a `docs-check` CI gate
+  (`.github/workflows/docs-check.yml`, tiers 1 and 2) wired to the shared
+  sk-standards validator.
 - `secret-scan` CI gate running the **gitleaks binary** over the full history.
   Not `gitleaks-action`: that wrapper requires a paid licence for
   organization-owned repos and exits before scanning anything, which produced a
   permanently red check elsewhere in the fleet that scanned zero bytes.
+
+### Fixed
+- **README described `SKCOORD_CARD_STORE` backwards.** It read as an opt-in gate
+  ("gated by `SKCOORD_CARD_STORE`"), but `card_store_read_enabled()` /
+  `card_store_write_enabled()` have been default-ON since Phase 4e: the store is
+  disabled only by an explicit `0` / `off` / `false` / `no`. The README now
+  describes it as the kill switch it is, and states that the CardStore root is
+  `~/.skcapstone/cards/`, a sibling of `coordination/` rather than a child.
 
 ## [0.1.5] - 2026-08-14
 
