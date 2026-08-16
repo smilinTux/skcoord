@@ -35,14 +35,19 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-# Joule Economy work grade vocabulary. Canonical source:
+# Joule Economy work grade vocabulary. Canonical source of truth:
 # skcapstone/docs/superpowers/specs/joule-grade-vocabulary.json, owned by
 # skcapstone/docs/superpowers/specs/2026-08-14-joule-economy-design.md
-# section 3. size and risk are separate axes and must never share labels -
-# risk never accepts an S/M/L/XL value.
+# section 3. That file says "Consume this file, do not retype the enums" but
+# skcoord is a separate repo from skcapstone with no cheap runtime import
+# today, so these are a deliberate hardcoded stopgap. If the vocabulary JSON
+# changes, these four constants must be updated to match in the same change.
+# size and risk are separate axes and must never share labels - risk never
+# accepts an S/M/L/XL value.
 _GRADE_SIZE_RANK = {"S": 0, "M": 1, "L": 2, "XL": 3}
 _GRADE_RISK_RANK = {"low": 0, "med": 1, "high": 2, "crit": 3}
 _GRADE_SENSITIVITY_VALUES = {"public", "internal", "secret"}
+_GRADE_POOL_VALUES = {"private", "public"}
 _GRADE_CLASS_BY_RANK = {0: "S", 1: "M", 2: "L", 3: "XL"}
 
 
@@ -411,6 +416,7 @@ class Board:
         risk: str,
         sensitivity: str = "internal",
         joule_estimate: int | None = None,
+        joule_bounty: int | None = None,
         graded_by: str = "",
         grader_model: str = "",
         rubric_version: int = 1,
@@ -430,13 +436,20 @@ class Board:
         stored alongside the inputs so the block stays queryable without
         re-deriving it on every read.
 
+        `joule_estimate` is what the work is predicted to cost; `joule_bounty`
+        is what the worker competes against (P4's `earned = bounty - actual`).
+        `pool` gates whether the card may reach an untrusted outside worker
+        (P5), so it is validated the same as the other enum fields rather
+        than accepted as a free string.
+
         Idempotent: re-grading the same card replaces meta.grade in place
         rather than appending or duplicating. Written as a sibling of
         meta.autopilot via _write_task_raw, so every other key on the card
         survives untouched.
 
         Raises:
-            ValueError: size, risk, or sensitivity is outside its vocabulary.
+            ValueError: size, risk, sensitivity, or pool is outside its
+                vocabulary.
 
         Returns:
             Path to the written task file.
@@ -450,6 +463,8 @@ class Board:
                 f"invalid sensitivity {sensitivity!r}, must be one of "
                 f"{sorted(_GRADE_SENSITIVITY_VALUES)}"
             )
+        if pool not in _GRADE_POOL_VALUES:
+            raise ValueError(f"invalid pool {pool!r}, must be one of {sorted(_GRADE_POOL_VALUES)}")
 
         rank = max(_GRADE_SIZE_RANK[size], _GRADE_RISK_RANK[risk])
         model_class = _GRADE_CLASS_BY_RANK[rank]
@@ -462,6 +477,7 @@ class Board:
                 "sensitivity": sensitivity,
                 "model_class": model_class,
                 "joule_estimate": joule_estimate,
+                "joule_bounty": joule_bounty,
                 "graded_by": graded_by,
                 "grader_model": grader_model,
                 "rubric_version": rubric_version,

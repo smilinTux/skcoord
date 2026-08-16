@@ -59,6 +59,7 @@ def test_grade_stores_all_inputs_and_a_graded_at_timestamp(tmp_path):
         risk="high",
         sensitivity="internal",
         joule_estimate=42000,
+        joule_bounty=46200,
         graded_by="assessor@noroc2027",
         grader_model="ornith-1.0-35b",
         rubric_version=1,
@@ -72,12 +73,22 @@ def test_grade_stores_all_inputs_and_a_graded_at_timestamp(tmp_path):
     assert grade["sensitivity"] == "internal"
     assert grade["model_class"] == "L"
     assert grade["joule_estimate"] == 42000
+    assert grade["joule_bounty"] == 46200
     assert grade["graded_by"] == "assessor@noroc2027"
     assert grade["grader_model"] == "ornith-1.0-35b"
     assert grade["rubric_version"] == 1
     assert grade["confidence"] == 0.82
     assert grade["pool"] == "private"
     assert grade["graded_at"]
+
+
+def test_joule_bounty_defaults_to_none_when_not_supplied(tmp_path):
+    board = Board(tmp_path)
+    tid = _card(board)
+
+    board.set_grade(tid, size="S", risk="low")
+
+    assert _grade(board, tid)["joule_bounty"] is None
 
 
 def test_risk_never_accepts_a_size_label(tmp_path):
@@ -104,6 +115,29 @@ def test_set_grade_rejects_invalid_sensitivity(tmp_path):
 
     with pytest.raises(ValueError):
         board.set_grade(tid, size="M", risk="low", sensitivity="classified")
+
+
+@pytest.mark.parametrize("bad_pool", ["privat", "internal", "PUBLIC", "", "public "])
+def test_set_grade_rejects_invalid_pool(tmp_path, bad_pool):
+    """pool gates whether a card may reach an untrusted outside worker (P5),
+    so a typo like "privat" must fail loudly here rather than silently
+    falling through a downstream redaction gate keyed on the wrong value."""
+    board = Board(tmp_path)
+    tid = _card(board)
+
+    with pytest.raises(ValueError):
+        board.set_grade(tid, size="M", risk="low", pool=bad_pool)
+
+
+def test_set_grade_accepts_both_valid_pool_values(tmp_path):
+    board = Board(tmp_path)
+    tid = _card(board)
+
+    board.set_grade(tid, size="M", risk="low", pool="public")
+    assert _grade(board, tid)["pool"] == "public"
+
+    board.set_grade(tid, size="M", risk="low", pool="private")
+    assert _grade(board, tid)["pool"] == "private"
 
 
 def test_regrade_replaces_in_place_rather_than_appending(tmp_path):
