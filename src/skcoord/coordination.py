@@ -414,7 +414,7 @@ class Board:
         *,
         size: str,
         risk: str,
-        sensitivity: str = "internal",
+        sensitivity: str,
         joule_estimate: int | None = None,
         joule_bounty: int | None = None,
         graded_by: str = "",
@@ -435,6 +435,15 @@ class Board:
         `model_class` is derived as CLASS[max(size_rank, risk_rank)] and
         stored alongside the inputs so the block stays queryable without
         re-deriving it on every read.
+
+        `sensitivity` is REQUIRED and deliberately has no default. It is a
+        data-exposure gate, not an estimate: `internal` carries ceiling 1, so
+        a defaulted value would let a card nobody classified leave sovereign
+        hardware. The card most likely to arrive unclassified is exactly the
+        one built on sealed or credential-bearing content, so an absent
+        decision must not resolve to the permissive middle value. Absent has
+        to stay distinguishable from decided. Do not add a default back for
+        caller convenience; make the caller choose.
 
         `joule_estimate` is what the work is predicted to cost; `joule_bounty`
         is what the worker competes against (P4's `earned = bounty - actual`).

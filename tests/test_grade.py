@@ -44,7 +44,7 @@ def test_model_class_matches_worked_examples(tmp_path, size, risk, expected_clas
     board = Board(tmp_path)
     tid = _card(board)
 
-    board.set_grade(tid, size=size, risk=risk)
+    board.set_grade(tid, sensitivity="internal", size=size, risk=risk)
 
     assert _grade(board, tid)["model_class"] == expected_class
 
@@ -86,7 +86,7 @@ def test_joule_bounty_defaults_to_none_when_not_supplied(tmp_path):
     board = Board(tmp_path)
     tid = _card(board)
 
-    board.set_grade(tid, size="S", risk="low")
+    board.set_grade(tid, sensitivity="internal", size="S", risk="low")
 
     assert _grade(board, tid)["joule_bounty"] is None
 
@@ -98,7 +98,7 @@ def test_risk_never_accepts_a_size_label(tmp_path):
     tid = _card(board)
 
     with pytest.raises(ValueError):
-        board.set_grade(tid, size="M", risk="XL")
+        board.set_grade(tid, sensitivity="internal", size="M", risk="XL")
 
 
 def test_set_grade_rejects_invalid_size(tmp_path):
@@ -106,7 +106,7 @@ def test_set_grade_rejects_invalid_size(tmp_path):
     tid = _card(board)
 
     with pytest.raises(ValueError):
-        board.set_grade(tid, size="huge", risk="low")
+        board.set_grade(tid, sensitivity="internal", size="huge", risk="low")
 
 
 def test_set_grade_rejects_invalid_sensitivity(tmp_path):
@@ -115,6 +115,31 @@ def test_set_grade_rejects_invalid_sensitivity(tmp_path):
 
     with pytest.raises(ValueError):
         board.set_grade(tid, size="M", risk="low", sensitivity="classified")
+
+
+def test_set_grade_requires_an_explicit_sensitivity(tmp_path):
+    """sensitivity must have NO default, ever.
+
+    It is a data-exposure gate, not an estimate. A default of "internal"
+    (ceiling 1) would let a card nobody classified leave sovereign hardware,
+    and the card most likely to arrive unclassified is the one built on
+    credential-bearing content. Omitting it must be a TypeError at the call
+    site, not a silent permissive choice.
+
+    This guards against the default being reintroduced for caller
+    convenience; it was present once and removed for exactly this reason.
+    """
+    board = Board(tmp_path)
+    tid = _card(board)
+
+    with pytest.raises(TypeError, match="sensitivity"):
+        board.set_grade(tid, size="M", risk="low")  # type: ignore[call-arg]
+
+    # and the signature itself carries no default, so nothing can supply one
+    import inspect
+
+    param = inspect.signature(Board.set_grade).parameters["sensitivity"]
+    assert param.default is inspect.Parameter.empty
 
 
 @pytest.mark.parametrize("bad_pool", ["privat", "internal", "PUBLIC", "", "public "])
@@ -126,17 +151,17 @@ def test_set_grade_rejects_invalid_pool(tmp_path, bad_pool):
     tid = _card(board)
 
     with pytest.raises(ValueError):
-        board.set_grade(tid, size="M", risk="low", pool=bad_pool)
+        board.set_grade(tid, sensitivity="internal", size="M", risk="low", pool=bad_pool)
 
 
 def test_set_grade_accepts_both_valid_pool_values(tmp_path):
     board = Board(tmp_path)
     tid = _card(board)
 
-    board.set_grade(tid, size="M", risk="low", pool="public")
+    board.set_grade(tid, sensitivity="internal", size="M", risk="low", pool="public")
     assert _grade(board, tid)["pool"] == "public"
 
-    board.set_grade(tid, size="M", risk="low", pool="private")
+    board.set_grade(tid, sensitivity="internal", size="M", risk="low", pool="private")
     assert _grade(board, tid)["pool"] == "private"
 
 
@@ -144,8 +169,8 @@ def test_regrade_replaces_in_place_rather_than_appending(tmp_path):
     board = Board(tmp_path)
     tid = _card(board)
 
-    board.set_grade(tid, size="S", risk="low", confidence=0.5)
-    board.set_grade(tid, size="XL", risk="crit", confidence=0.9)
+    board.set_grade(tid, sensitivity="internal", size="S", risk="low", confidence=0.5)
+    board.set_grade(tid, sensitivity="internal", size="XL", risk="crit", confidence=0.9)
 
     grade = _grade(board, tid)
     assert grade["size"] == "XL"
@@ -162,7 +187,7 @@ def test_grade_write_does_not_disturb_autopilot_sibling(tmp_path):
     tid = _card(board)
 
     board.score_task(tid, round=1, score=80, notes="baseline", harness="h1")
-    board.set_grade(tid, size="M", risk="med")
+    board.set_grade(tid, sensitivity="internal", size="M", risk="med")
 
     task = next(t for t in board.load_tasks() if t.id == tid)
     assert task.meta["autopilot"]["scores"][0]["notes"] == "baseline"
