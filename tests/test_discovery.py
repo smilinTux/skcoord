@@ -46,6 +46,10 @@ dead-thing.service          loaded failed   failed  Something broken
 TIMER_OUTPUT = """backup.timer                loaded active   waiting Nightly backup
 """
 
+NOT_FOUND_OUTPUT = """skgateway.service   loaded    active   running SKGateway router
+connman.service     not-found inactive dead    connman.service
+"""
+
 SHOW_OUTPUT = """Id=skgateway.service
 FragmentPath=/home/cbrd21/.config/systemd/user/skgateway.service
 
@@ -480,6 +484,14 @@ def test_fragment_lookup_names_units_explicitly_instead_of_globbing() -> None:
     assert show_calls, "a fragment lookup must happen"
     assert "*.service" not in show_calls[0], "globbing is what dropped the units"
     assert "dead-thing.service" in show_calls[0], "inactive units need classifying too"
+
+
+def test_not_found_units_are_not_assets() -> None:
+    """A unit some dependency references but nothing installed is a dangling
+    reference, not a configuration item."""
+    runner = FakeRunner(answers={"--type=service": NOT_FOUND_OUTPUT})
+    found = collect_systemd_units(runner, scopes=("--user",), kinds=("service",))
+    assert [c.name for c in found] == ["skgateway"]
 
 
 def test_systemd_origin_is_unknown_when_fragment_lookup_fails() -> None:

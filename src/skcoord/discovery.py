@@ -425,6 +425,11 @@ def collect_systemd_units(
                 match = _UNIT_RE.match(line.strip())
                 if not match or match.group("kind") != kind:
                     continue
+                if match.group("load") == "not-found":
+                    # Referenced by some dependency but not installed here.
+                    # A dangling reference is not an asset, and listing it as
+                    # one puts ~90 phantom services in the drift report.
+                    continue
                 rows.append(
                     (
                         match.group("unit"),
