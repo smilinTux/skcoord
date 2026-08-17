@@ -563,6 +563,10 @@ class Board:
         skcoord has no journal code, and the autopilot run journal is
         skharness-owned. The caller archives what it gets back, which keeps the
         "skcoord stores facts, skharness decides" split intact.
+
+        Touches ONLY ``attempts``. ``successes`` (below) is a SIBLING key and is
+        never read or written here: a success recorded on the same pass that
+        triggers this clear must survive it, not be destroyed by it.
         """
         removed: list[dict] = []
 
@@ -573,6 +577,63 @@ class Board:
 
         self._write_task_raw(task_id, _mutate)
         return removed
+
+    # -- cross-run SUCCESS memory (meta.autopilot.successes[]) -----------------
+    # A sibling of attempts[], deliberately a DIFFERENT key. clear_attempts above
+    # wipes attempts[] wholesale on every terminal pass, so a success stored
+    # there would be destroyed by the very event that created it. successes[]
+    # is never touched by clear_attempts and has no clear method of its own:
+    # nothing in this codebase forgets a success by wiping the card:
+    # forgetting for successes is a READER policy (skharness), same as failures.
+
+    def record_success(
+        self,
+        task_id: str,
+        run_id: str,
+        round: int,
+        outcome: str,
+        tried: str,
+        why_succeeded: str,
+        approach_hint: str = "",
+    ) -> Path:
+        """Record one distilled terminal PASS on a task (meta.autopilot.successes[]).
+
+        Mirrors record_attempt exactly (idempotency key, corruption cap, additive
+        write via _write_task_raw) except for the storage key and success-phrased
+        fields: raw logs stay in the run journal, which `run_id` points at.
+
+        Idempotent: a re-record of the same (run_id, outcome) replaces that entry
+        in place rather than appending a duplicate, so a retried finalize or a
+        crash-resume cannot double-count one success.
+
+        The trailing cap is a corruption guard, not the forgetting policy: the
+        reader (skharness build_prior_success_feedback) bounds what reaches a
+        prompt.
+        """
+
+        def _mutate(d: dict) -> None:
+            ap = d.setdefault("meta", {}).setdefault("autopilot", {})
+            successes = ap.setdefault("successes", [])
+            entry = {
+                "run_id": run_id,
+                "ts": _now_iso(),
+                "round": round,
+                "outcome": outcome,
+                "tried": tried,
+                "why_succeeded": why_succeeded,
+                "approach_hint": approach_hint,
+            }
+            for i, existing in enumerate(successes):
+                if (existing.get("run_id") == run_id
+                        and existing.get("outcome") == outcome):
+                    successes[i] = entry
+                    break
+            else:
+                successes.append(entry)
+            if len(successes) > self._MAX_ATTEMPTS:
+                successes[:] = successes[-self._MAX_ATTEMPTS:]
+
+        return self._write_task_raw(task_id, _mutate)
 
     def update_task(
         self,
