@@ -759,7 +759,22 @@ def parity_check(home: Path, open_drift_threshold: int = OPEN_DRIFT_THRESHOLD) -
     }
 
 
-def reconcile_from_legacy(home: Path, dry_run: bool = True) -> dict:
+def _would_uncomplete(diff: dict) -> bool:
+    """True when converging this diff onto legacy would move a card OUT of done.
+
+    ``diff`` maps field -> ``[legacy_value, store_value]``. Only status can
+    un-complete: the archived/reopen branch targets ``diff["status"][0]`` too,
+    so if status is absent the two sides already agree and nothing moves.
+    """
+    if "status" not in diff:
+        return False
+    legacy_status, store_status = diff["status"][0], diff["status"][1]
+    return store_status == Column.DONE.value and legacy_status != Column.DONE.value
+
+
+def reconcile_from_legacy(
+    home: Path, dry_run: bool = True, allow_uncomplete: bool = False
+) -> dict:
     """One-time repair: append corrective store events where the fold still
     diverges from the authoritative legacy board.
 
@@ -775,15 +790,34 @@ def reconcile_from_legacy(home: Path, dry_run: bool = True) -> dict:
 
     Additive and idempotent: pure appends, and a second run finds no diffs.
 
+    NEVER un-completes work. This routine converges the store ONTO legacy, a
+    premise that was safe before the Phase-4 read cutover and is not safe now:
+    the board is served FROM the store, so legacy is a projection that lags, and
+    a card completed in the store but not yet reflected in legacy looks
+    identical to real drift. Converging that card would move it out of ``done``
+    and the parity gate would go green BECAUSE the completion was destroyed.
+    Observed live on card b24c71b5 on 2026-08-17 (store had a real ``complete``
+    event; legacy still said ``ready``). So a card whose STORE state is ``done``
+    is skipped entirely, not partially converged, and reported for a human.
+    ``allow_uncomplete=True`` opts back in once a direction of authority is
+    decided (see card be8d5561).
+
     Returns:
-        dict: ``{"fixed": n}`` or ``{"would_fix": n}`` when dry_run.
+        dict: ``{"fixed": n}`` or ``{"would_fix": n}`` when dry_run, plus
+        ``{"skipped_uncomplete": [ids]}``.
     """
     par = parity_check(home)
     store = CardStore(home)
     count = 0
+    skipped: list[str] = []
     for m in par["mismatches"]:
         cid = m["id"]
         diff = m["diff"]
+        # Guard BEFORE building actions, so a done card is skipped whole rather
+        # than having its owner rewritten while its status is left alone.
+        if not allow_uncomplete and _would_uncomplete(diff):
+            skipped.append(cid)
+            continue
         actions: list[tuple[str, dict]] = []
         if "archived" in diff:
             legacy_archived = diff["archived"][0]
@@ -808,7 +842,8 @@ def reconcile_from_legacy(home: Path, dry_run: bool = True) -> dict:
             continue
         for action, payload in actions:
             store.append_event(cid, action, "reconcile", **payload)
-    return {"would_fix": count} if dry_run else {"fixed": count}
+    key = "would_fix" if dry_run else "fixed"
+    return {key: count, "skipped_uncomplete": skipped}
 
 
 # Column -> legacy coord status. Legacy has no 'review' state (its status is
