@@ -9,6 +9,43 @@ version (setuptools-scm); a release is cut by pushing a `v*` tag.
 ## [Unreleased]
 
 ### Added
+- **`skcoord.discovery`: CMDB discovery over declared and observed fleet state.**
+  `cmdb.seed_from_inventory()` hardcoded three hostnames and scraped the rest of
+  its service list out of ITIL incident `affected_services`, so the CMDB could
+  only ever describe the fleet someone had already typed into it: 48 CIs, none
+  from a scan. The new collectors read the sources we actually keep (fleet
+  objects, the service registry, agent homes) plus real machine state (systemd
+  services and timers, docker containers, listening sockets). A first live run
+  on `.158` found 442 CIs against the 48 stored.
+
+  Every `DiscoveredCI` records whether a fact was **declared** (a spec claims
+  it) or **observed** (a machine answered), because a CMDB fed only
+  declarations cannot tell you it is wrong. `drift()` is the report that only
+  exists because the two are kept apart: `declared_not_observed`,
+  `observed_not_declared`, `stored_not_discovered`.
+
+  Machine access goes through a `CommandRunner` (local or ssh), so the same
+  collectors run against a remote node and against canned output in a test.
+  `reconcile()` is additive only: it creates, updates attributes and
+  relationships, and reports CIs it no longer sees as orphans. It never
+  deletes, because a collector that silently failed would otherwise erase
+  inventory. Decision recorded in `adr/ADR-002-cmdb-canonical-store.md`.
+
+### Fixed
+- **Drift accused healthy services, three ways.** Getting the report from 372
+  findings down to 87 took three fixes, all of which had it crying wolf:
+  `merge()` collapsed declared and observed into one flag, so a service that
+  was both correctly declared *and* running came out looking undocumented;
+  only `.service` units were collected, so every fleet cronjob (a `.timer`) and
+  every `runtime: docker` service read as missing; and
+  `systemctl show '*.service'` matched only 78 of 211 loaded units, because the
+  glob expands against active units, leaving everything inactive-but-loaded
+  unclassified and reported. Units are now named explicitly in the lookup,
+  classified by `FragmentPath` so distro units are excluded, and `not-found`
+  units (referenced by a dependency, never installed) are dropped as the
+  dangling references they are. Origin stays three-valued: a failed lookup
+  marks a unit `unknown` and still reports it, so a broken lookup shows up as
+  noise rather than as a suspiciously clean report.
 - **Full SK_REPO_DOC_STANDARD doc set.** `SOP.md` (9 sections, architecture
   diagram, and an executed `docs-evidence` block of 10 hermetic drift checks),
   `CONTRIBUTING.md`, and `CODE_OF_CONDUCT.md`, plus a `docs-check` CI gate
