@@ -8,6 +8,29 @@ version (setuptools-scm); a release is cut by pushing a `v*` tag.
 
 ## [Unreleased]
 
+### Fixed
+- **`reconcile_from_legacy()` no longer un-completes work.** It converges the
+  store ONTO legacy, which was safe before the Phase-4 read cutover and is not
+  safe now: the board is served FROM the store, so legacy is a projection that
+  lags, and a card completed in the store but not yet reflected in legacy is
+  indistinguishable from real drift. Converging such a card moved it out of
+  `done`, and the parity gate then went green *because* the completion had been
+  destroyed. Observed live on card `b24c71b5` (2026-08-17), whose store held
+  `claim -> move -> complete` while legacy still said `ready`/`lumina`. Not
+  hypothetical and not manual: the parity soak runs `reconcile --apply` every
+  four hours, and card `70dad715` carries reconcile-written events dragging it
+  `ready -> backlog` twice across two days.
+
+  A card whose store state is `done` is now skipped **whole** and returned in
+  `skipped_uncomplete`, rather than partially converged. Rewriting its owner
+  while leaving its status alone would leave the card in a state neither side
+  ever held and still would not converge parity. `allow_uncomplete=True` opts
+  back in.
+
+  Deliberately interim. Which side is authoritative for status/owner after the
+  read cutover is a design decision (card `be8d5561`); un-completing work is not
+  something a drift-repair tool should do silently whichever way that lands.
+
 ### Added
 - **`skcoord.discovery`: CMDB discovery over declared and observed fleet state.**
   `cmdb.seed_from_inventory()` hardcoded three hostnames and scraped the rest of
