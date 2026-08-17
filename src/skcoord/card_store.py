@@ -699,6 +699,7 @@ def parity_check(home: Path, open_drift_threshold: int = OPEN_DRIFT_THRESHOLD) -
         }.get(status_value, status_value)
 
     mismatches: list[dict] = []
+    informational: list[dict] = []
     missing: list[str] = []
     matched = 0
     for cid, lc in legacy.items():
@@ -706,6 +707,9 @@ def parity_check(home: Path, open_drift_threshold: int = OPEN_DRIFT_THRESHOLD) -
         if sc is None:
             missing.append(cid)
             continue
+        # GATING diffs: state the mirror is supposed to keep in step, and that
+        # reconcile_from_legacy() can actually converge. A diff here means the
+        # mirror is genuinely broken.
         diff = {}
         if _bucket(lc.status.value) != _bucket(sc.status.value):
             diff["status"] = [lc.status.value, sc.status.value]
@@ -713,14 +717,31 @@ def parity_check(home: Path, open_drift_threshold: int = OPEN_DRIFT_THRESHOLD) -
             diff["owner"] = [lc.owner, sc.owner]
         if lc.archived != sc.archived:
             diff["archived"] = [lc.archived, sc.archived]
+
+        # INFORMATIONAL diffs: priority and swimlane are written STORE-ONLY by
+        # the dashboard, so legacy is the stale side by design and
+        # reconcile_from_legacy() deliberately refuses to touch them (see its
+        # docstring). Counting them as gate failures made the gate
+        # UNSATISFIABLE: it reported a drift class that no legitimate action
+        # could clear, so `parity --check` could sit red forever with nothing to
+        # do about it. A gate nobody can satisfy is a gate everybody learns to
+        # ignore, and then it is not a gate at all.
+        #
+        # They are still REPORTED, just not fatal. Removing a signal the tool
+        # knows is false is not the same as weakening the check; hiding it
+        # entirely would be.
+        info = {}
         if lc.priority != sc.priority:
-            diff["priority"] = [lc.priority, sc.priority]
+            info["priority"] = [lc.priority, sc.priority]
         if lc.swimlane != sc.swimlane:
-            diff["swimlane"] = [lc.swimlane, sc.swimlane]
+            info["swimlane"] = [lc.swimlane, sc.swimlane]
+
         if diff:
             mismatches.append({"id": cid, "diff": diff})
         else:
             matched += 1
+        if info:
+            informational.append({"id": cid, "diff": info})
     open_legacy = _open_count(legacy)
     open_store = _open_count(stored)
     open_drift = abs(open_legacy - open_store)
@@ -728,6 +749,7 @@ def parity_check(home: Path, open_drift_threshold: int = OPEN_DRIFT_THRESHOLD) -
         "checked": len(legacy),
         "matched": matched,
         "mismatches": mismatches,
+        "informational": informational,
         "missing": missing,
         "open_legacy": open_legacy,
         "open_store": open_store,
