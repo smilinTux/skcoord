@@ -356,19 +356,34 @@ def _classify_origin(fragment_path: str) -> str:
     return ORIGIN_OPERATOR
 
 
-def _fragment_paths(runner: CommandRunner, scope: str, pattern: str) -> dict[str, str]:
-    """Bulk Id -> FragmentPath for one scope, in a single systemctl call."""
-    stdout = runner.run(["systemctl", scope, "show", pattern, "-p", "Id", "-p", "FragmentPath", "--no-pager"])
-    if not stdout:
-        return {}
+_SHOW_CHUNK = 400
+
+
+def _fragment_paths(runner: CommandRunner, scope: str, units: Sequence[str]) -> dict[str, str]:
+    """Bulk Id -> FragmentPath for named units, in as few systemctl calls as possible.
+
+    The units are named explicitly rather than globbed. ``systemctl show
+    '*.service'`` only matched 78 of 211 loaded units on a real node, which
+    silently left two thirds of them unclassified and therefore reported as
+    drift. Chunked so a host with thousands of units cannot blow ARG_MAX.
+    """
     paths: dict[str, str] = {}
-    unit_id = ""
-    for line in stdout.splitlines():
-        if line.startswith("Id="):
-            unit_id = line[3:].strip()
-        elif line.startswith("FragmentPath=") and unit_id:
-            paths[unit_id] = line[len("FragmentPath="):].strip()
-            unit_id = ""
+    for start in range(0, len(units), _SHOW_CHUNK):
+        chunk = list(units[start : start + _SHOW_CHUNK])
+        if not chunk:
+            continue
+        stdout = runner.run(
+            ["systemctl", scope, "show", *chunk, "-p", "Id", "-p", "FragmentPath", "--no-pager"]
+        )
+        if not stdout:
+            continue
+        unit_id = ""
+        for line in stdout.splitlines():
+            if line.startswith("Id="):
+                unit_id = line[3:].strip()
+            elif line.startswith("FragmentPath=") and unit_id:
+                paths[unit_id] = line[len("FragmentPath=") :].strip()
+                unit_id = ""
     return paths
 
 
@@ -389,10 +404,7 @@ def collect_systemd_units(
     """
     out: list[DiscoveredCI] = []
     for scope in scopes:
-        paths: dict[str, str] = {}
-        for kind in kinds:
-            paths.update(_fragment_paths(runner, scope, f"*.{kind}"))
-
+        rows: list[tuple[str, str, str, str, str]] = []
         for kind in kinds:
             stdout = runner.run(
                 [
@@ -413,28 +425,40 @@ def collect_systemd_units(
                 match = _UNIT_RE.match(line.strip())
                 if not match or match.group("kind") != kind:
                     continue
-                unit = match.group("unit")
-                fragment = paths.get(f"{unit}.{kind}", "")
-                out.append(
-                    DiscoveredCI(
-                        ci_type=CIType.SERVICE.value,
-                        name=unit,
-                        source=f"systemd{scope}",
-                        observed=True,
-                        node=runner.host,
-                        attributes={
-                            "systemd_scope": scope.lstrip("-"),
-                            "systemd_kind": kind,
-                            "load_state": match.group("load"),
-                            "active_state": match.group("active"),
-                            "sub_state": match.group("sub"),
-                            "fragment_path": fragment,
-                            "origin": _classify_origin(fragment),
-                        },
-                        tags=("systemd", kind, DISCOVERED_TAG),
-                        relationships=(("runs_on", make_ci_id(CIType.HOST.value, runner.host)),),
+                rows.append(
+                    (
+                        match.group("unit"),
+                        kind,
+                        match.group("load"),
+                        match.group("active"),
+                        match.group("sub"),
                     )
                 )
+
+        paths = _fragment_paths(runner, scope, [f"{unit}.{kind}" for unit, kind, *_ in rows])
+
+        for unit, kind, load, active, sub in rows:
+            fragment = paths.get(f"{unit}.{kind}", "")
+            out.append(
+                DiscoveredCI(
+                    ci_type=CIType.SERVICE.value,
+                    name=unit,
+                    source=f"systemd{scope}",
+                    observed=True,
+                    node=runner.host,
+                    attributes={
+                        "systemd_scope": scope.lstrip("-"),
+                        "systemd_kind": kind,
+                        "load_state": load,
+                        "active_state": active,
+                        "sub_state": sub,
+                        "fragment_path": fragment,
+                        "origin": _classify_origin(fragment),
+                    },
+                    tags=("systemd", kind, DISCOVERED_TAG),
+                    relationships=(("runs_on", make_ci_id(CIType.HOST.value, runner.host)),),
+                )
+            )
     return out
 
 

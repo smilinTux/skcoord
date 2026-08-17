@@ -468,6 +468,20 @@ def test_systemd_collector_reads_timers_and_classifies_origin() -> None:
     assert by_name["skchat-daemon"].attributes["origin"] == ORIGIN_DISTRO
 
 
+def test_fragment_lookup_names_units_explicitly_instead_of_globbing() -> None:
+    """`systemctl show '*.service'` matched 78 of 211 real units, silently
+    leaving two thirds unclassified and reported as drift."""
+    runner = FakeRunner(
+        answers={"--type=service": SYSTEMD_OUTPUT, "show": SHOW_OUTPUT}
+    )
+    collect_systemd_units(runner, scopes=("--user",), kinds=("service",))
+
+    show_calls = [c for c in runner.calls if "show" in c]
+    assert show_calls, "a fragment lookup must happen"
+    assert "*.service" not in show_calls[0], "globbing is what dropped the units"
+    assert "dead-thing.service" in show_calls[0], "inactive units need classifying too"
+
+
 def test_systemd_origin_is_unknown_when_fragment_lookup_fails() -> None:
     runner = FakeRunner(answers={"--type=service": SYSTEMD_OUTPUT})
     found = collect_systemd_units(runner, scopes=("--user",), kinds=("service",))
