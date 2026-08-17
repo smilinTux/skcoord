@@ -8,19 +8,6 @@ version (setuptools-scm); a release is cut by pushing a `v*` tag.
 
 ## [Unreleased]
 
-### Fixed
-- **Ephemeral listening ports accreted as permanent CIs.** The port collector
-  recorded every socket in LISTEN, including the random high ports that RPC,
-  mDNS, tailscale and short-lived servers bind. The CMDB is append-only and the
-  reconcile cron runs every three hours, so each reboot's fresh set of high
-  ports would be created forever while the previous set turned into permanent
-  orphans. Observed on `.158`: 15 such CIs after a single day, one already
-  orphaned. Ports inside the host's ephemeral range are now skipped, and the
-  range is read from the host being scanned (`ip_local_port_range`) rather than
-  hardcoded, so a tuned node and a remote ssh scan both use the right bounds.
-  The skipped count is logged, because a host silently reporting fewer ports
-  than it has is the same failure as reporting none.
-
 ### Added
 - **`skcoord.discovery`: CMDB discovery over declared and observed fleet state.**
   `cmdb.seed_from_inventory()` hardcoded three hostnames and scraped the rest of
@@ -45,6 +32,17 @@ version (setuptools-scm); a release is cut by pushing a `v*` tag.
   inventory. Decision recorded in `adr/ADR-002-cmdb-canonical-store.md`.
 
 ### Fixed
+- **Ephemeral listening ports accreted as permanent CIs.** The port collector
+  recorded every socket in LISTEN, including the random high ports that RPC,
+  mDNS, tailscale and short-lived servers bind. The CMDB is append-only and the
+  reconcile cron runs every three hours, so each reboot's fresh set of high
+  ports would be created forever while the previous set turned into permanent
+  orphans. Observed on `.158`: 15 such CIs after a single day, one already
+  orphaned. Ports inside the host's ephemeral range are now skipped, and the
+  range is read from the host being scanned (`ip_local_port_range`) rather than
+  hardcoded, so a tuned node and a remote ssh scan both use the right bounds.
+  The skipped count is logged, because a host silently reporting fewer ports
+  than it has is the same failure as reporting none.
 - **Drift accused healthy services, three ways.** Getting the report from 372
   findings down to 87 took three fixes, all of which had it crying wolf:
   `merge()` collapsed declared and observed into one flag, so a service that
