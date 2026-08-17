@@ -64,24 +64,39 @@ class DiscoveredCI:
     attributes: dict = field(default_factory=dict)
     tags: tuple[str, ...] = ()
     relationships: tuple[tuple[str, str], ...] = ()
+    declared_flag: Optional[bool] = None
 
     @property
     def ci_id(self) -> str:
         return make_ci_id(self.ci_type, self.name)
+
+    @property
+    def declared(self) -> bool:
+        """Whether a spec claims this CI exists.
+
+        Kept separate from ``observed`` because the healthy case is *both*, and
+        a merge that collapsed them into one flag made every running,
+        correctly-declared service look undocumented.
+        """
+        return (not self.observed) if self.declared_flag is None else self.declared_flag
 
     def merged_with(self, other: "DiscoveredCI") -> "DiscoveredCI":
         """Fold another sighting of the same CI into this one.
 
         Observations win over declarations for the scalar fields; attributes
         and tags union, with the observed side taking precedence on conflict.
+        Both provenance flags survive: the result is declared *and* observed.
         """
-        primary, secondary = (other, self) if (other.observed and not self.observed) else (self, other)
+        primary, secondary = (
+            (other, self) if (other.observed and not self.observed) else (self, other)
+        )
         attributes = {**secondary.attributes, **primary.attributes}
         sources = sorted({*self.source.split("+"), *other.source.split("+")})
         return replace(
             primary,
             source="+".join(sources),
             observed=self.observed or other.observed,
+            declared_flag=self.declared or other.declared,
             node=primary.node or secondary.node,
             description=primary.description or secondary.description,
             attributes=attributes,
@@ -316,58 +331,150 @@ def collect_agents(home: Path) -> list[DiscoveredCI]:
 # Observed-state collectors (ask a machine)
 # ---------------------------------------------------------------------------
 
-_UNIT_RE = re.compile(r"^(?P<unit>[\w@:.\\-]+)\.service\s+(?P<load>\S+)\s+(?P<active>\S+)\s+(?P<sub>\S+)")
+_UNIT_RE = re.compile(
+    r"^(?P<unit>[\w@:.\\-]+)\.(?P<kind>service|timer)\s+(?P<load>\S+)\s+(?P<active>\S+)\s+(?P<sub>\S+)"
+)
+
+ORIGIN_OPERATOR = "operator"
+ORIGIN_DISTRO = "distro"
+ORIGIN_UNKNOWN = "unknown"
+
+_DISTRO_UNIT_DIRS = ("/usr/lib/systemd/", "/lib/systemd/", "/usr/local/lib/systemd/")
+
+
+def _classify_origin(fragment_path: str) -> str:
+    """Who authored this unit: the distro, or us.
+
+    A distro unit is not an asset anyone forgot to declare, so drift must not
+    report it. An operator-authored unit under /etc or ~/.config with no fleet
+    object behind it is exactly the thing worth knowing about.
+    """
+    if not fragment_path:
+        return ORIGIN_UNKNOWN
+    if any(d in fragment_path for d in _DISTRO_UNIT_DIRS):
+        return ORIGIN_DISTRO
+    return ORIGIN_OPERATOR
+
+
+def _fragment_paths(runner: CommandRunner, scope: str, pattern: str) -> dict[str, str]:
+    """Bulk Id -> FragmentPath for one scope, in a single systemctl call."""
+    stdout = runner.run(["systemctl", scope, "show", pattern, "-p", "Id", "-p", "FragmentPath", "--no-pager"])
+    if not stdout:
+        return {}
+    paths: dict[str, str] = {}
+    unit_id = ""
+    for line in stdout.splitlines():
+        if line.startswith("Id="):
+            unit_id = line[3:].strip()
+        elif line.startswith("FragmentPath=") and unit_id:
+            paths[unit_id] = line[len("FragmentPath="):].strip()
+            unit_id = ""
+    return paths
 
 
 def collect_systemd_units(
-    runner: CommandRunner, scopes: Sequence[str] = ("--user", "--system")
+    runner: CommandRunner,
+    scopes: Sequence[str] = ("--user", "--system"),
+    kinds: Sequence[str] = ("service", "timer"),
 ) -> list[DiscoveredCI]:
     """Service CIs for units actually loaded on ``runner``'s host.
 
     Both scopes are collected because the sk* fleet runs services under
     ``systemctl --user`` while the platform pieces they depend on are system
     units. Querying only one scope is how a node looks half-empty.
+
+    Timers matter as much as services: a fleet cronjob runs as a ``.timer``, so
+    a collector that only reads ``.service`` units reports every scheduled job
+    as missing.
     """
     out: list[DiscoveredCI] = []
     for scope in scopes:
-        stdout = runner.run(
-            [
-                "systemctl",
-                scope,
-                "list-units",
-                "--type=service",
-                "--all",
-                "--no-legend",
-                "--no-pager",
-                "--plain",
-            ]
-        )
-        if stdout is None:
-            logger.debug("systemd scope %s unavailable on %s", scope, runner.host)
-            continue
-        for line in stdout.splitlines():
-            match = _UNIT_RE.match(line.strip())
-            if not match:
-                continue
-            unit = match.group("unit")
-            active = match.group("active")
-            out.append(
-                DiscoveredCI(
-                    ci_type=CIType.SERVICE.value,
-                    name=unit,
-                    source=f"systemd{scope}",
-                    observed=True,
-                    node=runner.host,
-                    attributes={
-                        "systemd_scope": scope.lstrip("-"),
-                        "load_state": match.group("load"),
-                        "active_state": active,
-                        "sub_state": match.group("sub"),
-                    },
-                    tags=("systemd", DISCOVERED_TAG),
-                    relationships=(("runs_on", make_ci_id(CIType.HOST.value, runner.host)),),
-                )
+        paths: dict[str, str] = {}
+        for kind in kinds:
+            paths.update(_fragment_paths(runner, scope, f"*.{kind}"))
+
+        for kind in kinds:
+            stdout = runner.run(
+                [
+                    "systemctl",
+                    scope,
+                    "list-units",
+                    f"--type={kind}",
+                    "--all",
+                    "--no-legend",
+                    "--no-pager",
+                    "--plain",
+                ]
             )
+            if stdout is None:
+                logger.debug("systemd %s/%s unavailable on %s", scope, kind, runner.host)
+                continue
+            for line in stdout.splitlines():
+                match = _UNIT_RE.match(line.strip())
+                if not match or match.group("kind") != kind:
+                    continue
+                unit = match.group("unit")
+                fragment = paths.get(f"{unit}.{kind}", "")
+                out.append(
+                    DiscoveredCI(
+                        ci_type=CIType.SERVICE.value,
+                        name=unit,
+                        source=f"systemd{scope}",
+                        observed=True,
+                        node=runner.host,
+                        attributes={
+                            "systemd_scope": scope.lstrip("-"),
+                            "systemd_kind": kind,
+                            "load_state": match.group("load"),
+                            "active_state": match.group("active"),
+                            "sub_state": match.group("sub"),
+                            "fragment_path": fragment,
+                            "origin": _classify_origin(fragment),
+                        },
+                        tags=("systemd", kind, DISCOVERED_TAG),
+                        relationships=(("runs_on", make_ci_id(CIType.HOST.value, runner.host)),),
+                    )
+                )
+    return out
+
+
+def collect_docker_containers(runner: CommandRunner) -> list[DiscoveredCI]:
+    """Service CIs for running containers.
+
+    Several fleet services declare ``runtime: docker``. Without this collector
+    they are declared, never observed, and drift reports them as missing when
+    they are running perfectly well.
+    """
+    stdout = runner.run(
+        ["docker", "ps", "--format", "{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}"]
+    )
+    if not stdout:
+        return []
+    out: list[DiscoveredCI] = []
+    for line in stdout.splitlines():
+        parts = line.split("\t")
+        if not parts or not parts[0].strip():
+            continue
+        name = parts[0].strip()
+        attributes: dict[str, Any] = {"runtime": "docker", "origin": "container"}
+        if len(parts) > 1 and parts[1].strip():
+            attributes["image"] = parts[1].strip()
+        if len(parts) > 2 and parts[2].strip():
+            attributes["container_status"] = parts[2].strip()
+        if len(parts) > 3 and parts[3].strip():
+            attributes["container_ports"] = parts[3].strip()
+        out.append(
+            DiscoveredCI(
+                ci_type=CIType.SERVICE.value,
+                name=name,
+                source="docker",
+                observed=True,
+                node=runner.host,
+                attributes=attributes,
+                tags=("docker", DISCOVERED_TAG),
+                relationships=(("runs_on", make_ci_id(CIType.HOST.value, runner.host)),),
+            )
+        )
     return out
 
 
@@ -460,6 +567,7 @@ DECLARED_COLLECTORS: tuple[Callable[[Path], list[DiscoveredCI]], ...] = (
 OBSERVED_COLLECTORS: tuple[Callable[[CommandRunner], list[DiscoveredCI]], ...] = (
     collect_host_facts,
     collect_systemd_units,
+    collect_docker_containers,
     collect_listening_ports,
 )
 
@@ -612,37 +720,49 @@ def drift(discovered: Sequence[DiscoveredCI], mgr: Optional[CMDBManager] = None)
 
     * ``declared_not_observed`` -- a spec says this service exists and no
       machine is running it. The fleet is not what the manifest claims.
-    * ``observed_not_declared`` -- something is listening or running that no
-      spec mentions. Undocumented, and possibly unwanted.
+    * ``observed_not_declared`` -- something is running that no spec mentions.
+      Undocumented, and possibly unwanted. Distro-authored systemd units are
+      excluded: ``ModemManager.service`` is not an asset anyone forgot to
+      declare, and 300 of them bury the 20 findings that matter. Units whose
+      origin could not be determined are still reported, so a failed
+      ``FragmentPath`` lookup shows up as noise rather than as silence.
     * ``stored_not_discovered`` -- the CMDB holds a discovery-owned CI that no
       collector saw this pass. Usually a decommission nobody recorded.
     """
     findings: list[DriftFinding] = []
     services = [d for d in discovered if d.ci_type == CIType.SERVICE.value]
 
+    # Flags cover the merged case (one CI both declared and observed); the key
+    # sets cover records that never merged because their names differ, e.g. a
+    # spec saying "skgateway" against a unit called "skgateway.service".
     observed_names = {_service_key(d.name) for d in services if d.observed}
+    declared_names = {_service_key(d.name) for d in services if d.declared}
+
     for item in services:
-        if item.observed:
+        if item.observed or not item.declared:
             continue
         if _service_key(item.name) not in observed_names:
             findings.append(
                 DriftFinding(
                     item.ci_id,
                     "declared_not_observed",
-                    f"declared by {item.source}, no running unit matched",
+                    f"declared by {item.source}, no running unit, timer or container matched",
                 )
             )
 
-    declared_names = {_service_key(d.name) for d in services if not d.observed}
     for item in services:
-        if not item.observed:
+        if not item.observed or item.declared:
+            continue
+        if item.attributes.get("origin") == ORIGIN_DISTRO:
             continue
         if _service_key(item.name) not in declared_names:
             findings.append(
                 DriftFinding(
                     item.ci_id,
                     "observed_not_declared",
-                    f"running on {item.node or 'unknown'}, no fleet object or registry entry",
+                    f"running on {item.node or 'unknown'} "
+                    f"(origin={item.attributes.get('origin', ORIGIN_UNKNOWN)}), "
+                    "no fleet object or registry entry",
                 )
             )
 

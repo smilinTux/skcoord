@@ -16,8 +16,12 @@ import pytest
 from skcoord.cmdb import CIStatus, CIType, CMDBManager, make_ci_id
 from skcoord.discovery import (
     DISCOVERED_TAG,
+    ORIGIN_DISTRO,
+    ORIGIN_OPERATOR,
+    ORIGIN_UNKNOWN,
     DiscoveredCI,
     collect_agents,
+    collect_docker_containers,
     collect_fleet_objects,
     collect_host_facts,
     collect_listening_ports,
@@ -38,6 +42,24 @@ SYSTEMD_OUTPUT = """skgateway.service           loaded active   running SKGatewa
 skchat-daemon.service       loaded active   running SKChat daemon
 dead-thing.service          loaded failed   failed  Something broken
 """
+
+TIMER_OUTPUT = """backup.timer                loaded active   waiting Nightly backup
+"""
+
+SHOW_OUTPUT = """Id=skgateway.service
+FragmentPath=/home/cbrd21/.config/systemd/user/skgateway.service
+
+Id=skchat-daemon.service
+FragmentPath=/usr/lib/systemd/user/skchat-daemon.service
+
+Id=backup.timer
+FragmentPath=/home/cbrd21/.config/systemd/user/backup.timer
+"""
+
+DOCKER_OUTPUT = (
+    "skchat-coturn\tcoturn/coturn:4.6\tUp 9 days\t0.0.0.0:3478->3478/tcp\n"
+    "skmem-pg\t43fc80538777\tUp 9 days\t\n"
+)
 
 
 class FakeRunner:
@@ -221,6 +243,20 @@ def test_observation_beats_declaration_when_merging() -> None:
     assert ci.source == "fleet:service+systemd--user"
 
 
+def test_a_merged_ci_is_both_declared_and_observed() -> None:
+    """The healthy case. Collapsing this into one flag made every correctly
+    declared, running service look undocumented."""
+    folded = merge(
+        [
+            DiscoveredCI("service", "skgateway", "fleet:service"),
+            DiscoveredCI("service", "skgateway", "systemd--user", observed=True),
+        ]
+    )
+    assert folded[0].declared is True
+    assert folded[0].observed is True
+    assert drift(folded) == []
+
+
 def test_merge_is_order_independent() -> None:
     declared = DiscoveredCI("service", "x", "spec", attributes={"a": 1})
     observed = DiscoveredCI("service", "x", "live", observed=True, attributes={"a": 2})
@@ -363,6 +399,94 @@ def test_drift_matches_across_the_dot_service_suffix() -> None:
         DiscoveredCI("service", "skgateway.service", "systemd", observed=True),
     ]
     assert drift(found) == []
+
+
+def test_drift_ignores_distro_units_but_keeps_operator_ones() -> None:
+    """300 distro units must not bury the 20 findings that matter."""
+    found = [
+        DiscoveredCI(
+            "service", "ModemManager", "systemd--system", observed=True,
+            attributes={"origin": ORIGIN_DISTRO},
+        ),
+        DiscoveredCI(
+            "service", "my-cron-hack", "systemd--user", observed=True,
+            attributes={"origin": ORIGIN_OPERATOR},
+        ),
+    ]
+    findings = drift(found)
+    assert [f.ci_id for f in findings] == [make_ci_id("service", "my-cron-hack")]
+
+
+def test_drift_reports_unknown_origin_rather_than_hiding_it() -> None:
+    """If FragmentPath lookup fails, that must be loud, not silently clean."""
+    found = [
+        DiscoveredCI(
+            "service", "mystery", "systemd--user", observed=True,
+            attributes={"origin": ORIGIN_UNKNOWN},
+        )
+    ]
+    assert [f.kind for f in drift(found)] == ["observed_not_declared"]
+
+
+def test_drift_does_not_flag_a_declared_service_running_as_a_container() -> None:
+    """capauth-keystore is runtime: docker. It is not missing."""
+    found = merge(
+        [
+            DiscoveredCI("service", "capauth-keystore", "fleet:service"),
+            DiscoveredCI("service", "capauth-keystore", "docker", observed=True),
+        ]
+    )
+    assert drift(found) == []
+
+
+def test_drift_does_not_flag_a_declared_cronjob_running_as_a_timer() -> None:
+    """A fleet cronjob runs as a .timer, not a .service."""
+    found = [
+        DiscoveredCI("service", "capauth-custody-doctor", "fleet:cronjob"),
+        DiscoveredCI(
+            "service", "capauth-custody-doctor", "systemd--user", observed=True,
+            attributes={"origin": ORIGIN_OPERATOR, "systemd_kind": "timer"},
+        ),
+    ]
+    assert drift(merge(found)) == []
+
+
+def test_systemd_collector_reads_timers_and_classifies_origin() -> None:
+    runner = FakeRunner(
+        answers={
+            "--type=service": SYSTEMD_OUTPUT,
+            "--type=timer": TIMER_OUTPUT,
+            "show": SHOW_OUTPUT,
+        }
+    )
+    found = collect_systemd_units(runner, scopes=("--user",))
+
+    by_name = {c.name: c for c in found}
+    assert "backup" in by_name, "timers are assets too"
+    assert by_name["backup"].attributes["systemd_kind"] == "timer"
+    assert by_name["skgateway"].attributes["origin"] == ORIGIN_OPERATOR
+    assert by_name["skchat-daemon"].attributes["origin"] == ORIGIN_DISTRO
+
+
+def test_systemd_origin_is_unknown_when_fragment_lookup_fails() -> None:
+    runner = FakeRunner(answers={"--type=service": SYSTEMD_OUTPUT})
+    found = collect_systemd_units(runner, scopes=("--user",), kinds=("service",))
+    assert {c.attributes["origin"] for c in found} == {ORIGIN_UNKNOWN}
+
+
+def test_docker_containers_are_observed_services() -> None:
+    runner = FakeRunner(answers={"docker": DOCKER_OUTPUT})
+    found = collect_docker_containers(runner)
+
+    by_name = {c.name: c for c in found}
+    assert set(by_name) == {"skchat-coturn", "skmem-pg"}
+    assert by_name["skchat-coturn"].attributes["image"] == "coturn/coturn:4.6"
+    assert by_name["skmem-pg"].attributes["origin"] == "container"
+    assert all(c.observed for c in found)
+
+
+def test_docker_collector_is_empty_without_docker() -> None:
+    assert collect_docker_containers(FakeRunner(answers={})) == []
 
 
 def test_drift_reports_stored_cis_no_collector_saw(tmp_path: Path) -> None:
