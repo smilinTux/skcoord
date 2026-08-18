@@ -253,6 +253,12 @@ class CMDBManager:
         Creates host CIs for the known nodes, agent CIs, and a service CI for
         every service referenced by an ITIL incident, wiring services to run on
         their host and reflecting current incident status as CI health.
+
+        Status note (CMDB-6): CIStatus derived here from incident severity is a
+        legacy fallback. Once discovery-owned (tagged ``discovered``), a CI's
+        status is owned by :func:`skcoord.discovery.reconcile`, which derives it
+        from the observed systemd state and overrides incident-derived health.
+        Precedence: observed state > ITIL incident health on the CIStatus field.
         """
         hosts = {
             "noroc2027": {"desc": ".158 primary / dev source-of-truth", "ip": "192.168.0.158"},

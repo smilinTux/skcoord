@@ -415,6 +415,99 @@ def test_reconcile_skips_already_retired_orphans(tmp_path: Path) -> None:
     assert reconcile(mgr, [], apply=True).orphans == []
 
 
+def _service(name: str, active_state: str, **kw) -> DiscoveredCI:
+    attrs = {"active_state": active_state}
+    attrs.update(kw.pop("attributes", {}))
+    return DiscoveredCI(
+        "service",
+        name,
+        "systemd",
+        observed=True,
+        attributes=attrs,
+        tags=(DISCOVERED_TAG,),
+        **kw,
+    )
+
+
+def test_reconcile_derives_operational_from_active_state(tmp_path: Path) -> None:
+    """CMDB-6: a discovery-owned CI that reads degraded while observed active
+    must be corrected to operational on the next reconcile."""
+    mgr = CMDBManager(tmp_path)
+    ci_id = make_ci_id("service", "skgateway")
+    mgr.create_ci("skgateway", "service", tags=[DISCOVERED_TAG])
+    mgr.set_status(ci_id, "cmdb-seed", CIStatus.DEGRADED.value, note="from incident health")
+
+    report = reconcile(mgr, [_service("skgateway", "active")], apply=True)
+
+    assert "status" in report.updated[ci_id]
+    assert mgr.get_ci(ci_id).status == CIStatus.OPERATIONAL.value
+
+
+def test_reconcile_derives_down_from_failed_state(tmp_path: Path) -> None:
+    mgr = CMDBManager(tmp_path)
+    ci_id = make_ci_id("service", "skgateway")
+    mgr.create_ci("skgateway", "service", tags=[DISCOVERED_TAG])
+
+    report = reconcile(mgr, [_service("skgateway", "failed")], apply=True)
+
+    assert "status" in report.updated[ci_id]
+    assert mgr.get_ci(ci_id).status == CIStatus.DOWN.value
+
+
+def test_reconcile_status_changes_listed_as_status_not_attribute(tmp_path: Path) -> None:
+    mgr = CMDBManager(tmp_path)
+    ci_id = make_ci_id("service", "skchat")
+    mgr.create_ci("skchat", "service", tags=[DISCOVERED_TAG])
+    mgr.set_status(ci_id, "cmdb-seed", CIStatus.DEGRADED.value)
+
+    before = [_service("skchat", "active", attributes={"active_state": "inactive"})]
+    reconcile(mgr, before, apply=True)
+
+    after = [_service("skchat", "active")]
+    report = reconcile(mgr, after, apply=True)
+
+    assert report.updated[ci_id] == ["status", "active_state"]
+
+
+def test_reconcile_does_not_force_status_for_inactive_state(tmp_path: Path) -> None:
+    """inactive is ambiguous (oneshots, timers); existing status is left alone."""
+    mgr = CMDBManager(tmp_path)
+    ci_id = make_ci_id("service", "nightly")
+    mgr.create_ci("nightly", "service", tags=[DISCOVERED_TAG])
+    mgr.set_status(ci_id, "cmdb-seed", CIStatus.OPERATIONAL.value)
+
+    report = reconcile(mgr, [_service("nightly", "inactive")], apply=True)
+
+    assert "status" not in [k for v in report.updated.values() for k in v]
+    assert mgr.get_ci(ci_id).status == CIStatus.OPERATIONAL.value
+
+
+def test_reconcile_never_un_retires_a_ci(tmp_path: Path) -> None:
+    mgr = CMDBManager(tmp_path)
+    ci_id = make_ci_id("service", "gone")
+    mgr.create_ci("gone", "service", tags=[DISCOVERED_TAG])
+    mgr.set_status(ci_id, "op", CIStatus.RETIRED.value)
+
+    report = reconcile(mgr, [_service("gone", "active")], apply=True)
+
+    assert "status" not in [k for v in report.updated.values() for k in v]
+    assert mgr.get_ci(ci_id).status == CIStatus.RETIRED.value
+
+
+def test_reconcile_does_not_force_status_for_declared_only(tmp_path: Path) -> None:
+    """Declarations carry no observed health; status stays untouched."""
+    mgr = CMDBManager(tmp_path)
+    ci_id = make_ci_id("service", "skchat")
+    mgr.create_ci("skchat", "service", tags=[DISCOVERED_TAG])
+    mgr.set_status(ci_id, "cmdb-seed", CIStatus.DEGRADED.value)
+
+    declared = DiscoveredCI("service", "skchat", "fleet:service", tags=(DISCOVERED_TAG,))
+    report = reconcile(mgr, [declared], apply=True)
+
+    assert "status" not in [k for v in report.updated.values() for k in v]
+    assert mgr.get_ci(ci_id).status == CIStatus.DEGRADED.value
+
+
 # ── drift ─────────────────────────────────────────────────────────────────
 
 

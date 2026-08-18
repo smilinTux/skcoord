@@ -707,6 +707,28 @@ class ReconcileReport:
         }
 
 
+def _observed_status(item: DiscoveredCI) -> Optional[str]:
+    """CIStatus a collector's observation implies, or None.
+
+    Precedence rule (written down, CMDB-6): for discovery-owned CIs the
+    observed systemd state IS the health. ``active_state=active`` reads
+    operational, ``failed`` reads down. Every other systemd state (inactive,
+    activating, ...) is ambiguous in service terms (a oneshot or timer is
+    legitimately inactive), so we do not force a status for it and leave any
+    existing value alone. ITIL incident severity is informational and is
+    surfaced via ``impact_analysis().open_incidents``; it never overrides an
+    observed state on the CIStatus field.
+    """
+    if not item.observed or item.ci_type != CIType.SERVICE.value:
+        return None
+    state = item.attributes.get("active_state")
+    if state == "active":
+        return CIStatus.OPERATIONAL.value
+    if state == "failed":
+        return CIStatus.DOWN.value
+    return None
+
+
 def reconcile(
     mgr: CMDBManager,
     discovered: Sequence[DiscoveredCI],
@@ -718,6 +740,12 @@ def reconcile(
     Nothing is deleted, ever. A CI that discovery no longer sees is reported as
     an orphan and left alone: the store is event-sourced and shared, so a
     collector that silently failed must not be able to erase inventory.
+
+    Status precedence (CMDB-6): CIStatus on a discovery-owned CI is derived
+    from the observed state, so a CI can never read ``degraded`` while its own
+    ``active_state`` attribute says ``active``. An ITIL incident's severity is
+    its own signal (see ``impact_analysis``); it does not get folded into the
+    headline CIStatus. A manually retired CI is never un-retired by reconcile.
     """
     report = ReconcileReport(applied=apply)
     by_id = {d.ci_id: d for d in discovered}
@@ -726,7 +754,11 @@ def reconcile(
 
     for ci_id, item in by_id.items():
         current = existing.get(ci_id)
+        derived_status = _observed_status(item)
         if current is None:
+            # A brand-new CI has no status events yet; core.json defaults to
+            # operational. Only an explicit DOWN/Failed write is needed, and only
+            # for observed discoveries.
             report.created.append(ci_id)
             if apply:
                 mgr.create_ci(
@@ -738,6 +770,10 @@ def reconcile(
                     tags=list(item.tags),
                     ci_id=ci_id,
                 )
+                if derived_status and derived_status != CIStatus.OPERATIONAL.value:
+                    mgr.set_status(
+                        ci_id, agent, derived_status, note="from observed active_state"
+                    )
                 for rel_type, target in item.relationships:
                     mgr.add_relationship(ci_id, agent, rel_type, target)
             continue
@@ -752,14 +788,24 @@ def reconcile(
             for rel_type, target in item.relationships
             if not any(r.rel_type == rel_type and r.target == target for r in current.relationships)
         ]
-        if not changed and not missing_rels:
+        status_changes = (
+            derived_status is not None
+            and current.status != CIStatus.RETIRED.value
+            and current.status != derived_status
+        )
+        if not changed and not missing_rels and not status_changes:
             report.unchanged.append(ci_id)
             continue
 
-        report.updated[ci_id] = sorted(changed) + [f"{r}->{t}" for r, t in missing_rels]
+        report_changes = sorted(changed)
+        if status_changes:
+            report_changes = ["status"] + report_changes
+        report.updated[ci_id] = report_changes + [f"{r}->{t}" for r, t in missing_rels]
         if apply:
             for key in changed:
                 mgr.set_attribute(ci_id, agent, key, item.attributes[key])
+            if status_changes:
+                mgr.set_status(ci_id, agent, derived_status, note="from observed active_state")
             for rel_type, target in missing_rels:
                 mgr.add_relationship(ci_id, agent, rel_type, target)
 

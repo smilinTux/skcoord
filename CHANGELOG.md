@@ -9,6 +9,18 @@ version (setuptools-scm); a release is cut by pushing a `v*` tag.
 ## [Unreleased]
 
 ### Fixed
+- **CMDB reconcile now derives CIStatus from observed state.** Discovery-owned
+  CIs could read `degraded` on the headline status field while their own
+  `active_state` attribute said `active`, because `seed_from_inventory` derived
+  status from open ITIL incident severity and `reconcile` only wrote attributes
+  and relationships. Deployed via the same path as the incident version.
+
+  Precedence rule (CMDB-6): observed systemd state is authoritative for
+  discovery-owned CIs. `active_state=active` reads operational, `failed` reads
+  down; inactive/activating are ambiguous (oneshots, timers), so no status is
+  forced and any existing value is left alone. ITIL incident severity stays
+  informational via `impact_analysis` and never overrides an observed state on
+  the CIStatus field. A manually retired CI is never un-retired by reconcile.
 - **`reconcile_from_legacy()` no longer un-completes work.** It converges the
   store ONTO legacy, which was safe before the Phase-4 read cutover and is not
   safe now: the board is served FROM the store, so legacy is a projection that
