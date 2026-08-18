@@ -46,6 +46,14 @@ dead-thing.service          loaded failed   failed  Something broken
 TIMER_OUTPUT = """backup.timer                loaded active   waiting Nightly backup
 """
 
+# 443 and 18991 are stable services; 40123 and 55281 are random high ports of
+# the kind that change on every reboot.
+SS_EPHEMERAL_OUTPUT = """LISTEN 0      4096                       0.0.0.0:443   0.0.0.0:*
+LISTEN 0      4096                     127.0.0.1:18991 0.0.0.0:*
+LISTEN 0      4096                       0.0.0.0:40123 0.0.0.0:*
+LISTEN 0      4096                          [::]:55281 [::]:*
+"""
+
 NOT_FOUND_OUTPUT = """skgateway.service   loaded    active   running SKGateway router
 connman.service     not-found inactive dead    connman.service
 """
@@ -191,6 +199,36 @@ def test_listening_ports_parse_bind_port_and_process() -> None:
     assert ports[9400].attributes["process"] == "skcapstone"
     assert ports[53].attributes["bind"] == "127.0.0.53%lo"
     assert all(c.observed for c in found)
+
+
+def test_ephemeral_ports_are_skipped_so_the_cmdb_cannot_grow_without_bound() -> None:
+    """The store is append-only and the scan runs every 3h. Random high ports
+    would accrete forever, each reboot's set orphaning the last."""
+    runner = FakeRunner(answers={"ss": SS_EPHEMERAL_OUTPUT, "ip_local_port_range": "32768\t60999\n"})
+    found = collect_listening_ports(runner)
+
+    ports = {c.attributes["port"] for c in found}
+    assert ports == {443, 18991}, "only stable ports become assets"
+
+
+def test_ephemeral_range_is_read_from_the_host_not_hardcoded() -> None:
+    """A tuned node moves the range, and a remote scan must use the REMOTE
+    host's range, not this machine's."""
+    runner = FakeRunner(
+        answers={"ss": SS_EPHEMERAL_OUTPUT, "ip_local_port_range": "18000\t19000\n"}
+    )
+    found = collect_listening_ports(runner)
+
+    ports = {c.attributes["port"] for c in found}
+    assert 18991 not in ports, "18991 is ephemeral on THIS host's tuned range"
+    assert 443 in ports
+    assert 40123 in ports, "outside the tuned range, so no longer ephemeral"
+
+
+def test_ephemeral_range_falls_back_when_the_host_will_not_say() -> None:
+    runner = FakeRunner(answers={"ss": SS_EPHEMERAL_OUTPUT})
+    ports = {c.attributes["port"] for c in collect_listening_ports(runner)}
+    assert ports == {443, 18991}
 
 
 def test_observed_collectors_return_nothing_when_the_host_is_unreachable() -> None:

@@ -512,18 +512,47 @@ _SS_RE = re.compile(r"^\S+\s+\S+\s+\S+\s+(?P<local>\S+)\s+\S+(?:\s+(?P<extra>.*)
 _PROC_RE = re.compile(r'users:\(\("(?P<proc>[^"]+)"')
 
 
+_FALLBACK_EPHEMERAL = (32768, 60999)
+
+
+def _ephemeral_range(runner: CommandRunner) -> tuple[int, int]:
+    """The host's ephemeral port range, read from the host itself.
+
+    Read rather than hardcoded because a tuned node moves it, and the range is
+    asked of ``runner`` so a remote scan uses the remote host's range instead
+    of this one's.
+    """
+    stdout = runner.run(["cat", "/proc/sys/net/ipv4/ip_local_port_range"])
+    if stdout:
+        parts = stdout.split()
+        if len(parts) == 2 and all(p.isdigit() for p in parts):
+            return int(parts[0]), int(parts[1])
+    return _FALLBACK_EPHEMERAL
+
+
 def collect_listening_ports(runner: CommandRunner) -> list[DiscoveredCI]:
     """Port CIs for TCP sockets in LISTEN on ``runner``'s host.
 
     This is the collector that catches the service nobody declared: a port open
     with no matching fleet object is either undocumented infrastructure or
     something that should not be running.
+
+    Ports inside the host's ephemeral range are skipped. A listener there is
+    transient by definition (RPC, mDNS, tailscale, a short-lived python
+    server), and the CMDB is append-only: at one scan every three hours, each
+    reboot's fresh set of random high ports would accrete as permanent CIs
+    forever while the previous set turned into permanent orphans. The count of
+    skipped ports is logged rather than dropped in silence, so this reads as a
+    deliberate exclusion and not as a host with fewer ports than it has.
     """
     stdout = runner.run(["ss", "-tlnpH"])
     if stdout is None:
         stdout = runner.run(["ss", "-tlnH"])
     if stdout is None:
         return []
+
+    lo, hi = _ephemeral_range(runner)
+    skipped = 0
 
     out: list[DiscoveredCI] = []
     seen: set[str] = set()
@@ -534,6 +563,9 @@ def collect_listening_ports(runner: CommandRunner) -> list[DiscoveredCI]:
         local = match.group("local")
         _, _, port = local.rpartition(":")
         if not port.isdigit():
+            continue
+        if lo <= int(port) <= hi:
+            skipped += 1
             continue
         bind = local[: -(len(port) + 1)] or "*"
         name = f"{runner.host}:{port}"
@@ -555,6 +587,14 @@ def collect_listening_ports(runner: CommandRunner) -> list[DiscoveredCI]:
                 tags=("port", DISCOVERED_TAG),
                 relationships=(("runs_on", make_ci_id(CIType.HOST.value, runner.host)),),
             )
+        )
+    if skipped:
+        logger.info(
+            "%s: skipped %d listening port(s) in the ephemeral range %d-%d",
+            runner.host,
+            skipped,
+            lo,
+            hi,
         )
     return out
 
