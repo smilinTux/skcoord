@@ -4,11 +4,22 @@ All notable changes to `skcoord` are documented here.
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning: [SemVer](https://semver.org/spec/v2.0.0.html). The git tag IS the
-version (setuptools-scm); a release is cut by pushing a `v*` tag.
+version (setuptools-scm); a push to `main` cuts the next patch tag (see
+`.github/workflows/publish.yml`), and pushing a `v*` tag directly releases it.
 
 ## [Unreleased]
 
 ### Fixed
+- **The release model in `publish.yml` matches what the repo documents (CMDB-7).**
+  PR #4 switched the trigger to tags-only but left the `tag` job in place — and
+  that job only runs on a push to `main` — so the documented "a push to the
+  default branch cuts the next patch tag" model (pyproject, this file) was dead
+  code: merging to main no longer released anything, which is how the #14 merge
+  sat unpublished on 2026-08-17. The main branch is back in the trigger, and
+  `pypi-publish` now runs only on the tag-push path, so a main push cuts the
+  tag and verifies the build (twine check) while exactly one run — the tag
+  push it creates, or a manually pushed tag — uploads to PyPI. No more dead
+  job, no more double-upload race, and the docs are true again.
 - **CMDB reconcile now derives CIStatus from observed state.** Discovery-owned
   CIs could read `degraded` on the headline status field while their own
   `active_state` attribute said `active`, because `seed_from_inventory` derived
