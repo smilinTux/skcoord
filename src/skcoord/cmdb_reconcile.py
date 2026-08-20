@@ -231,6 +231,19 @@ class NormalizedDrift:
     evidence: str
 
 
+@dataclass(frozen=True)
+class ScanHealthEvent:
+    """Collector failure signal, deliberately separate from asset drift."""
+
+    event_type: str
+    dedup_key: str
+    scan_id: str
+    target: str
+    collector: str
+    failure: str
+    evidence: str
+
+
 def normalize_drift(
     findings: Sequence[DriftFinding], scan_id: str, complete: bool, evidence: str
 ) -> list[NormalizedDrift]:
@@ -256,6 +269,25 @@ def normalize_drift(
             evidence,
         )
     return sorted(deduped.values(), key=lambda item: (item.severity, item.ci_id, item.kind))
+
+
+def scan_health_events(result: ScanResult, scan_id: str, evidence: str) -> list[ScanHealthEvent]:
+    """Translate collector failures into a normalized health-event seam."""
+    failures: list[tuple[str, str, str]] = []
+    failures.extend(
+        ("declared", item.partition(":")[0], item) for item in result.declared_failures
+    )
+    for target in result.targets:
+        for item in target.failures:
+            collector, _, failure = item.partition(":")
+            failures.append((target.host, collector, failure or item))
+    events = {}
+    for target, collector, failure in failures:
+        key = hashlib.sha256(f"{target}\0{collector}\0{failure}".encode()).hexdigest()
+        events[key] = ScanHealthEvent(
+            "cmdb.scan_health", key, scan_id, target, collector, failure, evidence
+        )
+    return sorted(events.values(), key=lambda item: (item.target, item.collector, item.failure))
 
 
 def apply_retirement_lifecycle(
@@ -376,6 +408,7 @@ def run_reconcile(
     apply: bool = False,
     code_version: str = "unknown",
     config_version: str = "unknown",
+    lifecycle_actions: Sequence[dict] = (),
 ) -> tuple[dict, list[NormalizedDrift]]:
     """Reconcile one scan and construct its durable operator-facing record."""
     scan_id, started = str(uuid.uuid4()), _now()
@@ -385,6 +418,10 @@ def run_reconcile(
         drift(scan_result.discovered, mgr), scan_id, scan_result.complete, evidence
     )
     ended = _now()
+    retired = sorted(item["ci_id"] for item in lifecycle_actions if item.get("action") == "retire")
+    report_data = report.as_dict()
+    report_data["retired"] = retired
+    report_data["counts"]["retired"] = len(retired)
     artifact = {
         "scan_id": scan_id,
         "started_at": started.isoformat(),
@@ -394,7 +431,7 @@ def run_reconcile(
         "code_version": code_version,
         "config_version": config_version,
         "completeness": scan_result.completeness(),
-        "reconcile": report.as_dict(),
+        "reconcile": report_data,
         "drift": {
             "count": len(normalized),
             "by_severity": {
@@ -403,6 +440,7 @@ def run_reconcile(
             },
         },
         "collector_health": {
+            "event_count": len(scan_health_events(scan_result, scan_id, evidence)),
             "declared_failures": scan_result.declared_failures,
             "targets": [
                 {**asdict(item), "findings": len(item.findings), "complete": item.complete}
