@@ -8,10 +8,12 @@ import pytest
 from skcoord.cmdb import CIType, make_ci_id
 from skcoord.infrastructure_discovery import (
     ProbeResult,
+    ProxmoxTransportPolicy,
     SecureSSHRunner,
     SKVaultCredentialResolver,
     collect_network_fingerprints,
     collect_proxmox_inventory,
+    normalize_host,
 )
 
 
@@ -24,7 +26,7 @@ class FixtureProbe:
         with self.lock:
             self.calls.append((host, port, timeout))
         if (host, port) == ("192.0.2.1", 22):
-            return ProbeResult(banner=b"SSH-2.0-fixture-secret-looking-banner", service="ssh")
+            return ProbeResult(banner=b"SSH-2.0-fixture-secret-looking-banner", service="ssh\nspoof")
         if port == 443:
             return ProbeResult(service="tls")
         return None
@@ -39,8 +41,10 @@ def test_network_collector_is_bounded_deterministic_and_drops_raw_banners() -> N
     assert [ci.name for ci in found] == ["192.0.2.1:22", "192.0.2.1:443", "192.0.2.2:443"]
     assert len(transport.calls) == 4
     ssh = found[0]
-    assert ssh.observed and ssh.attributes["service_hint"] == "ssh"
+    assert ssh.observed and ssh.attributes["service_hint"] == "sshspoof"
     assert ssh.attributes["banner_bytes"] == len(b"SSH-2.0-fixture-secret-looking-banner")
+    assert ssh.attributes["banner_bytes_hashed"] == ssh.attributes["banner_bytes"]
+    assert not ssh.attributes["banner_truncated"]
     assert "banner" not in ssh.attributes
     assert "secret-looking" not in repr(ssh)
 
@@ -63,6 +67,7 @@ def test_network_collector_rejects_bad_limits_and_ports() -> None:
 
 class FixtureProxmox:
     def __init__(self) -> None:
+        self.policy = ProxmoxTransportPolicy(timeout_seconds=5, max_rows=100)
         self.calls: list[str] = []
         self.data = {
             "/nodes": {"data": [{"node": "pve1", "status": "online", "maxcpu": 16}]},
@@ -94,6 +99,27 @@ def test_proxmox_collector_uses_injected_transport_and_builds_relationships() ->
     assert next(ci for ci in found if ci.name == "api-vm").attributes["virtualization"] == "qemu"
 
 
+def test_proxmox_collector_requires_policy_and_bounds_responses() -> None:
+    api = FixtureProxmox()
+    api.policy = ProxmoxTransportPolicy(max_rows=1)
+    api.data["/nodes"] = {"data": [{"node": "pve1"}, {"node": "pve2"}]}
+    with pytest.raises(ValueError, match="max_rows"):
+        collect_proxmox_inventory(api)
+    with pytest.raises(ValueError, match="verify TLS"):
+        ProxmoxTransportPolicy(tls_verified=False)
+
+
+@pytest.mark.parametrize("value", ["-oProxyCommand=evil", "bad host", "host\nname", "a..b"])
+def test_normalize_host_rejects_ambiguous_or_option_values(value: str) -> None:
+    with pytest.raises(ValueError, match="host"):
+        normalize_host(value)
+
+
+def test_normalize_host_canonicalizes_names_and_addresses() -> None:
+    assert normalize_host("PVE1.Internal.") == "pve1.internal"
+    assert normalize_host("2001:0db8::1") == "2001:db8::1"
+
+
 class FixtureVault:
     def __init__(self, record):
         self.record = record
@@ -110,6 +136,7 @@ def test_vault_resolver_and_ssh_runner_enforce_strict_host_keys(tmp_path: Path) 
     identity.write_text("fixture key path; not a real key")
     identity.chmod(0o600)
     known_hosts.write_text("pve1 fixture-host-key")
+    known_hosts.chmod(0o600)
     vault = FixtureVault(
         {
             "username": "collector",
@@ -160,6 +187,7 @@ def test_ssh_runner_rejects_host_option_injection(tmp_path: Path) -> None:
     known_hosts = tmp_path / "known_hosts"
     identity.touch(mode=0o600)
     known_hosts.touch()
+    known_hosts.chmod(0o600)
     credential = SKVaultCredentialResolver(
         FixtureVault(
             {
@@ -171,3 +199,37 @@ def test_ssh_runner_rejects_host_option_injection(tmp_path: Path) -> None:
     ).resolve("skvault://cmdb/test")
     with pytest.raises(ValueError, match="host"):
         SecureSSHRunner("-oProxyCommand=evil", credential)
+
+
+def test_vault_resolver_rejects_symlink_and_writable_known_hosts(tmp_path: Path) -> None:
+    identity = tmp_path / "id"
+    identity.touch(mode=0o600)
+    real_known_hosts = tmp_path / "known_hosts.real"
+    real_known_hosts.touch(mode=0o600)
+    known_hosts = tmp_path / "known_hosts"
+    known_hosts.symlink_to(real_known_hosts)
+    record = {
+        "username": "root",
+        "identity_file": str(identity),
+        "known_hosts_file": str(known_hosts),
+    }
+    with pytest.raises(ValueError, match="non-symlink"):
+        SKVaultCredentialResolver(FixtureVault(record)).resolve("skvault://cmdb/test")
+
+    known_hosts.unlink()
+    known_hosts.touch(mode=0o666)
+    with pytest.raises(ValueError, match="writable"):
+        SKVaultCredentialResolver(FixtureVault(record)).resolve("skvault://cmdb/test")
+
+
+def test_banner_metadata_records_truncation_without_raw_content() -> None:
+    class LargeBanner:
+        def probe(self, host, port, timeout):
+            return ProbeResult(banner=b"x" * 5000, service="http\x00injected")
+
+    ci = collect_network_fingerprints(["192.0.2.1/32"], [80], LargeBanner())[0]
+    assert ci.attributes["banner_bytes"] == 5000
+    assert ci.attributes["banner_bytes_hashed"] == 4096
+    assert ci.attributes["banner_truncated"] is True
+    assert ci.attributes["service_hint"] == "httpinjected"
+    assert "banner" not in ci.attributes
