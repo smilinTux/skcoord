@@ -10,11 +10,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import threading
 import time
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
@@ -34,7 +35,16 @@ from .discovery import (
 )
 
 _SCHEMA = "skcoord.cmdb.reconcile-run/v1"
-_SECRET_KEYS = ("secret", "password", "token", "credential", "private_key")
+_SECRET_KEYS = (
+    "secret",
+    "password",
+    "passphrase",
+    "token",
+    "credential",
+    "private_key",
+    "api_key",
+    "authorization",
+)
 
 
 def _now() -> datetime:
@@ -99,6 +109,20 @@ class ScanResult:
             "failure_budget_exceeded": self.failure_budget_exceeded,
         }
 
+    def scope_fingerprint(self) -> str:
+        """Bind lifecycle evidence to the exact target/collector scope."""
+        scope = [
+            {
+                "host": item.host,
+                "provenance": list(item.provenance),
+                "expected_collectors": item.expected_collectors,
+            }
+            for item in sorted(self.targets, key=lambda result: result.host)
+        ]
+        return hashlib.sha256(
+            json.dumps(scope, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+
 
 @dataclass(frozen=True)
 class OrchestrationConfig:
@@ -152,6 +176,8 @@ def scan_network(
 ) -> ScanResult:
     """Run declared and observed collectors with global/per-host bounds."""
     found: list[DiscoveredCI] = []
+    scan_id = uuid.uuid4().hex
+    observed_at = _now().isoformat()
     declared_failures: list[str] = []
     for collector in DECLARED_COLLECTORS:
         try:
@@ -173,7 +199,19 @@ def scan_network(
     ) -> tuple[str, str, list[DiscoveredCI], str]:
         with semaphores[host]:
             try:
-                return host, observer.__name__, observer(runner_factory(host)), ""
+                runner = runner_factory(host)
+                if runner.run(["true"]) is None:
+                    return host, observer.__name__, [], "transport_unavailable"
+                items = [
+                    replace(
+                        item,
+                        observed_at=item.observed_at or observed_at,
+                        scan_id=item.scan_id or scan_id,
+                        authority=item.authority or f"network:{host}",
+                    )
+                    for item in observer(runner)
+                ]
+                return host, observer.__name__, items, ""
             except Exception as exc:  # noqa: BLE001
                 return host, observer.__name__, [], type(exc).__name__
 
@@ -293,6 +331,7 @@ def scan_health_events(result: ScanResult, scan_id: str, evidence: str) -> list[
 def apply_retirement_lifecycle(
     mgr: CMDBManager,
     authority: str,
+    scope_fingerprint: str,
     discovered_ids: Sequence[str],
     owned_ids: Sequence[str],
     complete: bool,
@@ -303,10 +342,12 @@ def apply_retirement_lifecycle(
     """Advance per-authority misses and retire after N complete comparable passes."""
     if threshold < 1:
         raise ValueError("threshold must be positive")
+    if not authority.strip() or not re.fullmatch(r"[0-9a-f]{64}", scope_fingerprint):
+        raise ValueError("authority and a SHA-256 scope_fingerprint are required")
     if not complete:
         return []
     seen, actions = set(discovered_ids), []
-    key = f"discovery_misses:{authority}"
+    key = f"discovery_misses:{authority}:{scope_fingerprint}"
     for ci_id in sorted(set(owned_ids)):
         ci = mgr.get_ci(ci_id)
         if ci is None or "discovered" not in ci.tags:
@@ -361,8 +402,11 @@ def write_run_artifact(home: Path, artifact: dict) -> tuple[Path, str]:
     payload = json.dumps(clean, sort_keys=True, separators=(",", ":")) + "\n"
     checksum = hashlib.sha256(payload.encode()).hexdigest()
     run_id = str(clean.get("scan_id") or uuid.uuid4())
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", run_id):
+        raise ValueError("scan_id is not safe for an artifact filename")
     directory = Path(home).expanduser() / "cmdb" / "reconcile-runs"
     directory.mkdir(parents=True, exist_ok=True)
+    directory.chmod(0o700)
     path = directory / f"{run_id}.json"
     atomic_write_text(path, payload)
     atomic_write_text(path.with_suffix(".sha256"), f"{checksum}  {path.name}\n")
@@ -409,13 +453,28 @@ def run_reconcile(
     code_version: str = "unknown",
     config_version: str = "unknown",
     lifecycle_actions: Sequence[dict] = (),
+    agent: str = "cmdb-discovery",
 ) -> tuple[dict, list[NormalizedDrift]]:
     """Reconcile one scan and construct its durable operator-facing record."""
     scan_id, started = str(uuid.uuid4()), _now()
-    report: ReconcileReport = reconcile(mgr, scan_result.discovered, apply=apply)
+    scope_fingerprint = scan_result.scope_fingerprint()
+    scoped_discovered = [
+        replace(
+            item,
+            attributes={**item.attributes, "lifecycle_scope": scope_fingerprint},
+        )
+        for item in scan_result.discovered
+    ]
+    report: ReconcileReport = reconcile(
+        mgr,
+        scoped_discovered,
+        agent=agent,
+        apply=apply,
+        scan_complete=scan_result.complete,
+    )
     evidence = f"cmdb/reconcile-runs/{scan_id}.json"
     normalized = normalize_drift(
-        drift(scan_result.discovered, mgr), scan_id, scan_result.complete, evidence
+        drift(scoped_discovered, mgr), scan_id, scan_result.complete, evidence
     )
     ended = _now()
     retired = sorted(item["ci_id"] for item in lifecycle_actions if item.get("action") == "retire")
@@ -430,6 +489,7 @@ def run_reconcile(
         "applied": apply,
         "code_version": code_version,
         "config_version": config_version,
+        "scope_fingerprint": scope_fingerprint,
         "completeness": scan_result.completeness(),
         "reconcile": report_data,
         "drift": {
@@ -445,6 +505,12 @@ def run_reconcile(
             "targets": [
                 {**asdict(item), "findings": len(item.findings), "complete": item.complete}
                 for item in scan_result.targets
+            ],
+        },
+        "events": {
+            "drift": [asdict(item) for item in normalized],
+            "scan_health": [
+                asdict(item) for item in scan_health_events(scan_result, scan_id, evidence)
             ],
         },
     }

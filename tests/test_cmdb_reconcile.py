@@ -89,6 +89,19 @@ def test_network_deadline_marks_run_incomplete(
     assert result.targets[0].failures == ["slow:deadline"]
 
 
+def test_transport_failure_cannot_be_a_complete_empty_scan(tmp_path: Path) -> None:
+    class DeadRunner:
+        host = "dead"
+
+        def run(self, _argv):
+            return None
+
+    result = scan_network(tmp_path, [Target("dead", ("fleet",))], lambda _host: DeadRunner())
+    assert not result.complete
+    assert result.completeness()["targets_complete"] == 0
+    assert all("transport_unavailable" in failure for failure in result.targets[0].failures)
+
+
 def test_partial_scan_suppresses_absence_drift_and_deduplicates() -> None:
     findings = [
         DriftFinding("ci-service-a", "declared_not_observed", "missing"),
@@ -130,26 +143,36 @@ def _owned_ci(mgr: CMDBManager, name: str = "gone") -> str:
 def test_lifecycle_requires_complete_pass_and_retires_at_threshold(tmp_path: Path) -> None:
     mgr = CMDBManager(tmp_path)
     ci_id = _owned_ci(mgr)
-    assert apply_retirement_lifecycle(mgr, "systemd:nor", [], [ci_id], False, apply=True) == []
+    scope = "a" * 64
+    assert apply_retirement_lifecycle(
+        mgr, "systemd:nor", scope, [], [ci_id], False, apply=True
+    ) == []
     assert "discovery_misses:systemd:nor" not in mgr.get_ci(ci_id).attributes
-    apply_retirement_lifecycle(mgr, "systemd:nor", [], [ci_id], True, threshold=2, apply=True)
+    apply_retirement_lifecycle(
+        mgr, "systemd:nor", scope, [], [ci_id], True, threshold=2, apply=True
+    )
     preview = apply_retirement_lifecycle(
-        mgr, "systemd:nor", [], [ci_id], True, threshold=2, apply=False
+        mgr, "systemd:nor", scope, [], [ci_id], True, threshold=2, apply=False
     )
     assert preview[0]["action"] == "retire"
     assert preview[0]["ci_id"] == ci_id
-    apply_retirement_lifecycle(mgr, "systemd:nor", [], [ci_id], True, threshold=2, apply=True)
+    apply_retirement_lifecycle(
+        mgr, "systemd:nor", scope, [], [ci_id], True, threshold=2, apply=True
+    )
     assert mgr.get_ci(ci_id).status == CIStatus.RETIRED.value
 
 
 def test_lifecycle_reset_does_not_unretire(tmp_path: Path) -> None:
     mgr = CMDBManager(tmp_path)
     ci_id = _owned_ci(mgr)
-    mgr.set_attribute(ci_id, "test", "discovery_misses:systemd:nor", 2)
+    scope = "b" * 64
+    mgr.set_attribute(ci_id, "test", f"discovery_misses:systemd:nor:{scope}", 2)
     mgr.set_status(ci_id, "human", CIStatus.RETIRED.value, note="manual")
-    action = apply_retirement_lifecycle(mgr, "systemd:nor", [ci_id], [ci_id], True, apply=True)[0]
+    action = apply_retirement_lifecycle(
+        mgr, "systemd:nor", scope, [ci_id], [ci_id], True, apply=True
+    )[0]
     assert action["action"] == "reset"
-    assert mgr.get_ci(ci_id).attributes["discovery_misses:systemd:nor"] == 0
+    assert mgr.get_ci(ci_id).attributes[f"discovery_misses:systemd:nor:{scope}"] == 0
     assert mgr.get_ci(ci_id).status == CIStatus.RETIRED.value
 
 
@@ -158,9 +181,10 @@ def test_lifecycle_reports_dependents_before_retirement(tmp_path: Path) -> None:
     target = _owned_ci(mgr, "database")
     dependent = _owned_ci(mgr, "api")
     mgr.add_relationship(dependent, "test", "depends_on", target)
-    mgr.set_attribute(target, "test", "discovery_misses:test", 2)
+    scope = "c" * 64
+    mgr.set_attribute(target, "test", f"discovery_misses:test:{scope}", 2)
     preview = apply_retirement_lifecycle(
-        mgr, "test", [], [target], True, threshold=3, apply=False
+        mgr, "test", scope, [], [target], True, threshold=3, apply=False
     )[0]
     assert preview["action"] == "retire"
     assert preview["dependents"][0]["id"] == dependent
@@ -175,6 +199,11 @@ def test_artifact_is_canonical_checksummed_and_secret_safe(tmp_path: Path) -> No
     assert "never-store-me" not in path.read_text()
     assert '"password":"[redacted]"' in path.read_text()
     assert path.with_suffix(".sha256").read_text().startswith(checksum)
+
+
+def test_artifact_rejects_path_like_scan_id(tmp_path: Path) -> None:
+    with pytest.raises(ValueError):
+        write_run_artifact(tmp_path, {"scan_id": "../escape"})
 
 
 def test_freshness_slo_handles_missing_fresh_and_stale() -> None:
@@ -216,3 +245,15 @@ def test_run_artifact_counts_retirement_actions(tmp_path: Path) -> None:
     )
     assert artifact["reconcile"]["retired"] == ["ci-service-gone"]
     assert artifact["reconcile"]["counts"]["retired"] == 1
+
+
+def test_partial_run_never_reports_orphans(tmp_path: Path) -> None:
+    mgr = CMDBManager(tmp_path)
+    _owned_ci(mgr, "old")
+    scan = ScanResult(
+        [],
+        [TargetResult("dead", ("fleet",), 1, failures=["probe:transport_unavailable"])],
+    )
+    artifact, _ = run_reconcile(mgr, scan)
+    assert artifact["completeness"]["complete"] is False
+    assert artifact["reconcile"]["orphans"] == []
