@@ -37,6 +37,14 @@ def test_relationship_audit_reports_type_and_unknown_relation(tmp_path: Path) ->
     ]
 
 
+def test_alias_relationship_is_part_of_integrity_vocabulary(tmp_path: Path) -> None:
+    mgr = CMDBManager(tmp_path)
+    old = mgr.create_ci("old-appliance", "device")
+    canonical = mgr.create_ci("managed-host", "host")
+    mgr.add_relationship(old.id, "test", "alias_of", canonical.id)
+    assert mgr.audit_relationships() == []
+
+
 def test_projection_is_deterministic_and_sink_only_gets_snapshot(tmp_path: Path) -> None:
     mgr = CMDBManager(tmp_path)
     mgr.create_ci("api", "service")
@@ -54,3 +62,35 @@ def test_projection_is_deterministic_and_sink_only_gets_snapshot(tmp_path: Path)
     assert sink.received == first
     assert result["checkpoint"] == first.checkpoint
     assert result["items"] == 1
+
+
+def test_projection_isolates_sinks_and_does_not_commit_partial_checkpoint(
+    tmp_path: Path,
+) -> None:
+    mgr = CMDBManager(tmp_path)
+    mgr.create_ci("api", "service", attributes={"nested": {"answer": 42}})
+
+    class MutatingSink:
+        def replace(self, snapshot):
+            snapshot.items[0]["attributes"]["nested"]["answer"] = 0
+
+    class ReadingSink:
+        answer = None
+
+        def replace(self, snapshot):
+            self.answer = snapshot.items[0]["attributes"]["nested"]["answer"]
+
+    reader = ReadingSink()
+    result = project(mgr, [MutatingSink(), reader])
+    assert reader.answer == 42
+    assert result["complete"] is True
+    assert result["committed_checkpoint"] == result["checkpoint"]
+
+    class FailingSink:
+        def replace(self, snapshot):
+            raise RuntimeError("projection unavailable")
+
+    failed = project(mgr, [FailingSink(), reader])
+    assert failed["complete"] is False
+    assert failed["committed_checkpoint"] is None
+    assert failed["failed_sinks"] == [{"sink": "FailingSink", "error": "RuntimeError"}]

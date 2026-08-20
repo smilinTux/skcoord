@@ -61,7 +61,29 @@ ALLOWED_RELATIONSHIPS: dict[str, set[str]] = {
     "runs_on": {CIType.HOST.value},
     "hosts": {item.value for item in CIType},
     "connects_to": {item.value for item in CIType},
+    # Identity reconciliation preserves an old record as an alias instead of
+    # rewriting its write-once core.
+    "alias_of": {CIType.HOST.value, CIType.DEVICE.value},
 }
+
+
+class FutureSchemaVersionError(ValueError):
+    """The store contains data newer than this reader understands."""
+
+
+def _schema_version(value: Any, *, supported: int, record: str) -> int:
+    """Parse a schema version and reject future data instead of mis-folding it."""
+    try:
+        version = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"invalid schema_version for {record}: {value!r}") from exc
+    if version < 1:
+        raise ValueError(f"invalid schema_version for {record}: {version}")
+    if version > supported:
+        raise FutureSchemaVersionError(
+            f"{record} schema v{version} is newer than supported v{supported}"
+        )
+    return version
 
 
 class ConfigItem(BaseModel):
@@ -199,9 +221,17 @@ class CMDBManager:
                 line = line.strip()
                 if line:
                     try:
-                        out.append(json.loads(line))
+                        event = json.loads(line)
                     except ValueError:
                         continue
+                    if not isinstance(event, dict):
+                        continue
+                    _schema_version(
+                        event.get("schema_version", 1),
+                        supported=CMDB_EVENT_SCHEMA_VERSION,
+                        record=f"event {f.name}",
+                    )
+                    out.append(event)
         out.sort(key=lambda e: (e.get("ts", ""), e.get("writer", ""), e.get("seq", 0)))
         return out
 
@@ -213,6 +243,11 @@ class CMDBManager:
             core = json.loads(core_path.read_text(encoding="utf-8"))
         except ValueError:
             return None
+        version = _schema_version(
+            core.get("schema_version", 1),
+            supported=CMDB_CORE_SCHEMA_VERSION,
+            record=f"CI {ci_id}",
+        )
         ci = ConfigItem(
             id=core["id"],
             ci_type=core.get("ci_type", "service"),
@@ -225,7 +260,7 @@ class CMDBManager:
             created_at=core.get("created_at", ""),
             # Version 1 is the deployed, unversioned format.  Missing is not
             # corruption: it is the explicit backwards-compatible migration.
-            schema_version=int(core.get("schema_version", 1)),
+            schema_version=version,
         )
         for e in self._read_events(ci_id):
             act = e.get("action")
@@ -247,6 +282,39 @@ class CMDBManager:
                 ]
             ci.updated_at = e.get("ts", ci.updated_at)
         return ci
+
+    def migration_preview(self, ci_id: str) -> dict[str, Any]:
+        """Return a detached v2 representation without modifying the store.
+
+        This is the safe primitive for a v1-to-v2 migration command: callers
+        can validate and write the returned copy to a separate destination
+        before any cutover. Future-version records fail closed.
+        """
+        core_path = self.cmdb_dir / ci_id / "core.json"
+        if not core_path.exists():
+            raise KeyError(ci_id)
+        core = json.loads(core_path.read_text(encoding="utf-8"))
+        if not isinstance(core, dict):
+            raise ValueError(f"invalid core for CI {ci_id}")
+        source_version = _schema_version(
+            core.get("schema_version", 1),
+            supported=CMDB_CORE_SCHEMA_VERSION,
+            record=f"CI {ci_id}",
+        )
+        migrated_core = dict(core)
+        migrated_core["schema_version"] = CMDB_CORE_SCHEMA_VERSION
+        events = []
+        for event in self._read_events(ci_id):
+            migrated = dict(event)
+            migrated["schema_version"] = CMDB_EVENT_SCHEMA_VERSION
+            events.append(migrated)
+        return {
+            "ci_id": ci_id,
+            "source_schema_version": source_version,
+            "target_schema_version": CMDB_CORE_SCHEMA_VERSION,
+            "core": migrated_core,
+            "events": events,
+        }
 
     def list_cis(self, ci_type: Optional[str] = None) -> list[ConfigItem]:
         if not self.cmdb_dir.exists():
@@ -331,7 +399,9 @@ class CMDBManager:
             status = (
                 CIStatus.DOWN.value
                 if worst in ("sev1", "sev2")
-                else CIStatus.DEGRADED.value if worst == "sev3" else CIStatus.OPERATIONAL.value
+                else CIStatus.DEGRADED.value
+                if worst == "sev3"
+                else CIStatus.OPERATIONAL.value
             )
             if ci and ci.status != status:
                 self.set_status(ci.id, agent, status, note="from incident health")
@@ -439,9 +509,20 @@ class CMDBManager:
                 seen.add(source_id)
                 source = cis[source_id]
                 nodes.append(
-                    {"id": source_id, "name": source.name, "ci_type": source.ci_type,
-                     "rel": rel_type, "depth": depth + 1}
+                    {
+                        "id": source_id,
+                        "name": source.name,
+                        "ci_type": source.ci_type,
+                        "rel": rel_type,
+                        "depth": depth + 1,
+                    }
                 )
                 queue.append((source_id, depth + 1, (*path, source_id)))
-        return {"id": ci_id, "dependents": nodes, "cycles": cycles, "truncated": truncated,
-                "max_depth": max_depth, "max_nodes": max_nodes}
+        return {
+            "id": ci_id,
+            "dependents": nodes,
+            "cycles": cycles,
+            "truncated": truncated,
+            "max_depth": max_depth,
+            "max_nodes": max_nodes,
+        }

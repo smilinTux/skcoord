@@ -69,6 +69,19 @@ def observation_state(
     return ObservationState.FRESH if current - timestamp <= max_age else ObservationState.STALE
 
 
+def ci_observation_state(
+    ci: object, *, now: Optional[datetime] = None, max_age: timedelta = timedelta(hours=6)
+) -> ObservationState:
+    """Derive current evidence freshness from a folded CI's timestamp.
+
+    Freshness is intentionally never trusted from a stored ``observation_state``
+    attribute: elapsed wall time can make that value false without a new event.
+    """
+    attributes = getattr(ci, "attributes", {})
+    observed_at = attributes.get("observed_at", "") if isinstance(attributes, dict) else ""
+    return observation_state(str(observed_at), now=now, max_age=max_age)
+
+
 # ---------------------------------------------------------------------------
 # The unit of discovery
 # ---------------------------------------------------------------------------
@@ -130,7 +143,9 @@ class DiscoveredCI:
             canonical_name = other.canonical_name or other.name
         else:
             canonical_name = min(
-                filter(None, (self.canonical_name or self.name, other.canonical_name or other.name))
+                filter(
+                    None, (self.canonical_name or self.name, other.canonical_name or other.name)
+                )
             )
         attributes = {**secondary.attributes, **primary.attributes}
         sources = sorted({*self.source.split("+"), *other.source.split("+")})
@@ -148,7 +163,9 @@ class DiscoveredCI:
             aliases=tuple(sorted({*self.identity_aliases, *other.identity_aliases})),
             observed_at=max(self.observed_at, other.observed_at),
             scan_id=primary.scan_id or secondary.scan_id,
-            authority=(AUTHORITY_OBSERVED if self.observed or other.observed else AUTHORITY_DECLARED),
+            authority=(
+                AUTHORITY_OBSERVED if self.observed or other.observed else AUTHORITY_DECLARED
+            ),
         )
 
     @property
@@ -225,9 +242,7 @@ class SSHRunner:
 
 def _exec(argv: list[str], timeout: int) -> Optional[str]:
     try:
-        proc = subprocess.run(
-            argv, capture_output=True, text=True, timeout=timeout, check=False
-        )
+        proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, check=False)
     except (OSError, subprocess.SubprocessError) as exc:
         logger.debug("command failed: %s (%s)", argv[0], exc)
         return None
@@ -290,7 +305,9 @@ def collect_fleet_objects(home: Path) -> list[DiscoveredCI]:
                 tags=("fleet", DISCOVERED_TAG),
                 canonical_name=hostname,
                 aliases=tuple(
-                    str(v) for v in (obj.get("name"), address.get("ip"), address.get("ssh_alias")) if v
+                    str(v)
+                    for v in (obj.get("name"), address.get("ip"), address.get("ssh_alias"))
+                    if v
                 ),
             )
         )
@@ -748,8 +765,14 @@ def collect_host_facts(runner: CommandRunner) -> list[DiscoveredCI]:
                 numeric = parts[1:7]
                 if all(v.isdigit() for v in numeric):
                     for key, value in zip(
-                        ("memory_total_bytes", "memory_used_bytes", "memory_free_bytes",
-                         "memory_shared_bytes", "memory_cache_bytes", "memory_available_bytes"),
+                        (
+                            "memory_total_bytes",
+                            "memory_used_bytes",
+                            "memory_free_bytes",
+                            "memory_shared_bytes",
+                            "memory_cache_bytes",
+                            "memory_available_bytes",
+                        ),
                         numeric,
                     ):
                         attributes[key] = int(value)
@@ -798,9 +821,14 @@ def collect_host_facts(runner: CommandRunner) -> list[DiscoveredCI]:
             parts = line.split(None, 5)
             if len(parts) == 6 and all(v.isdigit() for v in parts[1:4]):
                 filesystems.append(
-                    {"source": parts[0], "size_bytes": int(parts[1]),
-                     "used_bytes": int(parts[2]), "available_bytes": int(parts[3]),
-                     "used_percent": parts[4], "mountpoint": parts[5]}
+                    {
+                        "source": parts[0],
+                        "size_bytes": int(parts[1]),
+                        "used_bytes": int(parts[2]),
+                        "available_bytes": int(parts[3]),
+                        "used_percent": parts[4],
+                        "mountpoint": parts[5],
+                    }
                 )
         if filesystems:
             attributes["filesystems"] = filesystems
@@ -908,7 +936,9 @@ def scan(
                     for item in observations
                 )
             except Exception:  # noqa: BLE001
-                logger.exception("observed collector failed: %s on %s", observer.__name__, runner.host)
+                logger.exception(
+                    "observed collector failed: %s on %s", observer.__name__, runner.host
+                )
     return merge(found)
 
 
@@ -1042,7 +1072,6 @@ def reconcile(
                         {
                             "observed_at": item.observed_at,
                             "scan_id": item.scan_id,
-                            "observation_state": observation_state(item.observed_at).value,
                         }
                     )
                 mgr.create_ci(
@@ -1055,9 +1084,7 @@ def reconcile(
                     ci_id=ci_id,
                 )
                 if derived_status and derived_status != CIStatus.OPERATIONAL.value:
-                    mgr.set_status(
-                        ci_id, agent, derived_status, note="from observed active_state"
-                    )
+                    mgr.set_status(ci_id, agent, derived_status, note="from observed active_state")
                 for rel_type, target in item.relationships:
                     mgr.add_relationship(ci_id, agent, rel_type, target)
             continue
@@ -1074,7 +1101,6 @@ def reconcile(
                 {
                     "observed_at": item.observed_at,
                     "scan_id": item.scan_id,
-                    "observation_state": observation_state(item.observed_at).value,
                 }
             )
         desired_attributes = {**item.attributes, **evidence}
@@ -1086,7 +1112,9 @@ def reconcile(
         missing_rels = [
             (rel_type, target)
             for rel_type, target in item.relationships
-            if not any(r.rel_type == rel_type and r.target == target for r in current.relationships)
+            if not any(
+                r.rel_type == rel_type and r.target == target for r in current.relationships
+            )
         ]
         status_changes = (
             derived_status is not None
@@ -1145,7 +1173,9 @@ class DriftFinding:
         return {"ci_id": self.ci_id, "kind": self.kind, "detail": self.detail}
 
 
-def drift(discovered: Sequence[DiscoveredCI], mgr: Optional[CMDBManager] = None) -> list[DriftFinding]:
+def drift(
+    discovered: Sequence[DiscoveredCI], mgr: Optional[CMDBManager] = None
+) -> list[DriftFinding]:
     """Where declaration and observation disagree.
 
     Three findings, in the order they tend to matter:
