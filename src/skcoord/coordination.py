@@ -23,7 +23,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Callable, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from .atomic_io import atomic_write_text
 
@@ -149,6 +149,16 @@ class AgentFile(BaseModel):
     itil_claims: list[str] = Field(default_factory=list)
     notes: str = ""
 
+    @field_validator("agent", mode="before")
+    @classmethod
+    def validate_agent_name(cls, value: object) -> str:
+        """Require one portable filename stem for an agent projection."""
+        if not isinstance(value, str) or not re.fullmatch(
+            r"[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,126}[A-Za-z0-9])?", value
+        ):
+            raise ValueError("agent name must be a canonical filename stem")
+        return value
+
 
 class TaskView(BaseModel):
     """A task enriched with derived status from agent claims."""
@@ -180,6 +190,22 @@ class Board:
         self.tasks_dir.mkdir(parents=True, exist_ok=True)
         self.agents_dir.mkdir(parents=True, exist_ok=True)
         self.archive_dir.mkdir(parents=True, exist_ok=True)
+
+    def agent_projection_path(self, name: str) -> Path:
+        """Resolve one canonical agent projection destination inside agents/."""
+        canonical = AgentFile.validate_agent_name(name)
+        if self.coord_dir.is_symlink() or self.agents_dir.is_symlink():
+            raise ValueError("agent projection directory must not be a symlink")
+        coordination = self.coord_dir.resolve(strict=True)
+        agents = self.agents_dir.resolve(strict=True)
+        try:
+            agents.relative_to(coordination)
+        except ValueError as exc:
+            raise ValueError("agent projection directory escapes coordination") from exc
+        path = agents / f"{canonical}.json"
+        if path.parent != agents:
+            raise ValueError("agent projection destination escapes the agents directory")
+        return path
 
     def archived_ids(self) -> set[str]:
         """Union of task ids archived by any writer.
@@ -256,10 +282,17 @@ class Board:
         agents: list[AgentFile] = []
         if not self.agents_dir.exists():
             return agents
+        if self.agents_dir.is_symlink() or not self.agents_dir.is_dir():
+            raise ValueError("agent projection directory must be a regular directory")
         for f in sorted(self.agents_dir.glob("*.json")):
             try:
+                if f.is_symlink() or not f.is_file():
+                    raise ValueError("agent projection must be a regular file")
                 data = json.loads(f.read_text(encoding="utf-8"))
-                agents.append(AgentFile.model_validate(data))
+                agent = AgentFile.model_validate(data)
+                if agent.agent != f.stem:
+                    raise ValueError("agent payload identity does not match its filename")
+                agents.append(agent)
             except Exception as exc:  # noqa: BLE001
                 # A dropped agent file loses that agent's claims/completions from
                 # the derived board status - surface it instead of swallowing.
@@ -276,11 +309,19 @@ class Board:
         Returns:
             AgentFile or None if not found.
         """
-        path = self.agents_dir / f"{name}.json"
+        canonical = AgentFile.validate_agent_name(name)
+        if not self.agents_dir.exists():
+            return None
+        path = self.agent_projection_path(canonical)
         if not path.exists():
             return None
+        if path.is_symlink() or not path.is_file():
+            raise ValueError("agent projection must be a regular file")
         data = json.loads(path.read_text(encoding="utf-8"))
-        return AgentFile.model_validate(data)
+        agent = AgentFile.model_validate(data)
+        if agent.agent != canonical:
+            raise ValueError("agent payload identity does not match its filename")
+        return agent
 
     def save_agent(self, agent: AgentFile) -> Path:
         """Write an agent's status file.
@@ -293,7 +334,9 @@ class Board:
         """
         self.ensure_dirs()
         agent.last_seen = datetime.now(timezone.utc).isoformat()
-        path = self.agents_dir / f"{agent.agent}.json"
+        path = self.agent_projection_path(agent.agent)
+        if path.is_symlink() or (path.exists() and not path.is_file()):
+            raise ValueError("agent projection destination must be a regular file")
         atomic_write_text(path, json.dumps(agent.model_dump(), indent=2) + "\n")
         return path
 

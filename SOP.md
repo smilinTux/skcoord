@@ -27,6 +27,12 @@ these modules, so every skcapstone process executes skcoord code.
   `~/.skcapstone/cards/<id>/` holding a write-once `core.json` plus append-only
   per-writer event logs; current state is folded on read, never stored
   (`src/skcoord/card_store.py:1-12`, `:190-199`).
+- **Lifecycle projection reconciliation.** `audit_lifecycle()` compares the
+  current CardStore fold to `agents/*.json` without writing. The explicit
+  `repair_lifecycle()` operation clears terminal or review cards from active
+  execution, retains accountable ownership and completion history, refuses
+  recent active conflicts, and appends a per-writer receipt under
+  `coordination/reconciliation/` (`src/skcoord/lifecycle.py`).
 - **ITIL service management.** Incident, problem, change, CAB, KEDB
   (`src/skcoord/itil.py`).
 - **The CMDB.** Event-sourced configuration items and relationships

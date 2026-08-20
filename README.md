@@ -21,6 +21,9 @@ surface.
   `SKCOORD_CARD_STORE` is its **kill switch, not an opt-in**: post Phase-4e the
   store is default-ON and is disabled only by `0`, `off`, `false`, or `no`
   (`dual` means write both, read legacy). See [SOP.md section 6](./SOP.md).
+- **`lifecycle`**: a read-only audit and explicit repair for drift between the
+  event-sourced kanban lifecycle and mutable agent claim projections. Repairs
+  refuse active ownership conflicts and append per-writer JSONL receipts.
 - **`itil`**: incident / problem / change / CAB / KEDB service management.
 - **`cmdb`**: event-sourced configuration items + relationships.
 - **`agent_card`**: the shareable sovereign identity vCard for the mesh.
