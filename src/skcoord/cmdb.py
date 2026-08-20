@@ -29,6 +29,8 @@ from pydantic import BaseModel, Field
 logger = logging.getLogger("skcapstone.cmdb")
 
 _HOST = socket.gethostname()
+CMDB_CORE_SCHEMA_VERSION = 2
+CMDB_EVENT_SCHEMA_VERSION = 2
 
 
 class CIType(str, Enum):
@@ -39,6 +41,7 @@ class CIType(str, Enum):
     PORT = "port"
     DATASTORE = "datastore"
     NETWORK = "network"
+    DEVICE = "device"
 
 
 class CIStatus(str, Enum):
@@ -66,6 +69,7 @@ class ConfigItem(BaseModel):
     tags: list[str] = Field(default_factory=list)
     created_at: str = ""
     updated_at: str = ""
+    schema_version: int = 1
 
 
 def _now_iso() -> str:
@@ -113,6 +117,7 @@ class CMDBManager:
         self.ensure_dirs()
         cid = ci_id or make_ci_id(ci_type, name)
         core = {
+            "schema_version": CMDB_CORE_SCHEMA_VERSION,
             "id": cid,
             "ci_type": ci_type,
             "name": name,
@@ -148,6 +153,7 @@ class CMDBManager:
                 fh.seek(0)
                 seq = sum(1 for _ in fh)
                 event = {
+                    "schema_version": CMDB_EVENT_SCHEMA_VERSION,
                     "ts": _now_iso(),
                     "writer": agent,
                     "node": _HOST,
@@ -209,6 +215,9 @@ class CMDBManager:
             attributes=dict(core.get("attributes", {})),
             tags=list(core.get("tags", [])),
             created_at=core.get("created_at", ""),
+            # Version 1 is the deployed, unversioned format.  Missing is not
+            # corruption: it is the explicit backwards-compatible migration.
+            schema_version=int(core.get("schema_version", 1)),
         )
         for e in self._read_events(ci_id):
             act = e.get("action")
