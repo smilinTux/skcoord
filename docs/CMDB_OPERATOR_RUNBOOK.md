@@ -15,6 +15,11 @@ scan identifier, target completeness, created/updated/unchanged/orphan counts,
 drift summary, and artifact checksum. Accept a release only when the fixture
 suite and a live-safe dry run both pass.
 
+Legacy CIs are not implicitly discovery-owned. Use the explicit manifest and
+three-shadow-run gate in [cmdb-reconcile-rollout.md](cmdb-reconcile-rollout.md).
+Shell access or an enabled timer does not satisfy the change, backup, scope, or
+plan-digest gates.
+
 ## Backup and recovery
 
 Back up the complete `cmdb/` directory so write-once cores and every writer's
