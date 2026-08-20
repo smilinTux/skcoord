@@ -54,6 +54,7 @@ class CIStatus(str, Enum):
 class Relationship(BaseModel):
     rel_type: str = "depends_on"  # depends_on | runs_on | hosts | connects_to
     target: str  # target CI id
+    authority: str = ""
 
 
 ALLOWED_RELATIONSHIPS: dict[str, set[str]] = {
@@ -100,6 +101,7 @@ class ConfigItem(BaseModel):
     created_at: str = ""
     updated_at: str = ""
     schema_version: int = 1
+    tag_authorities: dict[str, str] = Field(default_factory=dict, exclude=True)
 
 
 def _now_iso() -> str:
@@ -203,11 +205,25 @@ class CMDBManager:
     def set_attribute(self, ci_id: str, agent: str, key: str, value: Any) -> None:
         self._append(ci_id, agent, "attribute", key=key, value=value)
 
-    def add_relationship(self, ci_id: str, agent: str, rel_type: str, target: str) -> None:
-        self._append(ci_id, agent, "relate", rel_type=rel_type, target=target)
+    def add_relationship(
+        self, ci_id: str, agent: str, rel_type: str, target: str, authority: str = ""
+    ) -> None:
+        self._append(ci_id, agent, "relate", rel_type=rel_type, target=target, authority=authority)
 
     def remove_relationship(self, ci_id: str, agent: str, rel_type: str, target: str) -> None:
         self._append(ci_id, agent, "unrelate", rel_type=rel_type, target=target)
+
+    def set_metadata(self, ci_id: str, agent: str, key: str, value: str) -> None:
+        """Update a mutable display/placement field without rewriting core.json."""
+        if key not in {"name", "description", "owner", "node"}:
+            raise ValueError(f"unsupported mutable metadata field: {key}")
+        self._append(ci_id, agent, "metadata", key=key, value=value)
+
+    def add_tag(self, ci_id: str, agent: str, tag: str, authority: str = "") -> None:
+        self._append(ci_id, agent, "tag", tag=tag, authority=authority)
+
+    def remove_tag(self, ci_id: str, agent: str, tag: str, authority: str = "") -> None:
+        self._append(ci_id, agent, "untag", tag=tag, authority=authority)
 
     # ── reads ─────────────────────────────────────────────────────────────
 
@@ -270,9 +286,16 @@ class CMDBManager:
                 ci.attributes[e["key"]] = e.get("value")
             elif act == "relate":
                 rel = Relationship(
-                    rel_type=e.get("rel_type", "depends_on"), target=e.get("target", "")
+                    rel_type=e.get("rel_type", "depends_on"),
+                    target=e.get("target", ""),
+                    authority=e.get("authority", ""),
                 )
-                if rel.target and rel not in ci.relationships:
+                if rel.target:
+                    ci.relationships = [
+                        current
+                        for current in ci.relationships
+                        if not (current.rel_type == rel.rel_type and current.target == rel.target)
+                    ]
                     ci.relationships.append(rel)
             elif act == "unrelate":
                 ci.relationships = [
@@ -280,6 +303,24 @@ class CMDBManager:
                     for r in ci.relationships
                     if not (r.rel_type == e.get("rel_type") and r.target == e.get("target"))
                 ]
+            elif act == "metadata" and e.get("key") in {
+                "name",
+                "description",
+                "owner",
+                "node",
+            }:
+                setattr(ci, e["key"], str(e.get("value", "")))
+            elif act == "tag" and e.get("tag"):
+                tag = str(e["tag"])
+                if tag not in ci.tags:
+                    ci.tags.append(tag)
+                if e.get("authority"):
+                    ci.tag_authorities[tag] = str(e["authority"])
+            elif act == "untag" and e.get("tag"):
+                tag = str(e["tag"])
+                if not e.get("authority") or ci.tag_authorities.get(tag) == e.get("authority"):
+                    ci.tags = [item for item in ci.tags if item != tag]
+                    ci.tag_authorities.pop(tag, None)
             ci.updated_at = e.get("ts", ci.updated_at)
         return ci
 

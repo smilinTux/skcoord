@@ -496,6 +496,107 @@ def test_reconcile_records_changed_attributes(tmp_path: Path) -> None:
     assert mgr.get_ci(ci_id).attributes["active_state"] == "failed"
 
 
+def test_reconcile_converges_owned_metadata_tags_relationships_and_scope(
+    tmp_path: Path,
+) -> None:
+    mgr = CMDBManager(tmp_path)
+    host_a = mgr.create_ci("host-a", "host")
+    host_b = mgr.create_ci("host-b", "host")
+    item = DiscoveredCI(
+        "service",
+        "api",
+        "systemd",
+        observed=True,
+        node="host-a",
+        tags=(DISCOVERED_TAG, "old"),
+        relationships=(("runs_on", host_a.id),),
+        authority="network:nor",
+        lifecycle_scope="scope-one",
+    )
+    reconcile(mgr, [item], apply=True)
+
+    moved = DiscoveredCI(
+        "service",
+        "api",
+        "systemd",
+        observed=True,
+        node="host-b",
+        description="managed API",
+        tags=(DISCOVERED_TAG, "new"),
+        relationships=(("runs_on", host_b.id),),
+        authority="network:nor",
+        lifecycle_scope="scope-two",
+    )
+    report = reconcile(mgr, [moved], apply=True)
+    ci = mgr.get_ci(item.ci_id)
+    assert ci.node == "host-b"
+    assert ci.description == "managed API"
+    assert set(ci.tags) == {DISCOVERED_TAG, "new"}
+    assert [(rel.rel_type, rel.target, rel.authority) for rel in ci.relationships] == [
+        ("runs_on", host_b.id, "network:nor")
+    ]
+    assert ci.attributes["lifecycle_scope"] == "scope-two"
+    assert any(change.startswith("remove:runs_on") for change in report.updated[ci.id])
+
+
+def test_reconcile_preserves_unowned_manual_relationship_and_tag(tmp_path: Path) -> None:
+    mgr = CMDBManager(tmp_path)
+    host = mgr.create_ci("host", "host")
+    ci = mgr.create_ci("api", "service", tags=["manual"])
+    mgr.add_relationship(ci.id, "human", "depends_on", host.id)
+    reconcile(
+        mgr,
+        [DiscoveredCI("service", "api", "systemd", authority="network:nor")],
+        apply=True,
+    )
+    folded = mgr.get_ci(ci.id)
+    assert "manual" in folded.tags
+    assert any(rel.target == host.id for rel in folded.relationships)
+
+
+def test_managed_host_promotes_matching_device_without_rewriting_device_core(
+    tmp_path: Path,
+) -> None:
+    mgr = CMDBManager(tmp_path)
+    device = mgr.create_ci(
+        "printer-device",
+        "device",
+        attributes={"aliases": ["192.0.2.50"]},
+        tags=[DISCOVERED_TAG],
+    )
+    host = DiscoveredCI(
+        "host",
+        "printer.local",
+        "fleet:node",
+        aliases=("192.0.2.50",),
+        authority="declared",
+    )
+    reconcile(mgr, [host], apply=True)
+    promoted = mgr.get_ci(host.ci_id)
+    retained = mgr.get_ci(device.id)
+    assert promoted.ci_type == "host"
+    assert retained.ci_type == "device"
+    assert any(
+        rel.rel_type == "alias_of" and rel.target == promoted.id for rel in retained.relationships
+    )
+
+
+def test_drift_uses_same_alias_identity_resolution_as_reconcile(tmp_path: Path) -> None:
+    mgr = CMDBManager(tmp_path)
+    stored = mgr.create_ci(
+        "alpha.example",
+        "host",
+        attributes={"aliases": ["192.0.2.10"]},
+        tags=[DISCOVERED_TAG],
+    )
+    sighting = DiscoveredCI("host", "ssh-alpha", "host", observed=True, aliases=("192.0.2.10",))
+    findings = drift([sighting], mgr)
+    assert not any(
+        finding.kind == "stored_not_discovered" and finding.ci_id == stored.id
+        for finding in findings
+    )
+
+
 def test_reconcile_never_deletes_a_ci_it_cannot_see(tmp_path: Path) -> None:
     """A collector that silently fails must not be able to erase inventory."""
     mgr = CMDBManager(tmp_path)
