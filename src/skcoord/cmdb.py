@@ -53,6 +53,14 @@ class Relationship(BaseModel):
     target: str  # target CI id
 
 
+ALLOWED_RELATIONSHIPS: dict[str, set[str]] = {
+    "depends_on": {item.value for item in CIType},
+    "runs_on": {CIType.HOST.value},
+    "hosts": {item.value for item in CIType},
+    "connects_to": {item.value for item in CIType},
+}
+
+
 class ConfigItem(BaseModel):
     id: str
     ci_type: str = CIType.SERVICE.value
@@ -363,3 +371,68 @@ class CMDBManager:
         except Exception:  # noqa: BLE001
             pass
         return {"ci": ci.model_dump(), "dependents": dependents, "open_incidents": incidents}
+
+    def audit_relationships(self) -> list[dict[str, Any]]:
+        """Return deterministic relationship-integrity findings without writing."""
+        cis = {ci.id: ci for ci in self.list_cis()}
+        findings: list[dict[str, Any]] = []
+        for source_id in sorted(cis):
+            source = cis[source_id]
+            for rel in sorted(source.relationships, key=lambda r: (r.rel_type, r.target)):
+                target = cis.get(rel.target)
+                base = {"source": source_id, "relationship": rel.rel_type, "target": rel.target}
+                if target is None:
+                    findings.append({"kind": "dangling_target", **base})
+                    continue
+                if source_id == rel.target:
+                    findings.append({"kind": "self_edge", **base})
+                allowed = ALLOWED_RELATIONSHIPS.get(rel.rel_type)
+                if allowed is None:
+                    findings.append({"kind": "unknown_relationship", **base})
+                elif target.ci_type not in allowed:
+                    findings.append(
+                        {"kind": "invalid_target_type", **base, "target_type": target.ci_type}
+                    )
+        return findings
+
+    def impact_graph(self, ci_id: str, max_depth: int = 8, max_nodes: int = 1000) -> dict:
+        """Return transitive dependents with cycle and fan-out protection."""
+        if max_depth < 0 or max_nodes < 1:
+            raise ValueError("max_depth must be >= 0 and max_nodes must be >= 1")
+        cis = {ci.id: ci for ci in self.list_cis()}
+        if ci_id not in cis:
+            return {"error": "CI not found", "id": ci_id}
+        reverse: dict[str, list[tuple[str, str]]] = {}
+        for source in cis.values():
+            for rel in source.relationships:
+                if rel.rel_type in ("depends_on", "runs_on"):
+                    reverse.setdefault(rel.target, []).append((source.id, rel.rel_type))
+        queue: list[tuple[str, int, tuple[str, ...]]] = [(ci_id, 0, (ci_id,))]
+        seen = {ci_id}
+        nodes: list[dict[str, Any]] = []
+        cycles: list[list[str]] = []
+        truncated = False
+        while queue:
+            target, depth, path = queue.pop(0)
+            if depth >= max_depth:
+                truncated = truncated or bool(reverse.get(target))
+                continue
+            for source_id, rel_type in sorted(reverse.get(target, [])):
+                if source_id in path:
+                    cycles.append([*path, source_id])
+                    continue
+                if source_id in seen:
+                    continue
+                if len(nodes) >= max_nodes:
+                    truncated = True
+                    queue.clear()
+                    break
+                seen.add(source_id)
+                source = cis[source_id]
+                nodes.append(
+                    {"id": source_id, "name": source.name, "ci_type": source.ci_type,
+                     "rel": rel_type, "depth": depth + 1}
+                )
+                queue.append((source_id, depth + 1, (*path, source_id)))
+        return {"id": ci_id, "dependents": nodes, "cycles": cycles, "truncated": truncated,
+                "max_depth": max_depth, "max_nodes": max_nodes}
