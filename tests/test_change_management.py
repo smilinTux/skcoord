@@ -302,6 +302,38 @@ def test_submit_cab_vote_subject_true_human_still_unblocks(tmp_path):
     assert folded.status.value == "approved"
 
 
+def test_authenticated_named_owner_unblocks_without_literal_human(tmp_path):
+    """Chef remains Chef in the audit log while the role proves humanity."""
+    mgr = ITILManager(tmp_path)
+    chg = mgr.propose_change(title="owner-approved", change_type="normal", managed_by="atlas")
+    vote = mgr.submit_cab_vote(
+        chg.id,
+        agent="ignored",
+        decision="approved",
+        subject="chef",
+        subject_role="owner",
+        subject_fingerprint="A" * 40,
+        authorization_id="authz-123",
+    )
+    assert vote.agent == "chef"
+    assert vote.subject_role == "owner"
+    assert mgr.list_changes()[0].status.value == "approved"
+
+
+def test_display_name_without_authenticated_human_role_does_not_unblock(tmp_path):
+    mgr = ITILManager(tmp_path)
+    chg = mgr.propose_change(title="name-is-not-proof", change_type="normal", managed_by="atlas")
+    mgr.submit_cab_vote(chg.id, agent="Chef", decision="approved", subject="chef")
+    assert mgr.list_changes()[0].status.value != "approved"
+
+
+def test_human_role_without_bound_subject_is_rejected(tmp_path):
+    mgr = ITILManager(tmp_path)
+    chg = mgr.propose_change(title="unbound-role", change_type="normal", managed_by="atlas")
+    with pytest.raises(ValueError, match="authenticated subject"):
+        mgr.submit_cab_vote(chg.id, agent="Chef", decision="approved", subject_role="owner")
+
+
 # ── (f) no-self-approval fold guard ─────────────────────────────────────
 
 
