@@ -281,9 +281,17 @@ class KEDBEntry(BaseModel):
 class CABDecision(BaseModel):
     change_id: str
     agent: str
+    subject_role: str = ""
+    subject_fingerprint: str = ""
+    authorization_id: str = ""
     decision: CABDecisionValue = CABDecisionValue.ABSTAIN
     conditions: str = ""
     decided_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+
+def _is_human_approval(vote: CABDecision) -> bool:
+    """Return whether a vote carries a qualifying human approval role."""
+    return vote.agent == "human" or vote.subject_role in {"owner", "approver"}
 
 
 # ---------------------------------------------------------------------------
@@ -396,7 +404,7 @@ def _cab_resolved_status(
     approvals = [
         v for v in votes if v.decision == CABDecisionValue.APPROVED and v.agent != prepared_by
     ]
-    if any(v.agent == "human" for v in approvals):
+    if any(_is_human_approval(v) for v in approvals):
         return "approved"
     return status
 
@@ -1254,7 +1262,7 @@ class ITILManager:
                         "note": "Rejected by: " + ", ".join(v.agent for v in rejections),
                     }
                 )
-            elif any(v.agent == "human" for v in approvals):
+            elif any(_is_human_approval(v) for v in approvals):
                 status = "approved"
                 timeline.append(
                     {
@@ -1708,6 +1716,9 @@ class ITILManager:
         decision: str = "abstain",
         conditions: str = "",
         subject: str | None = None,
+        subject_role: str = "",
+        subject_fingerprint: str = "",
+        authorization_id: str = "",
     ) -> CABDecision:
         """Submit a CAB vote for a change (per-agent file, already conflict-free).
 
@@ -1744,9 +1755,16 @@ class ITILManager:
         """
         self.ensure_dirs()
         voter = subject if subject else agent
+        if subject_role and subject_role not in {"owner", "operator", "approver", "implementer"}:
+            raise ValueError(f"unsupported CAB subject role: {subject_role!r}")
+        if subject_role in {"owner", "approver"} and not subject:
+            raise ValueError("a qualifying human role requires an authenticated subject")
         vote = CABDecision(
             change_id=change_id,
             agent=voter,
+            subject_role=subject_role,
+            subject_fingerprint=subject_fingerprint,
+            authorization_id=authorization_id,
             decision=CABDecisionValue(decision),
             conditions=conditions,
         )
