@@ -1,0 +1,200 @@
+"""Tests for bounded CMDB orchestration, lifecycle, drift, and artifacts."""
+
+from __future__ import annotations
+
+import json
+import time
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import pytest
+
+from skcoord.cmdb import CIStatus, CIType, CMDBManager, make_ci_id
+from skcoord.cmdb_reconcile import (
+    OrchestrationConfig,
+    ScanResult,
+    Target,
+    TargetResult,
+    apply_retirement_lifecycle,
+    freshness_status,
+    normalize_drift,
+    operator_summary,
+    resolve_targets,
+    scan_network,
+    write_run_artifact,
+)
+from skcoord.discovery import DISCOVERED_TAG, DiscoveredCI, DriftFinding
+
+
+class CannedRunner:
+    """Minimal command runner whose host facts collector succeeds."""
+
+    def __init__(self, host: str) -> None:
+        self.host = host
+
+    def run(self, argv: list[str]) -> str:
+        if argv[:1] == ["uname"]:
+            return "Linux 6.1\n"
+        if argv[:1] == ["nproc"]:
+            return "4\n"
+        if argv[:2] == ["cat", "/proc/sys/net/ipv4/ip_local_port_range"]:
+            return "32768 60999\n"
+        return ""
+
+
+def test_resolve_targets_deduplicates_and_preserves_provenance(tmp_path: Path) -> None:
+    nodes = tmp_path / "fleet" / "objects" / "node"
+    nodes.mkdir(parents=True)
+    (nodes / "nor.json").write_text(
+        json.dumps({"name": "nor", "spec": {"address": {"hostname": "nor.local"}}})
+    )
+    targets = resolve_targets(tmp_path, {"operator-list": ["nor.local", "chi.local"]})
+    assert [target.host for target in targets] == ["chi.local", "nor.local"]
+    assert targets[1].provenance == ("approved:operator-list", "fleet:node:nor")
+
+
+def test_network_scan_reports_complete_target_accounting(tmp_path: Path) -> None:
+    result = scan_network(
+        tmp_path,
+        [Target("nor.local", ("fleet:node:nor",))],
+        CannedRunner,
+        OrchestrationConfig(global_concurrency=2, per_host_concurrency=1, deadline_seconds=2),
+    )
+    assert result.complete
+    assert result.completeness()["collectors_expected"] == 4
+    assert result.completeness()["collectors_complete"] == 4
+    assert any(item.name == "nor.local" for item in result.discovered)
+
+
+def test_network_deadline_marks_run_incomplete(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import skcoord.cmdb_reconcile as module
+
+    def slow(_runner: CannedRunner) -> list[DiscoveredCI]:
+        time.sleep(0.1)
+        return []
+
+    monkeypatch.setattr(module, "OBSERVED_COLLECTORS", (slow,))
+    result = scan_network(
+        tmp_path,
+        [Target("nor", ("approved:test",))],
+        CannedRunner,
+        OrchestrationConfig(deadline_seconds=0.01),
+    )
+    assert not result.complete
+    assert result.deadline_exceeded
+    assert result.targets[0].failures == ["slow:deadline"]
+
+
+def test_partial_scan_suppresses_absence_drift_and_deduplicates() -> None:
+    findings = [
+        DriftFinding("ci-service-a", "declared_not_observed", "missing"),
+        DriftFinding("ci-service-a", "declared_not_observed", "missing"),
+        DriftFinding("ci-service-b", "observed_not_declared", "unexpected"),
+    ]
+    normalized = normalize_drift(findings, "scan-1", False, "artifact.json")
+    assert [(item.ci_id, item.kind) for item in normalized] == [
+        ("ci-service-b", "observed_not_declared")
+    ]
+    assert normalized[0].event_type == "cmdb.drift"
+    assert len(normalized[0].dedup_key) == 64
+
+
+def test_scan_failure_is_health_not_asset_drift() -> None:
+    scan = ScanResult([], [TargetResult("nor", ("fleet",), 1, failures=["ssh:timeout"])])
+    assert not scan.complete
+    assert (
+        normalize_drift(
+            [DriftFinding("ci-host-nor", "stored_not_discovered", "not seen")],
+            "scan-1",
+            scan.complete,
+            "artifact.json",
+        )
+        == []
+    )
+
+
+def _owned_ci(mgr: CMDBManager, name: str = "gone") -> str:
+    ci_id = make_ci_id(CIType.SERVICE.value, name)
+    mgr.create_ci(name, tags=[DISCOVERED_TAG], ci_id=ci_id)
+    return ci_id
+
+
+def test_lifecycle_requires_complete_pass_and_retires_at_threshold(tmp_path: Path) -> None:
+    mgr = CMDBManager(tmp_path)
+    ci_id = _owned_ci(mgr)
+    assert apply_retirement_lifecycle(mgr, "systemd:nor", [], [ci_id], False, apply=True) == []
+    assert "discovery_misses:systemd:nor" not in mgr.get_ci(ci_id).attributes
+    apply_retirement_lifecycle(mgr, "systemd:nor", [], [ci_id], True, threshold=2, apply=True)
+    preview = apply_retirement_lifecycle(
+        mgr, "systemd:nor", [], [ci_id], True, threshold=2, apply=False
+    )
+    assert preview[0]["action"] == "retire"
+    assert preview[0]["ci_id"] == ci_id
+    apply_retirement_lifecycle(mgr, "systemd:nor", [], [ci_id], True, threshold=2, apply=True)
+    assert mgr.get_ci(ci_id).status == CIStatus.RETIRED.value
+
+
+def test_lifecycle_reset_does_not_unretire(tmp_path: Path) -> None:
+    mgr = CMDBManager(tmp_path)
+    ci_id = _owned_ci(mgr)
+    mgr.set_attribute(ci_id, "test", "discovery_misses:systemd:nor", 2)
+    mgr.set_status(ci_id, "human", CIStatus.RETIRED.value, note="manual")
+    action = apply_retirement_lifecycle(mgr, "systemd:nor", [ci_id], [ci_id], True, apply=True)[0]
+    assert action["action"] == "reset"
+    assert mgr.get_ci(ci_id).attributes["discovery_misses:systemd:nor"] == 0
+    assert mgr.get_ci(ci_id).status == CIStatus.RETIRED.value
+
+
+def test_lifecycle_reports_dependents_before_retirement(tmp_path: Path) -> None:
+    mgr = CMDBManager(tmp_path)
+    target = _owned_ci(mgr, "database")
+    dependent = _owned_ci(mgr, "api")
+    mgr.add_relationship(dependent, "test", "depends_on", target)
+    mgr.set_attribute(target, "test", "discovery_misses:test", 2)
+    preview = apply_retirement_lifecycle(
+        mgr, "test", [], [target], True, threshold=3, apply=False
+    )[0]
+    assert preview["action"] == "retire"
+    assert preview["dependents"][0]["id"] == dependent
+
+
+def test_artifact_is_canonical_checksummed_and_secret_safe(tmp_path: Path) -> None:
+    path, checksum = write_run_artifact(
+        tmp_path,
+        {"scan_id": "run-1", "target": {"host": "nor", "password": "never-store-me"}},
+    )
+    assert path.name == "run-1.json"
+    assert "never-store-me" not in path.read_text()
+    assert '"password":"[redacted]"' in path.read_text()
+    assert path.with_suffix(".sha256").read_text().startswith(checksum)
+
+
+def test_freshness_slo_handles_missing_fresh_and_stale() -> None:
+    now = datetime(2026, 8, 20, tzinfo=timezone.utc)
+    assert not freshness_status(None, now, timedelta(hours=4))["fresh"]
+    assert freshness_status(now - timedelta(hours=3), now, timedelta(hours=4))["fresh"]
+    assert not freshness_status(now - timedelta(hours=5), now, timedelta(hours=4))["fresh"]
+
+
+def test_operator_summary_surfaces_drift_partial_runs_and_freshness() -> None:
+    now = datetime(2026, 8, 20, 12, tzinfo=timezone.utc)
+    artifacts = [
+        {
+            "scan_id": "partial",
+            "ended_at": (now - timedelta(hours=1)).isoformat(),
+            "completeness": {"complete": False},
+            "drift": {"count": 1, "by_severity": {"medium": 1}},
+        },
+        {
+            "scan_id": "complete",
+            "ended_at": (now - timedelta(hours=2)).isoformat(),
+            "completeness": {"complete": True},
+        },
+    ]
+    summary = operator_summary(artifacts, now, timedelta(hours=3))
+    assert summary["latest_scan_id"] == "partial"
+    assert summary["latest_drift"]["count"] == 1
+    assert summary["recent_failed_or_partial"] == 1
+    assert summary["freshness"]["fresh"]
