@@ -270,3 +270,11 @@ def test_applied_reconcile_enrolls_ci_in_exact_lifecycle_scope(tmp_path: Path) -
     assert ci is not None
     assert ci.attributes["lifecycle_scope"] == scan.scope_fingerprint()
     assert artifact["scope_fingerprint"] == scan.scope_fingerprint()
+
+
+def test_scope_fingerprint_changes_for_same_count_different_collectors() -> None:
+    target = TargetResult("nor", ("fleet",), 2)
+    first = ScanResult([], [target], collector_scope=("collect.a", "collect.b"))
+    second = ScanResult([], [target], collector_scope=("collect.a", "collect.c"))
+
+    assert first.scope_fingerprint() != second.scope_fingerprint()

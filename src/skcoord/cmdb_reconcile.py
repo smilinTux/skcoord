@@ -85,6 +85,8 @@ class ScanResult:
     declared_failures: list[str] = field(default_factory=list)
     deadline_exceeded: bool = False
     failure_budget_exceeded: bool = False
+    collector_scope: tuple[str, ...] = ()
+    config_scope: str = ""
 
     @property
     def complete(self) -> bool:
@@ -111,14 +113,18 @@ class ScanResult:
 
     def scope_fingerprint(self) -> str:
         """Bind lifecycle evidence to the exact target/collector scope."""
-        scope = [
-            {
-                "host": item.host,
-                "provenance": list(item.provenance),
-                "expected_collectors": item.expected_collectors,
-            }
-            for item in sorted(self.targets, key=lambda result: result.host)
-        ]
+        scope = {
+            "targets": [
+                {
+                    "host": item.host,
+                    "provenance": list(item.provenance),
+                    "expected_collectors": item.expected_collectors,
+                }
+                for item in sorted(self.targets, key=lambda result: result.host)
+            ],
+            "collectors": list(self.collector_scope),
+            "config": self.config_scope,
+        }
         return hashlib.sha256(
             json.dumps(scope, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
@@ -251,6 +257,15 @@ def scan_network(
         declared_failures,
         deadline_exceeded,
         failures > config.failure_budget,
+        tuple(
+            sorted(
+                f"{collector.__module__}.{collector.__qualname__}"
+                for collector in (*DECLARED_COLLECTORS, *OBSERVED_COLLECTORS)
+            )
+        ),
+        hashlib.sha256(
+            json.dumps(asdict(config), sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
     )
 
 
@@ -389,7 +404,7 @@ def _sanitize(value: object) -> object:
             else _sanitize(v)
             for k, v in value.items()
         }
-    if isinstance(value, list):
+    if isinstance(value, (list, tuple)):
         return [_sanitize(item) for item in value[:1000]]
     if isinstance(value, str):
         return value[:1000]
