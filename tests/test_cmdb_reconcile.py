@@ -257,3 +257,16 @@ def test_partial_run_never_reports_orphans(tmp_path: Path) -> None:
     artifact, _ = run_reconcile(mgr, scan)
     assert artifact["completeness"]["complete"] is False
     assert artifact["reconcile"]["orphans"] == []
+
+
+def test_applied_reconcile_enrolls_ci_in_exact_lifecycle_scope(tmp_path: Path) -> None:
+    mgr = CMDBManager(tmp_path)
+    item = DiscoveredCI("host", "nor", "ssh", observed=True, authority="network:nor")
+    scan = ScanResult([item], [TargetResult("nor", ("fleet",), 1, completed_collectors=1)])
+
+    artifact, _ = run_reconcile(mgr, scan, apply=True)
+
+    ci = mgr.get_ci(item.ci_id)
+    assert ci is not None
+    assert ci.attributes["lifecycle_scope"] == scan.scope_fingerprint()
+    assert artifact["scope_fingerprint"] == scan.scope_fingerprint()
