@@ -20,6 +20,8 @@ from skcoord.cmdb_reconcile import (
     normalize_drift,
     operator_summary,
     resolve_targets,
+    run_reconcile,
+    scan_health_events,
     scan_network,
     write_run_artifact,
 )
@@ -113,6 +115,10 @@ def test_scan_failure_is_health_not_asset_drift() -> None:
         )
         == []
     )
+    health = scan_health_events(scan, "scan-1", "artifact.json")
+    assert health[0].event_type == "cmdb.scan_health"
+    assert health[0].target == "nor"
+    assert health[0].collector == "ssh"
 
 
 def _owned_ci(mgr: CMDBManager, name: str = "gone") -> str:
@@ -198,3 +204,15 @@ def test_operator_summary_surfaces_drift_partial_runs_and_freshness() -> None:
     assert summary["latest_drift"]["count"] == 1
     assert summary["recent_failed_or_partial"] == 1
     assert summary["freshness"]["fresh"]
+
+
+def test_run_artifact_counts_retirement_actions(tmp_path: Path) -> None:
+    mgr = CMDBManager(tmp_path)
+    scan = ScanResult([], [TargetResult("nor", ("fleet",), 0)])
+    artifact, _ = run_reconcile(
+        mgr,
+        scan,
+        lifecycle_actions=[{"ci_id": "ci-service-gone", "action": "retire"}],
+    )
+    assert artifact["reconcile"]["retired"] == ["ci-service-gone"]
+    assert artifact["reconcile"]["counts"]["retired"] == 1
