@@ -22,6 +22,7 @@ from skcoord.discovery import (
     ORIGIN_UNKNOWN,
     DiscoveredCI,
     ObservationState,
+    ci_observation_state,
     collect_agents,
     collect_docker_containers,
     collect_fleet_objects,
@@ -208,7 +209,9 @@ def test_listening_ports_parse_bind_port_and_process() -> None:
 def test_ephemeral_ports_are_skipped_so_the_cmdb_cannot_grow_without_bound() -> None:
     """The store is append-only and the scan runs every 3h. Random high ports
     would accrete forever, each reboot's set orphaning the last."""
-    runner = FakeRunner(answers={"ss": SS_EPHEMERAL_OUTPUT, "ip_local_port_range": "32768\t60999\n"})
+    runner = FakeRunner(
+        answers={"ss": SS_EPHEMERAL_OUTPUT, "ip_local_port_range": "32768\t60999\n"}
+    )
     found = collect_listening_ports(runner)
 
     ports = {c.attributes["port"] for c in found}
@@ -249,19 +252,23 @@ def test_host_facts_normalise_linux_capacity_and_preserve_provenance() -> None:
         answers={
             "uname": "Linux 6.8\n",
             "nproc": "8\n",
-            "lscpu": json.dumps({"lscpu": [
-                {"field": "Socket(s):", "data": "1"},
-                {"field": "Core(s) per socket:", "data": "4"},
-                {"field": "Thread(s) per core:", "data": "2"},
-                {"field": "Model name:", "data": "Pengu CPU"},
-            ]}),
+            "lscpu": json.dumps(
+                {
+                    "lscpu": [
+                        {"field": "Socket(s):", "data": "1"},
+                        {"field": "Core(s) per socket:", "data": "4"},
+                        {"field": "Thread(s) per core:", "data": "2"},
+                        {"field": "Model name:", "data": "Pengu CPU"},
+                    ]
+                }
+            ),
             "free": "              total used free shared buff/cache available\nMem: 1000 400 200 10 400 500\n",
-            "ip -j": json.dumps([{"ifname": "eth0", "addr_info": [
-                {"local": "192.0.2.10", "scope": "global"}
-            ]}]),
-            "lsblk": json.dumps({"blockdevices": [
-                {"name": "sda", "type": "disk", "size": 10000, "children": []}
-            ]}),
+            "ip -j": json.dumps(
+                [{"ifname": "eth0", "addr_info": [{"local": "192.0.2.10", "scope": "global"}]}]
+            ),
+            "lsblk": json.dumps(
+                {"blockdevices": [{"name": "sda", "type": "disk", "size": 10000, "children": []}]}
+            ),
             "df": "Filesystem 1B-blocks Used Available Use% Mounted on\n/dev/sda1 9000 4000 5000 45% /\n",
         },
     )
@@ -285,11 +292,18 @@ def test_host_fact_failures_are_missing_not_zero() -> None:
 
 def test_alias_overlap_merges_host_sightings_under_declared_canonical_name() -> None:
     declared = DiscoveredCI(
-        "host", "alpha.example", "fleet:node", canonical_name="alpha.example",
+        "host",
+        "alpha.example",
+        "fleet:node",
+        canonical_name="alpha.example",
         aliases=("ssh-alpha", "192.0.2.10"),
     )
     observed = DiscoveredCI(
-        "host", "ssh-alpha", "host", observed=True, canonical_name="ssh-alpha",
+        "host",
+        "ssh-alpha",
+        "host",
+        observed=True,
+        canonical_name="ssh-alpha",
         aliases=("192.0.2.10",),
     )
     folded = merge([declared, observed])
@@ -308,8 +322,27 @@ def test_fingerprint_only_asset_is_an_unmanaged_device() -> None:
 def test_observation_freshness_is_not_health() -> None:
     now = datetime(2026, 8, 20, tzinfo=timezone.utc)
     assert observation_state("") is ObservationState.UNKNOWN
-    assert observation_state((now - timedelta(hours=1)).isoformat(), now=now) is ObservationState.FRESH
-    assert observation_state((now - timedelta(days=1)).isoformat(), now=now) is ObservationState.STALE
+    assert (
+        observation_state((now - timedelta(hours=1)).isoformat(), now=now)
+        is ObservationState.FRESH
+    )
+    assert (
+        observation_state((now - timedelta(days=1)).isoformat(), now=now) is ObservationState.STALE
+    )
+
+
+def test_ci_observation_freshness_ignores_stored_claim(tmp_path: Path) -> None:
+    now = datetime(2026, 8, 20, tzinfo=timezone.utc)
+    mgr = CMDBManager(tmp_path)
+    ci = mgr.create_ci(
+        "host",
+        "host",
+        attributes={
+            "observed_at": (now - timedelta(days=1)).isoformat(),
+            "observation_state": "fresh",
+        },
+    )
+    assert ci_observation_state(ci, now=now) is ObservationState.STALE
 
 
 # ── scan + merge ──────────────────────────────────────────────────────────
@@ -438,7 +471,10 @@ def test_reconcile_records_changed_attributes(tmp_path: Path) -> None:
     mgr = CMDBManager(tmp_path)
     before = [
         DiscoveredCI(
-            "service", "skgateway", "systemd", attributes={"active_state": "active"},
+            "service",
+            "skgateway",
+            "systemd",
+            attributes={"active_state": "active"},
             tags=(DISCOVERED_TAG,),
         )
     ]
@@ -446,7 +482,10 @@ def test_reconcile_records_changed_attributes(tmp_path: Path) -> None:
 
     after = [
         DiscoveredCI(
-            "service", "skgateway", "systemd", attributes={"active_state": "failed"},
+            "service",
+            "skgateway",
+            "systemd",
+            attributes={"active_state": "failed"},
             tags=(DISCOVERED_TAG,),
         )
     ]
@@ -498,21 +537,30 @@ def test_partial_scan_never_turns_absence_into_an_orphan(tmp_path: Path) -> None
 def test_reconcile_links_existing_alias_duplicates_without_rewriting_ids(tmp_path: Path) -> None:
     mgr = CMDBManager(tmp_path)
     canonical = mgr.create_ci(
-        "alpha.example", "host", attributes={"aliases": ["192.0.2.10"]},
+        "alpha.example",
+        "host",
+        attributes={"aliases": ["192.0.2.10"]},
         tags=[DISCOVERED_TAG],
     )
     duplicate = mgr.create_ci(
-        "ssh-alpha", "host", attributes={"aliases": ["192.0.2.10"]},
+        "ssh-alpha",
+        "host",
+        attributes={"aliases": ["192.0.2.10"]},
         tags=[DISCOVERED_TAG],
     )
     sighting = DiscoveredCI(
-        "host", "alpha.example", "fleet:node", canonical_name="alpha.example",
+        "host",
+        "alpha.example",
+        "fleet:node",
+        canonical_name="alpha.example",
         aliases=("ssh-alpha", "192.0.2.10"),
     )
     reconcile(mgr, [sighting], apply=True)
     migrated = mgr.get_ci(duplicate.id)
     assert canonical.id != duplicate.id
-    assert any(r.rel_type == "alias_of" and r.target == canonical.id for r in migrated.relationships)
+    assert any(
+        r.rel_type == "alias_of" and r.target == canonical.id for r in migrated.relationships
+    )
 
 
 def _service(name: str, active_state: str, **kw) -> DiscoveredCI:
@@ -640,11 +688,17 @@ def test_drift_ignores_distro_units_but_keeps_operator_ones() -> None:
     """300 distro units must not bury the 20 findings that matter."""
     found = [
         DiscoveredCI(
-            "service", "ModemManager", "systemd--system", observed=True,
+            "service",
+            "ModemManager",
+            "systemd--system",
+            observed=True,
             attributes={"origin": ORIGIN_DISTRO},
         ),
         DiscoveredCI(
-            "service", "my-cron-hack", "systemd--user", observed=True,
+            "service",
+            "my-cron-hack",
+            "systemd--user",
+            observed=True,
             attributes={"origin": ORIGIN_OPERATOR},
         ),
     ]
@@ -656,7 +710,10 @@ def test_drift_reports_unknown_origin_rather_than_hiding_it() -> None:
     """If FragmentPath lookup fails, that must be loud, not silently clean."""
     found = [
         DiscoveredCI(
-            "service", "mystery", "systemd--user", observed=True,
+            "service",
+            "mystery",
+            "systemd--user",
+            observed=True,
             attributes={"origin": ORIGIN_UNKNOWN},
         )
     ]
@@ -679,7 +736,10 @@ def test_drift_does_not_flag_a_declared_cronjob_running_as_a_timer() -> None:
     found = [
         DiscoveredCI("service", "capauth-custody-doctor", "fleet:cronjob"),
         DiscoveredCI(
-            "service", "capauth-custody-doctor", "systemd--user", observed=True,
+            "service",
+            "capauth-custody-doctor",
+            "systemd--user",
+            observed=True,
             attributes={"origin": ORIGIN_OPERATOR, "systemd_kind": "timer"},
         ),
     ]
@@ -706,9 +766,7 @@ def test_systemd_collector_reads_timers_and_classifies_origin() -> None:
 def test_fragment_lookup_names_units_explicitly_instead_of_globbing() -> None:
     """`systemctl show '*.service'` matched 78 of 211 real units, silently
     leaving two thirds unclassified and reported as drift."""
-    runner = FakeRunner(
-        answers={"--type=service": SYSTEMD_OUTPUT, "show": SHOW_OUTPUT}
-    )
+    runner = FakeRunner(answers={"--type=service": SYSTEMD_OUTPUT, "show": SHOW_OUTPUT})
     collect_systemd_units(runner, scopes=("--user",), kinds=("service",))
 
     show_calls = [c for c in runner.calls if "show" in c]
