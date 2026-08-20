@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import ipaddress
+import os
 import re
 import shlex
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -31,6 +32,24 @@ class ProbeResult:
 
 class ProbeTransport(Protocol):
     def probe(self, host: str, port: int, timeout: float) -> Optional[ProbeResult]: ...
+
+
+def normalize_host(value: str) -> str:
+    """Return a canonical IP/hostname, rejecting SSH options and ambiguous input."""
+    host = value.strip()
+    if not host or host.startswith("-") or any(ord(char) < 33 or ord(char) == 127 for char in host):
+        raise ValueError("invalid host")
+    try:
+        return str(ipaddress.ip_address(host))
+    except ValueError:
+        host = host.rstrip(".").lower()
+        labels = host.split(".")
+        if not labels or len(host) > 253 or any(
+            not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label)
+            for label in labels
+        ):
+            raise ValueError("invalid host") from None
+        return host
 
 
 def _network_targets(networks: Sequence[str], max_hosts: int) -> list[str]:
@@ -91,10 +110,14 @@ def collect_network_fingerprints(
         banner = result.banner[:4096]
         attributes: dict[str, Any] = {"port": port, "proto": "tcp", "probe": "connect"}
         if result.service:
-            attributes["service_hint"] = result.service[:80]
+            service = "".join(char for char in result.service if char.isprintable()).strip()
+            if service:
+                attributes["service_hint"] = service[:80]
         if banner:
             attributes.update(
-                banner_bytes=len(banner),
+                banner_bytes=len(result.banner),
+                banner_bytes_hashed=len(banner),
+                banner_truncated=len(result.banner) > len(banner),
                 banner_sha256=hashlib.sha256(banner).hexdigest(),
             )
         out.append(
@@ -117,19 +140,53 @@ class ProxmoxAPITransport(Protocol):
 
     def get(self, path: str) -> Any: ...
 
+    @property
+    def policy(self) -> "ProxmoxTransportPolicy": ...
 
-def _rows(value: Any) -> list[Mapping[str, Any]]:
+
+@dataclass(frozen=True)
+class ProxmoxTransportPolicy:
+    """Security properties the injected Proxmox adapter must enforce."""
+
+    tls_verified: bool = True
+    timeout_seconds: float = 10.0
+    max_rows: int = 10_000
+
+    def __post_init__(self) -> None:
+        if not self.tls_verified:
+            raise ValueError("Proxmox transport must verify TLS")
+        if not 0 < self.timeout_seconds <= 60:
+            raise ValueError("Proxmox timeout must be between 0 and 60 seconds")
+        if not 1 <= self.max_rows <= 100_000:
+            raise ValueError("Proxmox max_rows must be between 1 and 100000")
+
+
+def _rows(value: Any, max_rows: int) -> list[Mapping[str, Any]]:
     if isinstance(value, Mapping):
         value = value.get("data", [])
-    return [row for row in value if isinstance(row, Mapping)] if isinstance(value, list) else []
+    if not isinstance(value, list):
+        return []
+    if len(value) > max_rows:
+        raise ValueError(f"Proxmox response exceeds max_rows={max_rows}")
+    return [row for row in value if isinstance(row, Mapping)]
 
 
 def collect_proxmox_inventory(transport: ProxmoxAPITransport) -> list[DiscoveredCI]:
     """Collect Proxmox nodes, guests, and storage via an injected API client."""
+    policy = transport.policy
+    # Accessing and validating a concrete policy makes TLS, timeout, and response
+    # bounds part of the adapter contract rather than undocumented assumptions.
+    if not isinstance(policy, ProxmoxTransportPolicy):
+        raise TypeError("Proxmox transport must expose ProxmoxTransportPolicy")
     out: list[DiscoveredCI] = []
-    nodes = sorted(_rows(transport.get("/nodes")), key=lambda row: str(row.get("node", "")))
+    nodes = sorted(
+        _rows(transport.get("/nodes"), policy.max_rows), key=lambda row: str(row.get("node", ""))
+    )
     for node in nodes:
-        name = str(node.get("node", "")).strip()
+        raw_name = str(node.get("node", "")).strip()
+        if not raw_name:
+            continue
+        name = normalize_host(raw_name)
         if not name:
             continue
         node_id = make_ci_id(CIType.HOST.value, name)
@@ -148,7 +205,7 @@ def collect_proxmox_inventory(transport: ProxmoxAPITransport) -> list[Discovered
             )
         )
         for kind, endpoint in (("qemu", "qemu"), ("lxc", "lxc")):
-            guests = _rows(transport.get(f"/nodes/{node_path}/{endpoint}"))
+            guests = _rows(transport.get(f"/nodes/{node_path}/{endpoint}"), policy.max_rows)
             for guest in sorted(guests, key=lambda row: str(row.get("vmid", ""))):
                 vmid = guest.get("vmid")
                 if vmid is None:
@@ -172,7 +229,7 @@ def collect_proxmox_inventory(transport: ProxmoxAPITransport) -> list[Discovered
                         relationships=(("runs_on", node_id),),
                     )
                 )
-        for storage in _rows(transport.get(f"/nodes/{node_path}/storage")):
+        for storage in _rows(transport.get(f"/nodes/{node_path}/storage"), policy.max_rows):
             storage_name = str(storage.get("storage", "")).strip()
             if storage_name:
                 out.append(
@@ -232,8 +289,14 @@ class SKVaultCredentialResolver:
             raise ValueError("invalid SSH username")
         if not identity.is_absolute() or not known_hosts.is_absolute():
             raise ValueError("SSH credential paths must be absolute")
-        if not identity.is_file() or not known_hosts.is_file():
-            raise ValueError("SSH credential files must already exist")
+        for path, label in ((identity, "identity"), (known_hosts, "known_hosts")):
+            if path.is_symlink() or not path.is_file():
+                raise ValueError(f"SSH {label} must be an existing regular non-symlink file")
+            stat = path.stat()
+            if stat.st_uid != os.geteuid():
+                raise ValueError(f"SSH {label} must be owned by the current user")
+            if stat.st_mode & 0o022:
+                raise ValueError(f"SSH {label} must not be group/world writable")
         if identity.stat().st_mode & 0o077:
             raise ValueError("SSH identity file must not be group/world accessible")
         return SSHCredential(username, identity, known_hosts)
@@ -250,15 +313,7 @@ class SecureSSHRunner:
     def __post_init__(self) -> None:
         if self.timeout <= 0:
             raise ValueError("SSH timeout must be positive")
-        try:
-            ipaddress.ip_address(self.host)
-        except ValueError:
-            labels = self.host.rstrip(".").split(".")
-            if not labels or any(
-                not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", label)
-                for label in labels
-            ):
-                raise ValueError("invalid SSH host") from None
+        self.host = normalize_host(self.host)
 
     def command(self, argv: Sequence[str]) -> list[str]:
         remote = " ".join(shlex.quote(arg) for arg in argv)
