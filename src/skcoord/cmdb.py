@@ -18,7 +18,9 @@ import json
 import logging
 import os
 import re
+import shutil
 import socket
+import tempfile
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
@@ -356,6 +358,158 @@ class CMDBManager:
             "core": migrated_core,
             "events": events,
         }
+
+    def migrate_schema(
+        self,
+        *,
+        apply: bool = False,
+        backup_path: Optional[Path] = None,
+    ) -> dict[str, Any]:
+        """Safely migrate the physical CMDB store from schema v1 to v2.
+
+        Dry-run is the default and performs no filesystem writes.  Applying a
+        migration copies the complete store to a same-filesystem staging
+        directory, rewrites and validates the staged copy, then atomically
+        renames the original to a retained backup and the staging directory
+        into place.  A failure during cutover restores the original path.
+
+        Records already at v2 are left byte-for-byte alone, making repeated
+        calls idempotent.  Unknown future versions and malformed records abort
+        before the live store is renamed.
+        """
+        plan = self._schema_migration_plan()
+        result: dict[str, Any] = {
+            "applied": False,
+            "source": str(self.cmdb_dir),
+            "target_schema_version": CMDB_CORE_SCHEMA_VERSION,
+            **plan,
+        }
+        if not apply or plan["records_to_migrate"] == 0:
+            return result
+
+        parent = self.cmdb_dir.parent
+        parent.mkdir(parents=True, exist_ok=True)
+        backup = Path(backup_path).expanduser() if backup_path else parent / (
+            f"cmdb.backup-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ')}"
+        )
+        if backup.parent != parent:
+            raise ValueError("backup_path must share the CMDB parent filesystem")
+        if backup.exists():
+            raise FileExistsError(f"backup path already exists: {backup}")
+
+        lock_path = parent / ".cmdb-schema-migration.lock"
+        with open(lock_path, "a+", encoding="utf-8") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            # Re-plan under the lock so a concurrent writer cannot invalidate
+            # the dry-run result used to decide whether migration is needed.
+            plan = self._schema_migration_plan()
+            result.update(plan)
+            if plan["records_to_migrate"] == 0:
+                return result
+            staging = Path(tempfile.mkdtemp(prefix=".cmdb-migrate-", dir=parent))
+            shutil.rmtree(staging)
+            moved_original = False
+            try:
+                shutil.copytree(self.cmdb_dir, staging, symlinks=True)
+                staged = CMDBManager(parent)
+                staged.cmdb_dir = staging
+                staged._rewrite_schema_v2()
+                staged_plan = staged._schema_migration_plan()
+                if staged_plan["records_to_migrate"]:
+                    raise RuntimeError("staged CMDB did not converge to schema v2")
+                # Folding every CI validates both core and event records.
+                staged.list_cis()
+                os.rename(self.cmdb_dir, backup)
+                moved_original = True
+                try:
+                    os.rename(staging, self.cmdb_dir)
+                except BaseException:
+                    os.rename(backup, self.cmdb_dir)
+                    moved_original = False
+                    raise
+                result.update(applied=True, backup=str(backup))
+                return result
+            finally:
+                if staging.exists():
+                    shutil.rmtree(staging)
+                if moved_original and not self.cmdb_dir.exists() and backup.exists():
+                    os.rename(backup, self.cmdb_dir)
+
+    def _schema_migration_plan(self) -> dict[str, Any]:
+        """Validate all physical records and report the v1 work required."""
+        records = cores = events = 0
+        if not self.cmdb_dir.exists():
+            return {"records": 0, "records_to_migrate": 0, "cores": 0, "events": 0}
+        for record in sorted(self.cmdb_dir.iterdir()):
+            core_path = record / "core.json"
+            if not record.is_dir() or not core_path.exists():
+                continue
+            if record.is_symlink() or core_path.is_symlink():
+                raise ValueError(f"refusing symlinked CMDB record: {record}")
+            core = json.loads(core_path.read_text(encoding="utf-8"))
+            if not isinstance(core, dict):
+                raise ValueError(f"invalid core for CI {record.name}")
+            version = _schema_version(
+                core.get("schema_version", 1),
+                supported=CMDB_CORE_SCHEMA_VERSION,
+                record=f"CI {record.name}",
+            )
+            records += 1
+            if version < CMDB_CORE_SCHEMA_VERSION:
+                cores += 1
+            event_dir = record / "events"
+            if event_dir.exists():
+                for path in sorted(event_dir.glob("*.jsonl")):
+                    if path.is_symlink():
+                        raise ValueError(f"refusing symlinked CMDB event: {path}")
+                    for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                        if not line.strip():
+                            continue
+                        event = json.loads(line)
+                        if not isinstance(event, dict):
+                            raise ValueError(f"invalid event {path}:{number}")
+                        version = _schema_version(
+                            event.get("schema_version", 1),
+                            supported=CMDB_EVENT_SCHEMA_VERSION,
+                            record=f"event {path.name}:{number}",
+                        )
+                        if version < CMDB_EVENT_SCHEMA_VERSION:
+                            events += 1
+        return {
+            "records": records,
+            "records_to_migrate": cores + events,
+            "cores": cores,
+            "events": events,
+        }
+
+    def _rewrite_schema_v2(self) -> None:
+        """Rewrite v1 records in a staging tree; never call on the live tree."""
+        for record in sorted(self.cmdb_dir.iterdir()):
+            core_path = record / "core.json"
+            if not record.is_dir() or not core_path.exists():
+                continue
+            core = json.loads(core_path.read_text(encoding="utf-8"))
+            if int(core.get("schema_version", 1)) < CMDB_CORE_SCHEMA_VERSION:
+                core["schema_version"] = CMDB_CORE_SCHEMA_VERSION
+                core_path.write_text(json.dumps(core, indent=2, default=str) + "\n", encoding="utf-8")
+            event_dir = record / "events"
+            if not event_dir.exists():
+                continue
+            for path in sorted(event_dir.glob("*.jsonl")):
+                output = []
+                changed = False
+                for line in path.read_text(encoding="utf-8").splitlines():
+                    if not line.strip():
+                        output.append(line)
+                        continue
+                    event = json.loads(line)
+                    if int(event.get("schema_version", 1)) < CMDB_EVENT_SCHEMA_VERSION:
+                        event["schema_version"] = CMDB_EVENT_SCHEMA_VERSION
+                        line = json.dumps(event, default=str)
+                        changed = True
+                    output.append(line)
+                if changed:
+                    path.write_text("\n".join(output) + "\n", encoding="utf-8")
 
     def list_cis(self, ci_type: Optional[str] = None) -> list[ConfigItem]:
         if not self.cmdb_dir.exists():
