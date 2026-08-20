@@ -40,5 +40,35 @@ Each sink receives an isolated snapshot view. A checkpoint is committed only
 when every configured sink accepts that snapshot; partial projection results
 surface failed sinks and leave the committed checkpoint unset.
 
+`JsonProjectionSink` is the reference durable search/read-model sink. It
+atomically replaces a versioned JSON document containing the snapshot checksum,
+count, and CI records. `JsonCheckpointStore` atomically records the last
+all-sinks-successful checksum separately from every sink. A failed sink or
+checkpoint write leaves the previous checkpoint intact, making projection lag
+observable across process restarts.
+
+AGE integration is dependency-injected through `AgeProjectionAdapter` and
+wrapped by `AgeProjectionSink`. The adapter operation is deliberately narrow:
+`replace_projection(checkpoint, items)`. An AGE implementation should replace
+its derived graph in one database transaction and store the supplied checksum
+in that graph schema. It receives detached JSON-safe records, never a
+`CMDBManager` or canonical filesystem path. Configure it only with a database
+role restricted to the disposable projection graph.
+
+```python
+from pathlib import Path
+from skcoord.cmdb_projection import (
+    AgeProjectionSink, JsonCheckpointStore, JsonProjectionSink, project,
+)
+
+result = project(
+    manager,
+    [JsonProjectionSink(Path("var/cmdb-search.json")), AgeProjectionSink(age_adapter)],
+    JsonCheckpointStore(Path("var/cmdb-projection-checkpoint.json")),
+)
+if not result["complete"]:
+    raise RuntimeError(f"projection lag: {result['failed_sinks']}")
+```
+
 Projection failure leaves the canonical CMDB available and surfaces lag; it
 never triggers reverse synchronization.
