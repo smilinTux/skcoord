@@ -111,6 +111,7 @@ class DiscoveredCI:
     observed_at: str = ""
     scan_id: str = ""
     authority: str = ""
+    lifecycle_scope: str = ""
     schema_version: int = OBSERVATION_SCHEMA_VERSION
 
     @property
@@ -166,6 +167,7 @@ class DiscoveredCI:
             authority=(
                 AUTHORITY_OBSERVED if self.observed or other.observed else AUTHORITY_DECLARED
             ),
+            lifecycle_scope=primary.lifecycle_scope or secondary.lifecycle_scope,
         )
 
     @property
@@ -896,6 +898,26 @@ def merge(items: Iterable[DiscoveredCI]) -> list[DiscoveredCI]:
     return sorted(folded, key=lambda c: (c.ci_type, c.canonical_name or c.name))
 
 
+def _matching_identity_ids(item: DiscoveredCI, existing: Iterable[object]) -> set[str]:
+    """Resolve host/device aliases consistently for reconcile and drift."""
+    if item.ci_type not in (CIType.HOST.value, CIType.DEVICE.value):
+        return {item.ci_id}
+    aliases = set(item.identity_aliases)
+    matches = {item.ci_id}
+    for ci in existing:
+        if getattr(ci, "ci_type", "") not in (CIType.HOST.value, CIType.DEVICE.value):
+            continue
+        values = (
+            getattr(ci, "id", "").removeprefix(f"ci-{getattr(ci, 'ci_type', '')}-"),
+            getattr(ci, "name", ""),
+            getattr(ci, "attributes", {}).get("canonical_name", ""),
+            *getattr(ci, "attributes", {}).get("aliases", []),
+        )
+        if aliases & {_normalise_alias(value) for value in values if value}:
+            matches.add(ci.id)
+    return matches
+
+
 def scan(
     home: Path,
     runners: Sequence[CommandRunner] = (),
@@ -1023,30 +1045,20 @@ def reconcile(
     for item in discovered:
         ci_id = item.ci_id
         if item.ci_type in (CIType.HOST.value, CIType.DEVICE.value):
-            aliases = set(item.identity_aliases)
-            matching = [
-                ci
-                for ci in existing.values()
-                if ci.ci_type in (CIType.HOST.value, CIType.DEVICE.value)
-                and aliases
-                & {
-                    _normalise_alias(value)
-                    for value in (
-                        ci.id.removeprefix(f"ci-{ci.ci_type}-"),
-                        ci.name,
-                        ci.attributes.get("canonical_name", ""),
-                        *ci.attributes.get("aliases", []),
-                    )
-                    if value
-                }
-            ]
+            matching_ids = _matching_identity_ids(item, existing.values())
+            matching = [existing[cid] for cid in matching_ids if cid in existing]
             if matching:
-                target = existing.get(ci_id) or sorted(matching, key=lambda ci: ci.id)[0]
-                ci_id = target.id
+                same_type = [ci for ci in matching if ci.ci_type == item.ci_type]
+                target = existing.get(ci_id) or (
+                    sorted(same_type, key=lambda ci: ci.id)[0] if same_type else None
+                )
+                # A managed host sighting promotes an alias-matched unmanaged
+                # device by creating the host core and retaining the device as
+                # alias history. It never rewrites a write-once CI type.
+                if target is not None:
+                    ci_id = target.id
                 migrations.extend(
-                    (duplicate.id, target.id)
-                    for duplicate in matching
-                    if duplicate.id != target.id
+                    (duplicate.id, ci_id) for duplicate in matching if duplicate.id != ci_id
                 )
         by_id[ci_id] = item
 
@@ -1067,6 +1079,8 @@ def reconcile(
                     or (AUTHORITY_OBSERVED if item.observed else AUTHORITY_DECLARED),
                     "observation_schema_version": item.schema_version,
                 }
+                if item.lifecycle_scope:
+                    attributes["lifecycle_scope"] = item.lifecycle_scope
                 if item.observed_at:
                     attributes.update(
                         {
@@ -1083,10 +1097,13 @@ def reconcile(
                     tags=list(item.tags),
                     ci_id=ci_id,
                 )
+                if item.authority:
+                    for tag in item.tags:
+                        mgr.add_tag(ci_id, agent, tag, authority=item.authority)
                 if derived_status and derived_status != CIStatus.OPERATIONAL.value:
                     mgr.set_status(ci_id, agent, derived_status, note="from observed active_state")
                 for rel_type, target in item.relationships:
-                    mgr.add_relationship(ci_id, agent, rel_type, target)
+                    mgr.add_relationship(ci_id, agent, rel_type, target, authority=item.authority)
             continue
 
         evidence = {
@@ -1096,6 +1113,8 @@ def reconcile(
             or (AUTHORITY_OBSERVED if item.observed else AUTHORITY_DECLARED),
             "observation_schema_version": item.schema_version,
         }
+        if item.lifecycle_scope:
+            evidence["lifecycle_scope"] = item.lifecycle_scope
         if item.observed_at:
             evidence.update(
                 {
@@ -1113,15 +1132,47 @@ def reconcile(
             (rel_type, target)
             for rel_type, target in item.relationships
             if not any(
-                r.rel_type == rel_type and r.target == target for r in current.relationships
+                r.rel_type == rel_type
+                and r.target == target
+                and (not item.authority or r.authority in ("", item.authority))
+                for r in current.relationships
             )
         ]
+        stale_rels = [
+            (rel.rel_type, rel.target)
+            for rel in current.relationships
+            if item.authority
+            and rel.authority == item.authority
+            and (rel.rel_type, rel.target) not in item.relationships
+        ]
+        desired_metadata = {
+            "name": item.name,
+            "description": item.description,
+            "node": item.node,
+        }
+        metadata_changes = {
+            key: value
+            for key, value in desired_metadata.items()
+            if value and getattr(current, key) != value
+        }
+        desired_tags = set(item.tags)
+        missing_tags = sorted(desired_tags - set(current.tags))
+        stale_tags = sorted(
+            tag
+            for tag, owner in current.tag_authorities.items()
+            if owner == item.authority and tag not in desired_tags
+        )
         status_changes = (
             derived_status is not None
             and current.status != CIStatus.RETIRED.value
             and current.status != derived_status
         )
-        if not changed and not missing_rels and not status_changes:
+        if (
+            not any(
+                (changed, missing_rels, stale_rels, metadata_changes, missing_tags, stale_tags)
+            )
+            and not status_changes
+        ):
             report.unchanged.append(ci_id)
             continue
 
@@ -1129,13 +1180,25 @@ def reconcile(
         if status_changes:
             report_changes = ["status"] + report_changes
         report.updated[ci_id] = report_changes + [f"{r}->{t}" for r, t in missing_rels]
+        report.updated[ci_id].extend(f"remove:{r}->{t}" for r, t in stale_rels)
+        report.updated[ci_id].extend(f"metadata:{key}" for key in sorted(metadata_changes))
+        report.updated[ci_id].extend(f"tag:+{tag}" for tag in missing_tags)
+        report.updated[ci_id].extend(f"tag:-{tag}" for tag in stale_tags)
         if apply:
             for key in changed:
                 mgr.set_attribute(ci_id, agent, key, desired_attributes[key])
             if status_changes:
                 mgr.set_status(ci_id, agent, derived_status, note="from observed active_state")
             for rel_type, target in missing_rels:
-                mgr.add_relationship(ci_id, agent, rel_type, target)
+                mgr.add_relationship(ci_id, agent, rel_type, target, authority=item.authority)
+            for rel_type, target in stale_rels:
+                mgr.remove_relationship(ci_id, agent, rel_type, target)
+            for key, value in metadata_changes.items():
+                mgr.set_metadata(ci_id, agent, key, value)
+            for tag in missing_tags:
+                mgr.add_tag(ci_id, agent, tag, authority=item.authority)
+            for tag in stale_tags:
+                mgr.remove_tag(ci_id, agent, tag, authority=item.authority)
 
     if not scan_complete:
         return report
@@ -1229,8 +1292,9 @@ def drift(
             )
 
     if mgr is not None:
-        seen = {d.ci_id for d in discovered}
-        for ci in mgr.list_cis():
+        stored = mgr.list_cis()
+        seen = {ci_id for item in discovered for ci_id in _matching_identity_ids(item, stored)}
+        for ci in stored:
             if ci.id in seen:
                 continue
             if DISCOVERED_TAG in (ci.tags or []) and ci.status != CIStatus.RETIRED.value:

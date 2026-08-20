@@ -18,6 +18,13 @@ search indexes, reports, and network maps are disposable read models.
 - Nor and chi operate separate canonical CMDBs. Reachability is not federation.
 - Evidence freshness is derived from `observed_at` when read. A stored
   `observation_state` is never authoritative because time passes without an event.
+- Reconcile persists a collector's `lifecycle_scope` fingerprint with its
+  observation. Orchestrators must stamp that field from the exact target and
+  collector scope; a changed scope is new evidence, not a comparable miss pass.
+- Discovery-owned tags and relationships carry their authority in events and
+  converge within that authority. Core/manual tags and unowned relationships
+  are preserved. Host/device alias resolution is shared by reconcile and drift;
+  promotion creates a host CI and retains the old device as `alias_of` history.
 - Readers reject future core or event schema versions. A v1-to-v2 migration starts
   from `migration_preview()`, a detached copy that leaves the canonical record intact.
 
