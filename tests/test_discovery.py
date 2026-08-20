@@ -9,6 +9,7 @@ CI must not delete it.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,7 @@ from skcoord.discovery import (
     ORIGIN_OPERATOR,
     ORIGIN_UNKNOWN,
     DiscoveredCI,
+    ObservationState,
     collect_agents,
     collect_docker_containers,
     collect_fleet_objects,
@@ -27,8 +29,10 @@ from skcoord.discovery import (
     collect_listening_ports,
     collect_registry,
     collect_systemd_units,
+    device_from_fingerprint,
     drift,
     merge,
+    observation_state,
     reconcile,
     scan,
 )
@@ -239,6 +243,75 @@ def test_observed_collectors_return_nothing_when_the_host_is_unreachable() -> No
     assert collect_host_facts(runner) == []
 
 
+def test_host_facts_normalise_linux_capacity_and_preserve_provenance() -> None:
+    runner = FakeRunner(
+        host="ssh-alpha",
+        answers={
+            "uname": "Linux 6.8\n",
+            "nproc": "8\n",
+            "lscpu": json.dumps({"lscpu": [
+                {"field": "Socket(s):", "data": "1"},
+                {"field": "Core(s) per socket:", "data": "4"},
+                {"field": "Thread(s) per core:", "data": "2"},
+                {"field": "Model name:", "data": "Pengu CPU"},
+            ]}),
+            "free": "              total used free shared buff/cache available\nMem: 1000 400 200 10 400 500\n",
+            "ip -j": json.dumps([{"ifname": "eth0", "addr_info": [
+                {"local": "192.0.2.10", "scope": "global"}
+            ]}]),
+            "lsblk": json.dumps({"blockdevices": [
+                {"name": "sda", "type": "disk", "size": 10000, "children": []}
+            ]}),
+            "df": "Filesystem 1B-blocks Used Available Use% Mounted on\n/dev/sda1 9000 4000 5000 45% /\n",
+        },
+    )
+    host = collect_host_facts(runner)[0]
+    assert host.attributes["cpu_logical"] == 8
+    assert host.attributes["cpu_cores_per_socket"] == 4
+    assert host.attributes["memory_total_bytes"] == 1000
+    assert host.attributes["disk_capacity_bytes"] == 10000
+    assert host.attributes["filesystems"][0]["used_bytes"] == 4000
+    assert host.attributes["ip_addresses"] == ["192.0.2.10"]
+    assert "lscpu" in host.attributes["fact_provenance"]
+    assert "192.0.2.10" in host.identity_aliases
+
+
+def test_host_fact_failures_are_missing_not_zero() -> None:
+    host = collect_host_facts(FakeRunner(answers={"uname": "Linux 6.8\n"}))[0]
+    assert "memory_total_bytes" not in host.attributes
+    assert "disk_capacity_bytes" not in host.attributes
+    assert "cpu_logical" not in host.attributes
+
+
+def test_alias_overlap_merges_host_sightings_under_declared_canonical_name() -> None:
+    declared = DiscoveredCI(
+        "host", "alpha.example", "fleet:node", canonical_name="alpha.example",
+        aliases=("ssh-alpha", "192.0.2.10"),
+    )
+    observed = DiscoveredCI(
+        "host", "ssh-alpha", "host", observed=True, canonical_name="ssh-alpha",
+        aliases=("192.0.2.10",),
+    )
+    folded = merge([declared, observed])
+    assert len(folded) == 1
+    assert folded[0].ci_id == make_ci_id("host", "alpha.example")
+    assert set(folded[0].identity_aliases) == {"alpha.example", "ssh-alpha", "192.0.2.10"}
+
+
+def test_fingerprint_only_asset_is_an_unmanaged_device() -> None:
+    device = device_from_fingerprint("printer", "arp", aliases=("192.0.2.50",))
+    assert device.ci_type == CIType.DEVICE.value
+    assert device.attributes["managed"] is False
+    assert "unmanaged" in device.tags
+
+
+def test_observation_freshness_is_not_health() -> None:
+    now = datetime(2026, 8, 20, tzinfo=timezone.utc)
+    assert observation_state("") is ObservationState.UNKNOWN
+    assert observation_state((now - timedelta(hours=1)).isoformat(), now=now) is ObservationState.FRESH
+    assert observation_state((now - timedelta(days=1)).isoformat(), now=now) is ObservationState.STALE
+
+
 # ── scan + merge ──────────────────────────────────────────────────────────
 
 
@@ -246,6 +319,7 @@ def test_scan_without_runners_collects_no_observed_state(home: Path) -> None:
     found = scan(home)
     assert found, "declared sources should still be collected"
     assert not any(c.observed for c in found), "no runner means nothing was observed"
+    assert all(c.scan_id and c.authority == "declared" for c in found)
 
 
 def test_scan_never_invents_a_hostname(home: Path) -> None:
@@ -413,6 +487,32 @@ def test_reconcile_skips_already_retired_orphans(tmp_path: Path) -> None:
     mgr.set_status(ci.id, "op", CIStatus.RETIRED.value)
 
     assert reconcile(mgr, [], apply=True).orphans == []
+
+
+def test_partial_scan_never_turns_absence_into_an_orphan(tmp_path: Path) -> None:
+    mgr = CMDBManager(tmp_path)
+    mgr.create_ci("skgateway", "service", tags=[DISCOVERED_TAG])
+    assert reconcile(mgr, [], apply=True, scan_complete=False).orphans == []
+
+
+def test_reconcile_links_existing_alias_duplicates_without_rewriting_ids(tmp_path: Path) -> None:
+    mgr = CMDBManager(tmp_path)
+    canonical = mgr.create_ci(
+        "alpha.example", "host", attributes={"aliases": ["192.0.2.10"]},
+        tags=[DISCOVERED_TAG],
+    )
+    duplicate = mgr.create_ci(
+        "ssh-alpha", "host", attributes={"aliases": ["192.0.2.10"]},
+        tags=[DISCOVERED_TAG],
+    )
+    sighting = DiscoveredCI(
+        "host", "alpha.example", "fleet:node", canonical_name="alpha.example",
+        aliases=("ssh-alpha", "192.0.2.10"),
+    )
+    reconcile(mgr, [sighting], apply=True)
+    migrated = mgr.get_ci(duplicate.id)
+    assert canonical.id != duplicate.id
+    assert any(r.rel_type == "alias_of" and r.target == canonical.id for r in migrated.relationships)
 
 
 def _service(name: str, active_state: str, **kw) -> DiscoveredCI:

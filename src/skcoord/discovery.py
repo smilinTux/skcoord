@@ -27,7 +27,10 @@ import logging
 import re
 import shlex
 import subprocess
+import uuid
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timedelta, timezone
+from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional, Protocol, Sequence
 
@@ -39,6 +42,31 @@ DISCOVERED_TAG = "discovered"
 """Marks a CI as discovery-owned, so orphan handling never touches hand-made CIs."""
 
 _DEFAULT_TIMEOUT = 20
+
+AUTHORITY_DECLARED = "declared"
+AUTHORITY_OBSERVED = "observed"
+OBSERVATION_SCHEMA_VERSION = 1
+
+
+class ObservationState(str, Enum):
+    """Evidence quality, deliberately independent from CI health."""
+
+    FRESH = "fresh"
+    STALE = "stale"
+    UNKNOWN = "unknown"
+
+
+def observation_state(
+    observed_at: str, *, now: Optional[datetime] = None, max_age: timedelta = timedelta(hours=6)
+) -> ObservationState:
+    if not observed_at:
+        return ObservationState.UNKNOWN
+    try:
+        timestamp = datetime.fromisoformat(observed_at.replace("Z", "+00:00"))
+    except ValueError:
+        return ObservationState.UNKNOWN
+    current = now or datetime.now(timezone.utc)
+    return ObservationState.FRESH if current - timestamp <= max_age else ObservationState.STALE
 
 
 # ---------------------------------------------------------------------------
@@ -65,10 +93,16 @@ class DiscoveredCI:
     tags: tuple[str, ...] = ()
     relationships: tuple[tuple[str, str], ...] = ()
     declared_flag: Optional[bool] = None
+    canonical_name: str = ""
+    aliases: tuple[str, ...] = ()
+    observed_at: str = ""
+    scan_id: str = ""
+    authority: str = ""
+    schema_version: int = OBSERVATION_SCHEMA_VERSION
 
     @property
     def ci_id(self) -> str:
-        return make_ci_id(self.ci_type, self.name)
+        return make_ci_id(self.ci_type, self.canonical_name or self.name)
 
     @property
     def declared(self) -> bool:
@@ -90,6 +124,14 @@ class DiscoveredCI:
         primary, secondary = (
             (other, self) if (other.observed and not self.observed) else (self, other)
         )
+        if self.declared and not other.declared:
+            canonical_name = self.canonical_name or self.name
+        elif other.declared and not self.declared:
+            canonical_name = other.canonical_name or other.name
+        else:
+            canonical_name = min(
+                filter(None, (self.canonical_name or self.name, other.canonical_name or other.name))
+            )
         attributes = {**secondary.attributes, **primary.attributes}
         sources = sorted({*self.source.split("+"), *other.source.split("+")})
         return replace(
@@ -102,7 +144,26 @@ class DiscoveredCI:
             attributes=attributes,
             tags=tuple(sorted({*self.tags, *other.tags})),
             relationships=tuple(sorted({*self.relationships, *other.relationships})),
+            canonical_name=canonical_name,
+            aliases=tuple(sorted({*self.identity_aliases, *other.identity_aliases})),
+            observed_at=max(self.observed_at, other.observed_at),
+            scan_id=primary.scan_id or secondary.scan_id,
+            authority=(AUTHORITY_OBSERVED if self.observed or other.observed else AUTHORITY_DECLARED),
         )
+
+    @property
+    def identity_aliases(self) -> tuple[str, ...]:
+        """Normalised names by which this CI may be recognised."""
+        values = {self.name, self.canonical_name, *self.aliases}
+        return tuple(sorted({_normalise_alias(v) for v in values if v}))
+
+
+def _normalise_alias(value: str) -> str:
+    return str(value).strip().lower().rstrip(".")
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 # ---------------------------------------------------------------------------
@@ -227,6 +288,10 @@ def collect_fleet_objects(home: Path) -> list[DiscoveredCI]:
                 description=f"fleet node {obj.get('name', '')}".strip(),
                 attributes=attributes,
                 tags=("fleet", DISCOVERED_TAG),
+                canonical_name=hostname,
+                aliases=tuple(
+                    str(v) for v in (obj.get("name"), address.get("ip"), address.get("ssh_alias")) if v
+                ),
             )
         )
 
@@ -325,6 +390,36 @@ def collect_agents(home: Path) -> list[DiscoveredCI]:
             )
         )
     return out
+
+
+def device_from_fingerprint(
+    name: str,
+    source: str,
+    *,
+    aliases: Sequence[str] = (),
+    attributes: Optional[dict] = None,
+    observed_at: str = "",
+    scan_id: str = "",
+) -> DiscoveredCI:
+    """Represent an observed, non-managed appliance without calling it a host.
+
+    A fingerprint proves presence, not fleet ownership or manageability.  Such
+    assets use ``device`` until a fleet Node declaration supplies the stronger
+    host lifecycle; aliases allow later reconciliation without an ID rewrite.
+    """
+    return DiscoveredCI(
+        ci_type=CIType.DEVICE.value,
+        name=name,
+        canonical_name=name,
+        aliases=tuple(aliases),
+        source=source,
+        observed=True,
+        observed_at=observed_at,
+        scan_id=scan_id,
+        authority=AUTHORITY_OBSERVED,
+        attributes={"managed": False, **(attributes or {})},
+        tags=("device", "unmanaged", "fingerprint-only", DISCOVERED_TAG),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -600,16 +695,119 @@ def collect_listening_ports(runner: CommandRunner) -> list[DiscoveredCI]:
 
 
 def collect_host_facts(runner: CommandRunner) -> list[DiscoveredCI]:
-    """A host CI for the machine ``runner`` points at, with basic facts."""
+    """A host CI with normalised compute, memory, disk and address facts.
+
+    Every command is optional.  Failed or malformed commands leave facts
+    absent; they never manufacture zero capacity.  ``fact_provenance`` keeps
+    the exact successful output so an operator can audit normalisation.
+    """
     attributes: dict[str, Any] = {}
-    uname = runner.run(["uname", "-sr"])
+    raw: dict[str, str] = {}
+
+    def ask(key: str, argv: list[str]) -> Optional[str]:
+        value = runner.run(argv)
+        if value and value.strip():
+            raw[key] = value.strip()
+            return value
+        return None
+
+    uname = ask("uname", ["uname", "-sr"])
     if uname:
         attributes["kernel"] = uname.strip()
-    nproc = runner.run(["nproc"])
+    nproc = ask("nproc", ["nproc"])
     if nproc and nproc.strip().isdigit():
-        attributes["cores"] = int(nproc.strip())
+        attributes["cpu_logical"] = int(nproc.strip())
+        attributes["cores"] = int(nproc.strip())  # backwards-compatible v1 fact name
+
+    lscpu = ask("lscpu", ["lscpu", "-J"])
+    if lscpu:
+        try:
+            rows = json.loads(lscpu).get("lscpu", [])
+            cpu = {str(row.get("field", "")).rstrip(":"): row.get("data") for row in rows}
+            for source, target in (
+                ("Socket(s)", "cpu_sockets"),
+                ("Core(s) per socket", "cpu_cores_per_socket"),
+                ("Thread(s) per core", "cpu_threads_per_core"),
+                ("CPU(s)", "cpu_logical"),
+            ):
+                value = str(cpu.get(source, ""))
+                if value.isdigit():
+                    attributes[target] = int(value)
+                    if target == "cpu_logical":
+                        attributes["cores"] = int(value)
+            if cpu.get("Model name"):
+                attributes["cpu_model"] = str(cpu["Model name"])
+        except (TypeError, ValueError):
+            pass
+
+    memory = ask("memory", ["free", "-b"])
+    if memory:
+        for line in memory.splitlines():
+            parts = line.split()
+            if parts and parts[0].rstrip(":").lower() == "mem" and len(parts) >= 7:
+                numeric = parts[1:7]
+                if all(v.isdigit() for v in numeric):
+                    for key, value in zip(
+                        ("memory_total_bytes", "memory_used_bytes", "memory_free_bytes",
+                         "memory_shared_bytes", "memory_cache_bytes", "memory_available_bytes"),
+                        numeric,
+                    ):
+                        attributes[key] = int(value)
+
+    addresses = ask("addresses", ["ip", "-j", "address", "show"])
+    aliases: set[str] = {runner.host}
+    if addresses:
+        try:
+            parsed = json.loads(addresses)
+            ips = sorted(
+                {
+                    info["local"]
+                    for iface in parsed
+                    if iface.get("ifname") != "lo"
+                    for info in iface.get("addr_info", [])
+                    if info.get("local") and info.get("scope") in ("global", "site")
+                }
+            )
+            if ips:
+                attributes["ip_addresses"] = ips
+                aliases.update(ips)
+        except (TypeError, ValueError, KeyError):
+            pass
+
+    disks = ask(
+        "block_devices",
+        ["lsblk", "-J", "-b", "-o", "NAME,TYPE,SIZE,FSTYPE,MOUNTPOINTS"],
+    )
+    if disks:
+        try:
+            devices = json.loads(disks).get("blockdevices", [])
+            attributes["block_devices"] = devices
+            sizes = [d.get("size") for d in devices if d.get("type") == "disk"]
+            if sizes and all(isinstance(v, int) for v in sizes):
+                attributes["disk_capacity_bytes"] = sum(sizes)
+        except (TypeError, ValueError):
+            pass
+
+    usage = ask(
+        "filesystems",
+        ["df", "-B1", "--output=source,size,used,avail,pcent,target"],
+    )
+    if usage:
+        filesystems = []
+        for line in usage.splitlines()[1:]:
+            parts = line.split(None, 5)
+            if len(parts) == 6 and all(v.isdigit() for v in parts[1:4]):
+                filesystems.append(
+                    {"source": parts[0], "size_bytes": int(parts[1]),
+                     "used_bytes": int(parts[2]), "available_bytes": int(parts[3]),
+                     "used_percent": parts[4], "mountpoint": parts[5]}
+                )
+        if filesystems:
+            attributes["filesystems"] = filesystems
+
     if not attributes:
         return []
+    attributes["fact_provenance"] = raw
     return [
         DiscoveredCI(
             ci_type=CIType.HOST.value,
@@ -619,6 +817,8 @@ def collect_host_facts(runner: CommandRunner) -> list[DiscoveredCI]:
             node=runner.host,
             attributes=attributes,
             tags=("fleet", DISCOVERED_TAG),
+            canonical_name=runner.host,
+            aliases=tuple(sorted(aliases)),
         )
     ]
 
@@ -642,12 +842,30 @@ OBSERVED_COLLECTORS: tuple[Callable[[CommandRunner], list[DiscoveredCI]], ...] =
 
 
 def merge(items: Iterable[DiscoveredCI]) -> list[DiscoveredCI]:
-    """Fold multiple sightings of one CI into a single record, by ci_id."""
-    folded: dict[str, DiscoveredCI] = {}
+    """Fold sightings, including host aliases, into deterministic records."""
+    folded: list[DiscoveredCI] = []
     for item in items:
-        existing = folded.get(item.ci_id)
-        folded[item.ci_id] = existing.merged_with(item) if existing else item
-    return sorted(folded.values(), key=lambda c: (c.ci_type, c.name))
+        matches = [
+            existing
+            for existing in folded
+            if existing.ci_type == item.ci_type
+            and (
+                existing.ci_id == item.ci_id
+                or (
+                    item.ci_type in (CIType.HOST.value, CIType.DEVICE.value)
+                    and set(existing.identity_aliases) & set(item.identity_aliases)
+                )
+            )
+        ]
+        if not matches:
+            folded.append(item)
+        else:
+            merged = item
+            for match in matches:
+                merged = match.merged_with(merged)
+                folded.remove(match)
+            folded.append(merged)
+    return sorted(folded, key=lambda c: (c.ci_type, c.canonical_name or c.name))
 
 
 def scan(
@@ -661,16 +879,34 @@ def scan(
     *this* box: the caller says which machines to ask.
     """
     found: list[DiscoveredCI] = []
+    scan_id = uuid.uuid4().hex
+    observed_at = _utc_now()
     if include_declared:
         for collector in DECLARED_COLLECTORS:
             try:
-                found.extend(collector(Path(home)))
+                found.extend(
+                    replace(
+                        item,
+                        scan_id=item.scan_id or scan_id,
+                        authority=item.authority or AUTHORITY_DECLARED,
+                    )
+                    for item in collector(Path(home))
+                )
             except Exception:  # noqa: BLE001 - one bad source must not blind the rest
                 logger.exception("declared collector failed: %s", collector.__name__)
     for runner in runners:
         for observer in OBSERVED_COLLECTORS:
             try:
-                found.extend(observer(runner))
+                observations = observer(runner)
+                found.extend(
+                    replace(
+                        item,
+                        observed_at=item.observed_at or observed_at,
+                        scan_id=item.scan_id or scan_id,
+                        authority=item.authority or AUTHORITY_OBSERVED,
+                    )
+                    for item in observations
+                )
             except Exception:  # noqa: BLE001
                 logger.exception("observed collector failed: %s on %s", observer.__name__, runner.host)
     return merge(found)
@@ -734,12 +970,15 @@ def reconcile(
     discovered: Sequence[DiscoveredCI],
     agent: str = "cmdb-discovery",
     apply: bool = False,
+    scan_complete: bool = True,
 ) -> ReconcileReport:
     """Converge the CMDB on what was discovered. Additive only.
 
     Nothing is deleted, ever. A CI that discovery no longer sees is reported as
     an orphan and left alone: the store is event-sourced and shared, so a
     collector that silently failed must not be able to erase inventory.
+    Callers must pass ``scan_complete=False`` when any required collector or
+    target failed; absence from a partial scan then produces no orphan signal.
 
     Status precedence (CMDB-6): CIStatus on a discovery-owned CI is derived
     from the observed state, so a CI can never read ``degraded`` while its own
@@ -748,9 +987,38 @@ def reconcile(
     headline CIStatus. A manually retired CI is never un-retired by reconcile.
     """
     report = ReconcileReport(applied=apply)
-    by_id = {d.ci_id: d for d in discovered}
-
     existing = {ci.id: ci for ci in mgr.list_cis()}
+    by_id: dict[str, DiscoveredCI] = {}
+    migrations: list[tuple[str, str]] = []
+    for item in discovered:
+        ci_id = item.ci_id
+        if item.ci_type in (CIType.HOST.value, CIType.DEVICE.value):
+            aliases = set(item.identity_aliases)
+            matching = [
+                ci
+                for ci in existing.values()
+                if ci.ci_type in (CIType.HOST.value, CIType.DEVICE.value)
+                and aliases
+                & {
+                    _normalise_alias(value)
+                    for value in (
+                        ci.id.removeprefix(f"ci-{ci.ci_type}-"),
+                        ci.name,
+                        ci.attributes.get("canonical_name", ""),
+                        *ci.attributes.get("aliases", []),
+                    )
+                    if value
+                }
+            ]
+            if matching:
+                target = existing.get(ci_id) or sorted(matching, key=lambda ci: ci.id)[0]
+                ci_id = target.id
+                migrations.extend(
+                    (duplicate.id, target.id)
+                    for duplicate in matching
+                    if duplicate.id != target.id
+                )
+        by_id[ci_id] = item
 
     for ci_id, item in by_id.items():
         current = existing.get(ci_id)
@@ -761,12 +1029,28 @@ def reconcile(
             # for observed discoveries.
             report.created.append(ci_id)
             if apply:
+                attributes = {
+                    **item.attributes,
+                    "canonical_name": item.canonical_name or item.name,
+                    "aliases": list(item.identity_aliases),
+                    "source_authority": item.authority
+                    or (AUTHORITY_OBSERVED if item.observed else AUTHORITY_DECLARED),
+                    "observation_schema_version": item.schema_version,
+                }
+                if item.observed_at:
+                    attributes.update(
+                        {
+                            "observed_at": item.observed_at,
+                            "scan_id": item.scan_id,
+                            "observation_state": observation_state(item.observed_at).value,
+                        }
+                    )
                 mgr.create_ci(
                     item.name,
                     item.ci_type,
                     description=item.description,
                     node=item.node,
-                    attributes=dict(item.attributes),
+                    attributes=attributes,
                     tags=list(item.tags),
                     ci_id=ci_id,
                 )
@@ -778,9 +1062,25 @@ def reconcile(
                     mgr.add_relationship(ci_id, agent, rel_type, target)
             continue
 
+        evidence = {
+            "canonical_name": item.canonical_name or item.name,
+            "aliases": list(item.identity_aliases),
+            "source_authority": item.authority
+            or (AUTHORITY_OBSERVED if item.observed else AUTHORITY_DECLARED),
+            "observation_schema_version": item.schema_version,
+        }
+        if item.observed_at:
+            evidence.update(
+                {
+                    "observed_at": item.observed_at,
+                    "scan_id": item.scan_id,
+                    "observation_state": observation_state(item.observed_at).value,
+                }
+            )
+        desired_attributes = {**item.attributes, **evidence}
         changed = [
             key
-            for key, value in item.attributes.items()
+            for key, value in desired_attributes.items()
             if current.attributes.get(key) != value
         ]
         missing_rels = [
@@ -803,17 +1103,34 @@ def reconcile(
         report.updated[ci_id] = report_changes + [f"{r}->{t}" for r, t in missing_rels]
         if apply:
             for key in changed:
-                mgr.set_attribute(ci_id, agent, key, item.attributes[key])
+                mgr.set_attribute(ci_id, agent, key, desired_attributes[key])
             if status_changes:
                 mgr.set_status(ci_id, agent, derived_status, note="from observed active_state")
             for rel_type, target in missing_rels:
                 mgr.add_relationship(ci_id, agent, rel_type, target)
 
+    if not scan_complete:
+        return report
+
     for ci_id, ci in existing.items():
         if ci_id in by_id:
             continue
+        if any(duplicate_id == ci_id for duplicate_id, _ in migrations):
+            continue
         if DISCOVERED_TAG in (ci.tags or []) and ci.status != CIStatus.RETIRED.value:
             report.orphans.append(ci_id)
+
+    for duplicate_id, canonical_id in sorted(set(migrations)):
+        duplicate = existing[duplicate_id]
+        relation = f"alias_of->{canonical_id}"
+        if any(
+            rel.rel_type == "alias_of" and rel.target == canonical_id
+            for rel in duplicate.relationships
+        ):
+            continue
+        report.updated.setdefault(duplicate_id, []).append(relation)
+        if apply:
+            mgr.add_relationship(duplicate_id, agent, "alias_of", canonical_id)
 
     return report
 
