@@ -1,9 +1,24 @@
 # CMDB & Discovery Workflow Proposals (CMDB-10)
 
-Status: draft for review. Grounded in the 2026-08-18 whole-network populate
-(CMDB-9), which took the CMDB from a laptop-sized seed to 919 CIs (32 agent, 19
-host, 197 port, 671 service) across 13 SSH-managed hosts plus 6 network-observed
-hosts.
+Status: reviewed and decided (2026-08-19). Grounded in the 2026-08-18
+whole-network populate (CMDB-9), which took the CMDB from a laptop-sized seed
+to 919 CIs (32 agent, 19 host, 197 port, 671 service) across 13 SSH-managed
+hosts plus 6 network-observed hosts.
+
+## Decision (2026-08-19, CMDB-10)
+
+- **P5 (retire-not-delete) is done.** It was the CMDB-8 item (the 15 orphaned
+  ephemeral port CIs that "cannot be deleted"). The `skcapstone cmdb retire`
+  verb now lands a `status: retired` event instead of deleting — the record
+  stays, and reconcile already never un-retires a CI. The 15 `.158` ephemeral
+  ports (35942, 37807, 38077, 39257, 40519, 41107, 42823, 44359, 47825, 48695,
+  52145, 53947, 55281, 56765, 60775) were retired on 2026-08-19.
+- **Next to implement: P1 (host-facts collector upgrade).** It is the smallest
+  self-contained item left, needs no new deps, and closes gap #3 (host CIs
+  carry only `kernel` + `cores`). P1 is carded for tracking before work starts.
+- Sequencing after P1 follows the suggested order below: P3 then P2 (together
+  they cover the password-only hosts), then P6/P7 to turn the loop automated.
+  P4 and P8 stay open on the operator questions at the end of this doc.
 
 ## Where the gaps showed up
 
