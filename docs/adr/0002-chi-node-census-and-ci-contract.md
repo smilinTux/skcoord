@@ -28,6 +28,13 @@ with multiple addresses; network collection targets its Linux/WSL SSH alias.
 collector may report partial coverage without removing the node. The retired
 Windows-era `chiap06` record and unrelated tailnet devices are out of scope.
 
+At the 2026-08-21 review, every in-scope node answered its SSH alias and was
+online in Tailscale, but the new skfleet object tree had no status-plane
+heartbeats. `skfleet nodes` therefore reports `Dead`/`beat=never`; this means
+"not yet enrolled in skfleet status reporting," not "unreachable." Enrolling
+heartbeats is a blocking coverage gap for health-based lifecycle decisions and
+must not be inferred from this read-only census change.
+
 ## CI identity and fields
 
 `make_ci_id(type, canonical_name)` is the deterministic ID function. Supported
@@ -69,4 +76,3 @@ shadow artifacts block apply even when a change is approved.
 `chiap09` remains read-only while its dirty-worktree remediation is open, and
 `chiwk11` remains discovery-only until runtime-role qualification completes.
 These containment states are census metadata, not reasons to omit the assets.
-
