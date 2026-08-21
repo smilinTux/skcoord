@@ -318,6 +318,7 @@ class CardStore:
             priority=core.get("initial_priority", "medium"),
             originator=core.get("created_by", ""),
             labels=list(core.get("initial_labels", [])),
+            acceptance_criteria=list(core.get("acceptance_criteria", []) or []),
             dependencies=list(core.get("dependencies", [])),
             meta=dict(core.get("meta", {})),
             created_at=core.get("created_at", ""),
@@ -366,6 +367,8 @@ class CardStore:
                     card.title = e["title"]
                 if e.get("description") is not None:
                     card.description = e["description"]
+            elif action == "amend_criteria" and isinstance(e.get("criteria"), list):
+                card.acceptance_criteria = list(e["criteria"])
             elif action == "note" and e.get("text"):
                 card.meta.setdefault("comments", []).append(
                     {"ts": e.get("ts"), "writer": e.get("writer"), "text": e["text"]}
@@ -568,6 +571,7 @@ def task_views_from_store(home: Path, include_archived: bool = False) -> list:
             tags=list(c.labels),
             created_by=c.originator,
             created_at=c.created_at,
+            acceptance_criteria=list(c.acceptance_criteria),
             dependencies=list(c.dependencies),
             meta=dict(c.meta),
         )
@@ -878,7 +882,8 @@ def export_to_legacy(home: Path, dry_run: bool = False) -> dict:
       that have no legacy file yet (i.e. cards born after retirement). Existing
       task files are left untouched -- they are immutable and carry richer
       fields (``notes``) the store does not model. ``acceptance_criteria`` for a
-      synthesized file is recovered from the card's ``core.json``.
+      synthesized file comes from the current folded card projection, so a
+      rollback preserves the latest accepted amendment.
     * **Agent files** (the mutable status layer) are rebuilt: the coord
       task-status fields (``current_task``, ``claimed_tasks``,
       ``completed_tasks``) are recomputed from the store, while identity fields
@@ -926,7 +931,6 @@ def export_to_legacy(home: Path, dry_run: bool = False) -> dict:
             priority = TaskPriority(c.priority)
         except ValueError:
             priority = TaskPriority.MEDIUM
-        core = store._load_core(c.id) or {}
         task = Task(
             id=c.id,
             title=c.title,
@@ -935,7 +939,7 @@ def export_to_legacy(home: Path, dry_run: bool = False) -> dict:
             tags=list(c.labels),
             created_by=c.originator,
             created_at=c.created_at or _now_iso(),
-            acceptance_criteria=list(core.get("acceptance_criteria", []) or []),
+            acceptance_criteria=list(c.acceptance_criteria),
             dependencies=list(c.dependencies),
         )
         tasks_written += 1

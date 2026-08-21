@@ -23,6 +23,11 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
 
 ### Fixed
 
+- Fold acceptance-criteria amendments into the authoritative CardStore
+  projection and task views while keeping `core.json` birth facts immutable.
+  The legacy kill switch now preserves criteria on projected cards, and
+  rollback export writes the current folded criteria for store-born tasks.
+
 - Publish the auto-tagged release to PyPI in the same GitHub Actions run. Tags
   pushed by the workflow's `GITHUB_TOKEN` do not trigger a second workflow, so
   the former tag-only publish guard produced green builds and tags through
