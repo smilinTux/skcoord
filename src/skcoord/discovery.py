@@ -22,6 +22,7 @@ it creates, it updates, and it *reports* what it no longer sees.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -635,42 +636,66 @@ def collect_systemd_units(
 
 
 def collect_docker_containers(runner: CommandRunner) -> list[DiscoveredCI]:
-    """Service CIs for running containers.
+    """Service CIs for running Docker and Podman containers.
 
     Several fleet services declare ``runtime: docker``. Without this collector
     they are declared, never observed, and drift reports them as missing when
     they are running perfectly well.
     """
-    stdout = runner.run(
-        ["docker", "ps", "--format", "{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}"]
-    )
-    if not stdout:
-        return []
     out: list[DiscoveredCI] = []
-    for line in stdout.splitlines():
-        parts = line.split("\t")
-        if not parts or not parts[0].strip():
-            continue
-        name = parts[0].strip()
-        attributes: dict[str, Any] = {"runtime": "docker", "origin": "container"}
-        if len(parts) > 1 and parts[1].strip():
-            attributes["image"] = parts[1].strip()
-        if len(parts) > 2 and parts[2].strip():
-            attributes["container_status"] = parts[2].strip()
-        if len(parts) > 3 and parts[3].strip():
-            attributes["container_ports"] = parts[3].strip()
-        out.append(
-            DiscoveredCI(
-                ci_type=CIType.SERVICE.value,
-                name=name,
-                source="docker",
-                observed=True,
-                node=runner.host,
-                attributes=attributes,
-                tags=("docker", DISCOVERED_TAG),
-                relationships=(("runs_on", make_ci_id(CIType.HOST.value, runner.host)),),
-            )
+    seen: set[str] = set()
+    for runtime in ("docker", "podman"):
+        stdout = runner.run(
+            [
+                runtime,
+                "ps",
+                "--format",
+                "{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}\t{{.Labels}}",
+            ]
         )
+        if not stdout:
+            continue
+        for line in stdout.splitlines():
+            parts = line.split("\t")
+            if not parts or not parts[0].strip():
+                continue
+            name = parts[0].strip()
+            if name in seen:
+                continue
+            seen.add(name)
+            attributes: dict[str, Any] = {"runtime": runtime, "origin": "container"}
+            if len(parts) > 1 and parts[1].strip():
+                attributes["image"] = parts[1].strip()
+            if len(parts) > 2 and parts[2].strip():
+                attributes["container_status"] = parts[2].strip()
+            if len(parts) > 3 and parts[3].strip():
+                attributes["container_ports"] = parts[3].strip()
+            if len(parts) > 4 and parts[4].strip():
+                labels = dict(
+                    part.split("=", 1)
+                    for part in parts[4].split(",")
+                    if "=" in part
+                    and part.split("=", 1)[0]
+                    in {
+                        "com.docker.compose.project",
+                        "com.docker.compose.service",
+                        "io.podman.compose.project",
+                    }
+                )
+                if labels:
+                    attributes["compose"] = labels
+            out.append(
+                DiscoveredCI(
+                    ci_type=CIType.SERVICE.value,
+                    name=name,
+                    source=runtime,
+                    observed=True,
+                    node=runner.host,
+                    attributes=attributes,
+                    tags=(runtime, DISCOVERED_TAG),
+                    relationships=(("runs_on", make_ci_id(CIType.HOST.value, runner.host)),),
+                )
+            )
     return out
 
 
@@ -905,6 +930,307 @@ def collect_host_facts(runner: CommandRunner) -> list[DiscoveredCI]:
     ]
 
 
+def _cron_rows(text: str, *, system: bool) -> list[tuple[str, str, str]]:
+    """Return schedule, principal and command-name triples without secret arguments."""
+    rows: list[tuple[str, str, str]] = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or ("=" in line and not line.startswith("@")):
+            continue
+        parts = line.split()
+        if line.startswith("@"):
+            minimum = 3 if system else 2
+            if len(parts) < minimum:
+                continue
+            schedule = parts[0]
+            principal = parts[1] if system else "current-user"
+            command = parts[2] if system else parts[1]
+        else:
+            minimum = 7 if system else 6
+            if len(parts) < minimum:
+                continue
+            schedule = " ".join(parts[:5])
+            principal = parts[5] if system else "current-user"
+            command = parts[6] if system else parts[5]
+        rows.append((schedule, principal, Path(command).name[:120]))
+    return rows
+
+
+def collect_cron_jobs(runner: CommandRunner) -> list[DiscoveredCI]:
+    """Observed user and system crontab entries with command arguments redacted."""
+    sources = (
+        ("user", runner.run(["crontab", "-l"]), False),
+        ("system", runner.run(["cat", "/etc/crontab"]), True),
+    )
+    out: list[DiscoveredCI] = []
+    for scope, text, system in sources:
+        if not text:
+            continue
+        for schedule, principal, command_name in _cron_rows(text, system=system):
+            fingerprint = hashlib.sha256(
+                f"{scope}\0{schedule}\0{principal}\0{command_name}".encode()
+            ).hexdigest()[:16]
+            out.append(
+                DiscoveredCI(
+                    ci_type=CIType.SERVICE.value,
+                    name=f"{runner.host}:cron:{scope}:{fingerprint}",
+                    source=f"cron:{scope}",
+                    observed=True,
+                    node=runner.host,
+                    attributes={
+                        "schedule": schedule,
+                        "principal": principal,
+                        "command_name": command_name,
+                        "command_arguments_redacted": True,
+                    },
+                    tags=("cronjob", "scheduler", DISCOVERED_TAG),
+                    relationships=(("runs_on", make_ci_id(CIType.HOST.value, runner.host)),),
+                )
+            )
+    return out
+
+
+def collect_network_interfaces(runner: CommandRunner) -> list[DiscoveredCI]:
+    """Network CIs for non-loopback interfaces and their observed identities."""
+    stdout = runner.run(["ip", "-j", "address", "show"])
+    if not stdout:
+        return []
+    try:
+        interfaces = json.loads(stdout)
+    except (TypeError, ValueError):
+        return []
+    out: list[DiscoveredCI] = []
+    for interface in interfaces if isinstance(interfaces, list) else []:
+        if not isinstance(interface, dict):
+            continue
+        name = str(interface.get("ifname", "")).strip()
+        if not name or name == "lo":
+            continue
+        addresses = sorted(
+            {
+                str(info.get("local"))
+                for info in interface.get("addr_info", [])
+                if isinstance(info, dict)
+                and info.get("local")
+                and info.get("scope") in ("global", "site")
+            }
+        )
+        attributes: dict[str, Any] = {
+            "interface": name,
+            "operstate": interface.get("operstate", "unknown"),
+            "addresses": addresses,
+        }
+        if interface.get("address"):
+            attributes["mac_address"] = interface["address"]
+        out.append(
+            DiscoveredCI(
+                ci_type=CIType.NETWORK.value,
+                name=f"{runner.host}:{name}",
+                source="ip-address",
+                observed=True,
+                node=runner.host,
+                attributes=attributes,
+                tags=("network-interface", DISCOVERED_TAG),
+                relationships=(("runs_on", make_ci_id(CIType.HOST.value, runner.host)),),
+            )
+        )
+    return out
+
+
+_PSEUDO_FILESYSTEMS = {
+    "autofs",
+    "bpf",
+    "cgroup",
+    "cgroup2",
+    "configfs",
+    "debugfs",
+    "devpts",
+    "devtmpfs",
+    "efivarfs",
+    "fusectl",
+    "hugetlbfs",
+    "mqueue",
+    "proc",
+    "pstore",
+    "securityfs",
+    "sysfs",
+    "tracefs",
+}
+
+_PERSISTENT_FILESYSTEMS = {
+    "9p",
+    "btrfs",
+    "ceph",
+    "cifs",
+    "drvfs",
+    "ext2",
+    "ext3",
+    "ext4",
+    "fuseblk",
+    "nfs",
+    "nfs4",
+    "ntfs",
+    "ntfs3",
+    "smb3",
+    "vfat",
+    "xfs",
+    "zfs",
+}
+
+
+def _walk_filesystems(rows: object) -> Iterable[dict]:
+    """Flatten findmnt's recursive JSON tree without trusting child shape."""
+    if not isinstance(rows, list):
+        return
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        yield row
+        yield from _walk_filesystems(row.get("children"))
+
+
+def collect_datastores(runner: CommandRunner) -> list[DiscoveredCI]:
+    """Persistent filesystem mounts and database-like containers as datastores."""
+    out: list[DiscoveredCI] = []
+    stdout = runner.run(
+        ["findmnt", "-J", "-b", "-o", "TARGET,SOURCE,FSTYPE,SIZE,USED,AVAIL,USE%"]
+    )
+    if stdout:
+        try:
+            filesystems = json.loads(stdout).get("filesystems", [])
+        except (TypeError, ValueError):
+            filesystems = []
+        for filesystem in _walk_filesystems(filesystems):
+            target = str(filesystem.get("target", "")).strip()
+            fstype = str(filesystem.get("fstype", "")).strip().lower()
+            if (
+                not target
+                or fstype in _PSEUDO_FILESYSTEMS
+                or fstype not in _PERSISTENT_FILESYSTEMS
+            ):
+                continue
+            attributes = {
+                key: filesystem[key]
+                for key in ("source", "fstype", "size", "used", "avail", "use%")
+                if filesystem.get(key) not in (None, "")
+            }
+            attributes["mountpoint"] = target
+            out.append(
+                DiscoveredCI(
+                    ci_type=CIType.DATASTORE.value,
+                    name=f"{runner.host}:mount:{target}",
+                    source="findmnt",
+                    observed=True,
+                    node=runner.host,
+                    attributes=attributes,
+                    tags=("mount", "datastore", DISCOVERED_TAG),
+                    relationships=(("runs_on", make_ci_id(CIType.HOST.value, runner.host)),),
+                )
+            )
+
+    database_hint = re.compile(
+        r"(?:postgres|skmem-pg|mysql|mariadb|mongo|redis|qdrant|weaviate|neo4j|falkor)",
+        re.IGNORECASE,
+    )
+    seen: set[str] = set()
+    for runtime in ("docker", "podman"):
+        containers = runner.run([runtime, "ps", "--format", "{{.Names}}\t{{.Image}}"])
+        if not containers:
+            continue
+        for line in containers.splitlines():
+            name, _, image = line.partition("\t")
+            name = name.strip()
+            image = image.strip()
+            if not name or name in seen or not database_hint.search(f"{name} {image}"):
+                continue
+            seen.add(name)
+            out.append(
+                DiscoveredCI(
+                    ci_type=CIType.DATASTORE.value,
+                    name=f"{runner.host}:container:{name}",
+                    source=f"{runtime}:datastore",
+                    observed=True,
+                    node=runner.host,
+                    attributes={"runtime": runtime, "container": name, "image": image},
+                    tags=(runtime, "database", "datastore", DISCOVERED_TAG),
+                    relationships=(("runs_on", make_ci_id(CIType.HOST.value, runner.host)),),
+                )
+            )
+    return out
+
+
+_AGENT_LIST_SCRIPT = """import json
+from pathlib import Path
+p = Path.home() / '.skcapstone' / 'agents'
+print(json.dumps(sorted(x.name for x in p.iterdir() if x.is_dir()))) if p.is_dir() else print('[]')
+"""
+
+
+def collect_observed_agents(runner: CommandRunner) -> list[DiscoveredCI]:
+    """Agent homes observed on the target rather than declared on the scanner."""
+    stdout = runner.run(["python3", "-c", _AGENT_LIST_SCRIPT])
+    if not stdout:
+        return []
+    try:
+        names = json.loads(stdout)
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(names, list):
+        return []
+    return [
+        DiscoveredCI(
+            ci_type=CIType.AGENT.value,
+            name=str(name),
+            source="agent-home",
+            observed=True,
+            node=runner.host,
+            attributes={"home_present": True},
+            tags=("agent", DISCOVERED_TAG),
+            relationships=(("runs_on", make_ci_id(CIType.HOST.value, runner.host)),),
+        )
+        for name in names
+        if str(name).strip() and not str(name).endswith("-template")
+    ]
+
+
+def collect_model_endpoints(runner: CommandRunner) -> list[DiscoveredCI]:
+    """Observed Ollama endpoint, version and bounded installed-model inventory."""
+    models = runner.run(["ollama", "list"])
+    version = runner.run(
+        ["curl", "-fsS", "--max-time", "2", "http://127.0.0.1:11434/api/version"]
+    )
+    if not models and not version:
+        return []
+    attributes: dict[str, Any] = {
+        "endpoint": "http://127.0.0.1:11434",
+        "health_observed": bool(version),
+    }
+    if version:
+        try:
+            parsed = json.loads(version)
+            if isinstance(parsed, dict) and parsed.get("version"):
+                attributes["version"] = parsed["version"]
+        except (TypeError, ValueError):
+            pass
+    if models:
+        names = [line.split()[0] for line in models.splitlines()[1:] if line.split()]
+        attributes["models"] = sorted(set(names))[:100]
+        attributes["model_count"] = len(set(names))
+        attributes["models_truncated"] = len(set(names)) > 100
+    return [
+        DiscoveredCI(
+            ci_type=CIType.SERVICE.value,
+            name=f"{runner.host}:ollama",
+            source="ollama",
+            observed=True,
+            node=runner.host,
+            attributes=attributes,
+            tags=("model-api", "ollama", DISCOVERED_TAG),
+            relationships=(("runs_on", make_ci_id(CIType.HOST.value, runner.host)),),
+        )
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Scan
 # ---------------------------------------------------------------------------
@@ -920,6 +1246,11 @@ OBSERVED_COLLECTORS: tuple[Callable[[CommandRunner], list[DiscoveredCI]], ...] =
     collect_systemd_units,
     collect_docker_containers,
     collect_listening_ports,
+    collect_cron_jobs,
+    collect_network_interfaces,
+    collect_datastores,
+    collect_observed_agents,
+    collect_model_endpoints,
 )
 
 

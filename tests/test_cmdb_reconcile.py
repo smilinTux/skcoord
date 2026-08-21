@@ -25,7 +25,7 @@ from skcoord.cmdb_reconcile import (
     scan_network,
     write_run_artifact,
 )
-from skcoord.discovery import DISCOVERED_TAG, DiscoveredCI, DriftFinding
+from skcoord.discovery import DISCOVERED_TAG, OBSERVED_COLLECTORS, DiscoveredCI, DriftFinding
 
 
 class CannedRunner:
@@ -63,8 +63,8 @@ def test_network_scan_reports_complete_target_accounting(tmp_path: Path) -> None
         OrchestrationConfig(global_concurrency=2, per_host_concurrency=1, deadline_seconds=2),
     )
     assert result.complete
-    assert result.completeness()["collectors_expected"] == 4
-    assert result.completeness()["collectors_complete"] == 4
+    assert result.completeness()["collectors_expected"] == len(OBSERVED_COLLECTORS)
+    assert result.completeness()["collectors_complete"] == len(OBSERVED_COLLECTORS)
     assert any(item.name == "nor.local" for item in result.discovered)
 
 

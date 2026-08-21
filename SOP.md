@@ -153,7 +153,7 @@ dev version.
 ## 4. Test (the green-bar gate)
 
 ```bash
-~/.skenv/bin/python -m pytest tests/ -q     # 71 tests
+~/.skenv/bin/python -m pytest tests/ -q     # 231 tests
 ~/.skenv/bin/python -m ruff check src/ tests/
 ```
 
@@ -231,6 +231,15 @@ window but does not waive explicit vault references, backup evidence, complete
 collector accounting, three checksum-valid shadows, relationship audit, or
 rollback readiness. Card `e5d0c8cb` owns the census contract and `e83b1f4f`
 owns collector coverage.
+
+The observed scanner contract contains nine collectors: host facts; systemd
+services/timers; Docker/Podman containers and Compose ownership; stable TCP
+listeners; user/system crontab entries; network interfaces; persistent mounts
+and database containers; remote agent homes; and the local Ollama model API.
+Cron arguments are never retained, and interface addresses are evidence rather
+than host aliases. A missing binary yields an empty collector result but still
+appears in per-target collector accounting; transport or deadline failure makes
+the scan incomplete and blocks absence or lifecycle decisions.
 
 This is a library and has no standalone service. Deploying it means reinstalling the
 consumer environment and restarting only the long-running consumers that imported it.

@@ -21,6 +21,14 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
   than guessing. Every repair appends a conflict-free JSONL receipt under
   `coordination/reconciliation/`; a second repair is idempotent.
 
+- Expanded observed CMDB discovery from four collectors to nine. Cross-node
+  scans now cover user/system cron entries (with command arguments redacted),
+  non-loopback network interfaces, persistent mounts and database containers,
+  remote agent homes, Ollama endpoint/model health, Podman containers, and
+  Docker/Podman Compose labels in addition to host, systemd, container, and
+  listening-port evidence. Collector totals remain part of the checksummed
+  shadow scope, so a release cannot silently claim the old coverage contract.
+
 - Defined the operator-reviewed CHI fleet Node objects as the authoritative
   CMDB discovery census, including identity/source precedence, the
   `chiap09`/`chioc09` alias decision, `chipv05` and Windows/WSL handling,

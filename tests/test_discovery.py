@@ -24,10 +24,15 @@ from skcoord.discovery import (
     ObservationState,
     ci_observation_state,
     collect_agents,
+    collect_cron_jobs,
+    collect_datastores,
     collect_docker_containers,
     collect_fleet_objects,
     collect_host_facts,
     collect_listening_ports,
+    collect_model_endpoints,
+    collect_network_interfaces,
+    collect_observed_agents,
     collect_registry,
     collect_systemd_units,
     device_from_fingerprint,
@@ -76,6 +81,31 @@ FragmentPath=/home/cbrd21/.config/systemd/user/backup.timer
 DOCKER_OUTPUT = (
     "skchat-coturn\tcoturn/coturn:4.6\tUp 9 days\t0.0.0.0:3478->3478/tcp\n"
     "skmem-pg\t43fc80538777\tUp 9 days\t\n"
+)
+
+FINDMNT_OUTPUT = json.dumps(
+    {
+        "filesystems": [
+            {
+                "target": "/",
+                "source": "/dev/sda2",
+                "fstype": "ext4",
+                "size": 1000,
+                "used": 400,
+                "avail": 600,
+                "use%": "40%",
+                "children": [
+                    {
+                        "target": "/mnt/data",
+                        "source": "server:/data",
+                        "fstype": "nfs4",
+                    },
+                    {"target": "/run", "source": "tmpfs", "fstype": "tmpfs"},
+                ],
+            },
+            {"target": "/proc", "source": "proc", "fstype": "proc"},
+        ]
+    }
 )
 
 
@@ -288,6 +318,91 @@ def test_host_fact_failures_are_missing_not_zero() -> None:
     assert "memory_total_bytes" not in host.attributes
     assert "disk_capacity_bytes" not in host.attributes
     assert "cpu_logical" not in host.attributes
+
+
+def test_cron_jobs_are_observed_without_persisting_command_arguments() -> None:
+    runner = FakeRunner(
+        answers={
+            "/etc/crontab": "0 2 * * * root /usr/local/sbin/backup --password nope\n",
+            "crontab": "*/5 * * * * /usr/local/bin/reconcile --token secret-value\n",
+        }
+    )
+    found = collect_cron_jobs(runner)
+
+    assert len(found) == 2
+    assert {ci.attributes["command_name"] for ci in found} == {"reconcile", "backup"}
+    assert all(ci.attributes["command_arguments_redacted"] for ci in found)
+    assert "secret-value" not in json.dumps([ci.attributes for ci in found])
+    assert "nope" not in json.dumps([ci.attributes for ci in found])
+
+
+def test_network_interfaces_are_first_class_cis() -> None:
+    runner = FakeRunner(
+        host="alpha",
+        answers={
+            "ip -j": json.dumps(
+                [
+                    {"ifname": "lo", "addr_info": []},
+                    {
+                        "ifname": "eth0",
+                        "operstate": "UP",
+                        "address": "02:00:00:00:00:01",
+                        "addr_info": [{"local": "192.0.2.10", "scope": "global"}],
+                    },
+                ]
+            )
+        },
+    )
+    found = collect_network_interfaces(runner)
+
+    assert [ci.name for ci in found] == ["alpha:eth0"]
+    assert found[0].ci_type == CIType.NETWORK.value
+    assert found[0].attributes["addresses"] == ["192.0.2.10"]
+
+
+def test_mounts_and_database_containers_are_datastore_cis() -> None:
+    runner = FakeRunner(
+        host="alpha",
+        answers={
+            "findmnt": FINDMNT_OUTPUT,
+            "docker ps": "skmem-pg\tpostgres:16\nweb\tnginx:latest\n",
+        },
+    )
+    found = collect_datastores(runner)
+
+    assert {ci.name for ci in found} == {
+        "alpha:mount:/",
+        "alpha:mount:/mnt/data",
+        "alpha:container:skmem-pg",
+    }
+    assert all(ci.ci_type == CIType.DATASTORE.value for ci in found)
+    assert not any(ci.attributes.get("mountpoint") == "/proc" for ci in found)
+
+
+def test_remote_agent_homes_are_observed_on_their_host() -> None:
+    found = collect_observed_agents(
+        FakeRunner(host="alpha", answers={"python3": '["jarvis", "lumina-template"]\n'})
+    )
+
+    assert [ci.name for ci in found] == ["jarvis"]
+    assert found[0].observed is True
+    assert found[0].node == "alpha"
+
+
+def test_model_endpoint_records_health_version_and_bounded_models() -> None:
+    runner = FakeRunner(
+        host="alpha",
+        answers={
+            "ollama list": "NAME ID SIZE MODIFIED\nqwen3:latest abc 1GB now\n",
+            "api/version": '{"version":"0.11.0"}\n',
+        },
+    )
+    endpoint = collect_model_endpoints(runner)[0]
+
+    assert endpoint.name == "alpha:ollama"
+    assert endpoint.attributes["health_observed"] is True
+    assert endpoint.attributes["version"] == "0.11.0"
+    assert endpoint.attributes["models"] == ["qwen3:latest"]
 
 
 def test_shared_interface_addresses_do_not_merge_distinct_hosts() -> None:

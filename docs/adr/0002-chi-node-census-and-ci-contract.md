@@ -49,6 +49,16 @@ Relationships use the controlled vocabulary `runs_on`, `hosts`, `depends_on`,
 `connects_to`, and the identity-migration-only `alias_of`. Relationship targets
 must exist and `cmdb audit` must pass before an applied baseline is accepted.
 
+Observed coverage is an explicit nine-collector contract: host facts, systemd
+services/timers, Docker/Podman containers and Compose ownership, stable TCP
+listeners, user/system crontabs, network interfaces, persistent mounts and
+database containers, remote agent homes, and the local Ollama endpoint/model
+inventory. Cron command arguments are hashed out of identity and never stored;
+only the executable name, schedule, and principal survive. Pseudo-filesystems
+are excluded from datastore CIs. Credentialless network fingerprinting and
+authenticated Proxmox API inventory remain separate, bounded adapters and do
+not implicitly expand the reviewed Node scope.
+
 ## Source precedence and lifecycle
 
 Precedence is:
