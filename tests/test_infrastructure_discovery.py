@@ -218,6 +218,10 @@ def test_vault_resolver_rejects_symlink_and_writable_known_hosts(tmp_path: Path)
 
     known_hosts.unlink()
     known_hosts.touch(mode=0o666)
+    # Path.touch is filtered by the runner's umask (GitHub-hosted runners use
+    # 0022), so request mode alone may create 0644 and fail to exercise the
+    # writable-file refusal. Set the unsafe mode explicitly.
+    known_hosts.chmod(0o666)
     with pytest.raises(ValueError, match="writable"):
         SKVaultCredentialResolver(FixtureVault(record)).resolve("skvault://cmdb/test")
 
