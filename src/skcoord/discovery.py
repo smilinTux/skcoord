@@ -848,7 +848,6 @@ def collect_host_facts(runner: CommandRunner) -> list[DiscoveredCI]:
             )
             if ips:
                 attributes["ip_addresses"] = ips
-                aliases.update(ips)
         except (TypeError, ValueError, KeyError):
             pass
 

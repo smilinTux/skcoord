@@ -45,6 +45,11 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
   stays fail-closed: no vote written after the cutoff can satisfy the legacy
   clause, and new changes still require authenticated provenance.
 
+- Stopped promoting every observed host interface address into a CMDB identity
+  alias. Reused container-bridge addresses caused a ten-node CHI scan to merge
+  all hosts into one CI; addresses remain provenance-rich attributes while
+  governed names and explicit aliases control identity reconciliation.
+
 - Publish the auto-tagged release to PyPI in the same GitHub Actions run. Tags
   pushed by the workflow's `GITHUB_TOKEN` do not trigger a second workflow, so
   the former tag-only publish guard produced green builds and tags through

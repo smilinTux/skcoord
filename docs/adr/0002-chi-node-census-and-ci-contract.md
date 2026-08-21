@@ -65,6 +65,12 @@ requires three complete, checksum-valid passes with the same target/collector
 scope. Partial, unreachable, permission-limited, or tool-missing scans never
 increment absence or retirement state.
 
+Observed interface addresses remain attributes, not automatic host identity
+aliases. Container bridges commonly reuse addresses such as `172.17.0.1`
+across unrelated machines; merging on those values collapses distinct hosts.
+Only an operator-reviewed Node alias/address relationship may make an address
+an identity key.
+
 ## Security and operational consequences
 
 The census contains inventory metadata, never passwords, tokens, environment

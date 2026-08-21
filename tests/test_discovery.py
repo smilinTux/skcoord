@@ -280,7 +280,7 @@ def test_host_facts_normalise_linux_capacity_and_preserve_provenance() -> None:
     assert host.attributes["filesystems"][0]["used_bytes"] == 4000
     assert host.attributes["ip_addresses"] == ["192.0.2.10"]
     assert "lscpu" in host.attributes["fact_provenance"]
-    assert "192.0.2.10" in host.identity_aliases
+    assert "192.0.2.10" not in host.identity_aliases
 
 
 def test_host_fact_failures_are_missing_not_zero() -> None:
@@ -290,13 +290,28 @@ def test_host_fact_failures_are_missing_not_zero() -> None:
     assert "cpu_logical" not in host.attributes
 
 
+def test_shared_interface_addresses_do_not_merge_distinct_hosts() -> None:
+    """Container bridges reuse RFC1918 addresses on unrelated machines."""
+    answers = {
+        "uname": "Linux 6.8\n",
+        "ip -j": json.dumps(
+            [{"ifname": "docker0", "addr_info": [{"local": "172.17.0.1", "scope": "global"}]}]
+        ),
+    }
+
+    alpha = collect_host_facts(FakeRunner(host="alpha", answers=answers))[0]
+    beta = collect_host_facts(FakeRunner(host="beta", answers=answers))[0]
+
+    assert len(merge([alpha, beta])) == 2
+
+
 def test_alias_overlap_merges_host_sightings_under_declared_canonical_name() -> None:
     declared = DiscoveredCI(
         "host",
         "alpha.example",
         "fleet:node",
         canonical_name="alpha.example",
-        aliases=("ssh-alpha", "192.0.2.10"),
+        aliases=("ssh-alpha",),
     )
     observed = DiscoveredCI(
         "host",
@@ -304,12 +319,12 @@ def test_alias_overlap_merges_host_sightings_under_declared_canonical_name() -> 
         "host",
         observed=True,
         canonical_name="ssh-alpha",
-        aliases=("192.0.2.10",),
+        aliases=("ssh-alpha",),
     )
     folded = merge([declared, observed])
     assert len(folded) == 1
     assert folded[0].ci_id == make_ci_id("host", "alpha.example")
-    assert set(folded[0].identity_aliases) == {"alpha.example", "ssh-alpha", "192.0.2.10"}
+    assert set(folded[0].identity_aliases) == {"alpha.example", "ssh-alpha"}
 
 
 def test_fingerprint_only_asset_is_an_unmanaged_device() -> None:
