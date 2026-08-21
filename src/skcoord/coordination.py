@@ -944,18 +944,21 @@ class Board:
                 self.archive_task(tid, by="age-backlog")
         return eligible
 
-    def claim_task(self, agent_name: str, task_id: str) -> AgentFile:
+    def claim_task(self, agent_name: str, task_id: str, force: bool = False) -> AgentFile:
         """Have an agent claim a task.
 
         Args:
             agent_name: The claiming agent's name.
             task_id: The task ID to claim.
+            force: When True, skip the dependency check (claim anyway).
+                The already-claimed/done gate is never overridden.
 
         Returns:
             Updated AgentFile.
 
         Raises:
-            ValueError: If task doesn't exist or is already claimed.
+            ValueError: If task doesn't exist, is already claimed/done, or has
+                incomplete dependencies (unless ``force`` is set).
         """
         views = self.get_task_views()
         target = None
@@ -983,6 +986,24 @@ class Board:
                 f"Task {task_id} already {target.status.value} by "
                 f"{target.claimed_by or 'unknown owner'}"
             )
+        if target.task.dependencies and not force:
+            # Dependency statuses are looked up across archived tasks too, so a
+            # dependency that was completed and later archived still counts as
+            # done. An unknown dependency ID (no card anywhere) is treated as
+            # incomplete: fail closed, and let force=True be the escape hatch.
+            dep_views = {
+                v.task.id: v for v in self.get_task_views(include_archived=True)
+            }
+            incomplete = [
+                dep_id
+                for dep_id in target.task.dependencies
+                if dep_id not in dep_views or dep_views[dep_id].status != TaskStatus.DONE
+            ]
+            if incomplete:
+                raise ValueError(
+                    f"Task {task_id} has incomplete dependencies: "
+                    f"{', '.join(incomplete)} (use force to claim anyway)"
+                )
 
         agent = self.load_agent(agent_name) or AgentFile(agent=agent_name)
         # Capture the task being bumped out of current_task: it stays claimed but
