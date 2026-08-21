@@ -142,6 +142,7 @@ def test_vault_resolver_and_ssh_runner_enforce_strict_host_keys(tmp_path: Path) 
             "username": "collector",
             "identity_file": str(identity),
             "known_hosts_file": str(known_hosts),
+            "port": 2222,
         }
     )
     credential = SKVaultCredentialResolver(vault).resolve("skvault://cmdb/pve")
@@ -152,8 +153,26 @@ def test_vault_resolver_and_ssh_runner_enforce_strict_host_keys(tmp_path: Path) 
     assert f"UserKnownHostsFile={known_hosts}" in command
     assert "BatchMode=yes" in command and "IdentitiesOnly=yes" in command
     assert "collector@pve1.internal" in command
+    assert command[command.index("-p") + 1] == "2222"
     assert "skvault://" not in " ".join(command)
     assert repr(credential) == "SSHCredential(<redacted>)"
+
+
+@pytest.mark.parametrize("port", [0, 65536, "not-a-port"])
+def test_vault_resolver_rejects_invalid_ssh_port(tmp_path: Path, port) -> None:
+    identity = tmp_path / "id"
+    known_hosts = tmp_path / "known_hosts"
+    identity.touch(mode=0o600)
+    known_hosts.touch(mode=0o600)
+    record = {
+        "username": "collector",
+        "identity_file": str(identity),
+        "known_hosts_file": str(known_hosts),
+        "port": port,
+    }
+
+    with pytest.raises(ValueError, match="port"):
+        SKVaultCredentialResolver(FixtureVault(record)).resolve("skvault://ssh/node")
 
 
 @pytest.mark.parametrize(

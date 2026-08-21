@@ -262,6 +262,7 @@ class SSHCredential:
     username: str
     identity_file: Path
     known_hosts_file: Path
+    port: int = 22
 
     def __repr__(self) -> str:
         return "SSHCredential(<redacted>)"
@@ -285,8 +286,14 @@ class SKVaultCredentialResolver:
         username = str(record.get("username", ""))
         identity = Path(str(record.get("identity_file", ""))).expanduser()
         known_hosts = Path(str(record.get("known_hosts_file", ""))).expanduser()
+        try:
+            port = int(record.get("port", 22))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("SSH port must be an integer") from exc
         if not _SAFE_USER.fullmatch(username):
             raise ValueError("invalid SSH username")
+        if not 1 <= port <= 65535:
+            raise ValueError("SSH port must be between 1 and 65535")
         if not identity.is_absolute() or not known_hosts.is_absolute():
             raise ValueError("SSH credential paths must be absolute")
         for path, label in ((identity, "identity"), (known_hosts, "known_hosts")):
@@ -299,7 +306,7 @@ class SKVaultCredentialResolver:
                 raise ValueError(f"SSH {label} must not be group/world writable")
         if identity.stat().st_mode & 0o077:
             raise ValueError("SSH identity file must not be group/world accessible")
-        return SSHCredential(username, identity, known_hosts)
+        return SSHCredential(username, identity, known_hosts, port)
 
 
 @dataclass
@@ -329,6 +336,8 @@ class SecureSSHRunner:
             f"UserKnownHostsFile={self.credential.known_hosts_file}",
             "-o",
             f"ConnectTimeout={min(self.timeout, 10)}",
+            "-p",
+            str(self.credential.port),
             "-i",
             str(self.credential.identity_file),
             f"{self.credential.username}@{self.host}",

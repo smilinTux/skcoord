@@ -78,6 +78,9 @@ values, private keys, key contents, or inline SSH options. Network runners use
 one explicit `skvault://` credential reference per in-scope target. Missing
 references, incomplete collection, scope drift, backup evidence, or the three
 shadow artifacts block apply even when a change is approved.
+The metadata may select a bounded TCP port for reviewed WSL endpoints; the
+runner still requires pinned known hosts, protected key paths, batch mode, and
+strict host-key checking.
 
 `chiap09` remains read-only while its dirty-worktree remediation is open, and
 `chiwk11` remains discovery-only until runtime-role qualification completes.

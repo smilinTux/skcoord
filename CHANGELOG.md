@@ -50,6 +50,10 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
   all hosts into one CI; addresses remain provenance-rich attributes while
   governed names and explicit aliases control identity reconciliation.
 
+- Added a validated optional SSH port to the skvault metadata adapter and
+  strict SSH runner, allowing WSL targets on port 2222 without inline options
+  or reliance on ambient SSH configuration.
+
 - Publish the auto-tagged release to PyPI in the same GitHub Actions run. Tags
   pushed by the workflow's `GITHUB_TOKEN` do not trigger a second workflow, so
   the former tag-only publish guard produced green builds and tags through
