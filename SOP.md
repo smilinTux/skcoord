@@ -195,6 +195,17 @@ timer cutover, and rollback sequence are maintained in
 local apply unit and the ATLAS network apply unit are deliberately different
 contracts; substituting one for the other is a release blocker.
 
+For a change that was already terminal before CAB identity provenance was
+introduced, use `ITILManager.migrate_legacy_terminal_change(change_id)` first.
+The default is a read-only plan. Review the reported SHA-256 against the
+immutable core, legacy vote, and existing implementing -> deployed -> verified
+-> closed evidence, then call the same method with `apply=True`. This appends a
+`skcoord.itil.legacy-terminal/v1` marker; it never rewrites or backdates a vote.
+The fold accepts only a hash-valid marker with PIR evidence. Never manufacture
+an authenticated role, fingerprint, authorization id, or historical timestamp
+to repair an old record. New change cores carry `cab_provenance_schema=1` and
+the migration API refuses them even if a caller appends legacy-shaped evidence.
+
 This is a library and has no standalone service. Deploying it means reinstalling the
 consumer environment and restarting only the long-running consumers that imported it.
 A release is a PyPI publish, and consumers pick it up on their next install.

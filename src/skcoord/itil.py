@@ -294,6 +294,92 @@ def _is_human_approval(vote: CABDecision) -> bool:
     return vote.agent == "human" or vote.subject_role in {"owner", "approver"}
 
 
+_LEGACY_TERMINAL_SCHEMA = "skcoord.itil.legacy-terminal/v1"
+_CAB_PROVENANCE_SCHEMA_VERSION = 1
+
+
+def _legacy_terminal_evidence(
+    core: dict[str, Any],
+    events: list[dict[str, Any]],
+    votes: list[CABDecision],
+) -> tuple[str, str] | None:
+    """Return the digest and terminal timestamp for migratable legacy evidence.
+
+    This compatibility path is intentionally narrower than CAB approval. It
+    recognizes only a pre-provenance APPROVED vote plus an already-recorded
+    implementing -> deployed -> verified -> closed lifecycle. The verified
+    event must retain its PIR note. The digest binds the immutable core, the
+    selected legacy vote, and the event prefix through the first qualifying
+    close so a migration marker cannot bless different or edited history.
+    """
+    if int(core.get("cab_provenance_schema") or 0) >= _CAB_PROVENANCE_SCHEMA_VERSION:
+        return None
+    legacy_votes = sorted(
+        (
+            vote
+            for vote in votes
+            if vote.decision == CABDecisionValue.APPROVED
+            and not vote.subject_role
+            and not vote.subject_fingerprint
+            and not vote.authorization_id
+        ),
+        key=lambda vote: (vote.decided_at, vote.agent),
+    )
+    if not legacy_votes:
+        return None
+
+    phase = 0
+    terminal_index: int | None = None
+    for index, event in enumerate(events):
+        if event.get("kind") != "status":
+            continue
+        target = event.get("to")
+        if target == "implementing":
+            phase = max(phase, 1)
+        elif target == "deployed" and phase >= 1:
+            phase = 2
+        elif target == "verified" and phase >= 2 and (event.get("note") or "").strip():
+            phase = 3
+        elif target == "closed" and phase >= 3:
+            terminal_index = index
+            break
+    if terminal_index is None:
+        return None
+
+    payload = {
+        "schema": _LEGACY_TERMINAL_SCHEMA,
+        "core": core,
+        "vote": legacy_votes[0].model_dump(mode="json"),
+        "events": events[: terminal_index + 1],
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode(
+        "utf-8"
+    )
+    terminal_ts = str(events[terminal_index].get("ts") or "")
+    return hashlib.sha256(encoded).hexdigest(), terminal_ts
+
+
+def _validated_legacy_terminal_marker(
+    core: dict[str, Any],
+    events: list[dict[str, Any]],
+    votes: list[CABDecision],
+) -> dict[str, Any] | None:
+    """Return the first hash-valid append-only legacy terminal marker."""
+    for index, event in enumerate(events):
+        if event.get("kind") != "legacy_terminal_migration":
+            continue
+        if (
+            event.get("schema") != _LEGACY_TERMINAL_SCHEMA
+            or event.get("node") != "migrated"
+            or event.get("to") != "closed"
+        ):
+            continue
+        evidence = _legacy_terminal_evidence(core, events[:index], votes)
+        if evidence and str(event.get("evidence_sha256") or "") == evidence[0]:
+            return event
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -402,7 +488,11 @@ def _cab_resolved_status(
     if rejections:
         return "rejected"
     approvals = [
-        v for v in votes if v.decision == CABDecisionValue.APPROVED and v.agent != prepared_by
+        v
+        for v in votes
+        if v.decision == CABDecisionValue.APPROVED
+        and v.agent != prepared_by
+        and v.agent != core.get("created_by")
     ]
     if any(_is_human_approval(v) for v in approvals):
         return "approved"
@@ -923,6 +1013,7 @@ class ITILManager:
         prepared_by: Optional[str] = None
         validation: Optional[dict[str, Any]] = None
         scheduled_window: Optional[dict[str, Any]] = None
+        legacy_terminal_marker = _validated_legacy_terminal_marker(core, events, votes)
 
         for e in events:
             kind = e.get("kind")
@@ -1250,7 +1341,9 @@ class ITILManager:
             approvals = [
                 v
                 for v in votes
-                if v.decision == CABDecisionValue.APPROVED and v.agent != prepared_by
+                if v.decision == CABDecisionValue.APPROVED
+                and v.agent != prepared_by
+                and v.agent != core.get("created_by")
             ]
             if rejections:
                 status = "rejected"
@@ -1272,6 +1365,19 @@ class ITILManager:
                         "note": "Approved by: " + ", ".join(v.agent for v in approvals),
                     }
                 )
+
+        if legacy_terminal_marker is not None:
+            status = "closed"
+            timeline.append(
+                {
+                    "ts": legacy_terminal_marker.get("ts", ""),
+                    "agent": legacy_terminal_marker.get("writer", "cab-migration"),
+                    "action": "legacy-terminal-migration:closed",
+                    "note": (
+                        "Preserved hash-bound terminal lifecycle across the CAB provenance upgrade"
+                    ),
+                }
+            )
 
         return Change(
             id=core["id"],
@@ -1632,6 +1738,7 @@ class ITILManager:
             "created_by": created_by or agent,
             "implementer": implementer,
             "cab_required": ct != ChangeType.STANDARD,
+            "cab_provenance_schema": _CAB_PROVENANCE_SCHEMA_VERSION,
             "related_problem_id": related_problem_id,
             "created_at": _now_iso(),
             "tags": tags or [],
@@ -1772,6 +1879,69 @@ class ITILManager:
         path = self.cab_dir / filename
         atomic_write_text(path, json.dumps(vote.model_dump(), indent=2, default=str) + "\n")
         return vote
+
+    def migrate_legacy_terminal_change(
+        self,
+        change_id: str,
+        *,
+        apply: bool = False,
+    ) -> dict[str, Any]:
+        """Plan or append a hash-bound marker for an already-terminal change.
+
+        This does not create or backdate a CAB approval. It proves that the
+        immutable pre-provenance vote and existing terminal lifecycle were
+        reviewed together, then appends a schema-versioned marker. The default
+        is dry-run; callers must explicitly request ``apply=True``. Reapplying
+        a valid migration is idempotent.
+        """
+        rid = self._resolve_id(self.changes_dir, change_id)
+        core = self._load_core(self.changes_dir, rid)
+        if core is None:
+            raise ValueError(f"change not found: {change_id}")
+        events = self._read_events(self.changes_dir, rid)
+        votes = self.get_cab_votes(rid)
+        marker = _validated_legacy_terminal_marker(core, events, votes)
+        if marker is not None:
+            return {
+                "change_id": rid,
+                "schema": _LEGACY_TERMINAL_SCHEMA,
+                "evidence_sha256": marker.get("evidence_sha256"),
+                "terminal_at": marker.get("terminal_at"),
+                "applied": True,
+                "idempotent": True,
+            }
+        evidence = _legacy_terminal_evidence(core, events, votes)
+        if evidence is None:
+            raise ValueError(
+                "legacy terminal migration requires a pre-provenance change core and approved "
+                "vote plus "
+                "an implementing -> deployed -> verified(PIR) -> closed event chain"
+            )
+        digest, terminal_at = evidence
+        plan = {
+            "change_id": rid,
+            "schema": _LEGACY_TERMINAL_SCHEMA,
+            "evidence_sha256": digest,
+            "terminal_at": terminal_at,
+            "applied": False,
+            "idempotent": False,
+        }
+        if not apply:
+            return plan
+        self._append_event(
+            self.changes_dir,
+            rid,
+            "cab-migration",
+            "legacy_terminal_migration",
+            node="migrated",
+            schema=_LEGACY_TERMINAL_SCHEMA,
+            to="closed",
+            evidence_sha256=digest,
+            terminal_at=terminal_at,
+            note="Preserve reviewed historical terminal lifecycle; no CAB vote created",
+        )
+        plan["applied"] = True
+        return plan
 
     def get_cab_votes(self, change_id: str) -> list[CABDecision]:
         """Get all CAB votes for a change."""

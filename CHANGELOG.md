@@ -11,6 +11,14 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
 
 ### Fixed
 
+- Preserve reviewed terminal change history across CAB provenance upgrades.
+  A dry-run-by-default, append-only migration binds the immutable change core,
+  legacy vote, and implementing/deployed/verified/closed event prefix to a
+  SHA-256 marker; only a valid marker restores `closed`. Raw status approval,
+  incomplete/PIR-less histories, forged markers, and unauthenticated creator
+  self-votes remain fail-closed. New change cores carry a CAB provenance schema
+  version and are categorically ineligible for the legacy migration path.
+
 - Publish the auto-tagged release to PyPI in the same GitHub Actions run. Tags
   pushed by the workflow's `GITHUB_TOKEN` do not trigger a second workflow, so
   the former tag-only publish guard produced green builds and tags through
