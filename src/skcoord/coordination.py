@@ -966,11 +966,23 @@ class Board:
 
         if target is None:
             raise ValueError(f"Task {task_id} not found")
-        if target.status in (TaskStatus.DONE, TaskStatus.CLAIMED, TaskStatus.IN_PROGRESS):
-            if target.claimed_by != agent_name:
-                raise ValueError(
-                    f"Task {task_id} already {target.status.value} by {target.claimed_by}"
-                )
+        # A ready-column card folds to CLAIMED, but a kanban move-to-ready
+        # carries no owner. The lifecycle reconciler only projects claims for
+        # cards WITH an owner (lifecycle.py), so an ownerless claimed card is
+        # unclaimed and claimable. DONE and IN_PROGRESS keep refusing: an
+        # ownerless doing card still blocks a different claimant.
+        ownerless_claimed = (
+            target.status == TaskStatus.CLAIMED and target.claimed_by is None
+        )
+        if (
+            target.status in (TaskStatus.DONE, TaskStatus.CLAIMED, TaskStatus.IN_PROGRESS)
+            and not ownerless_claimed
+            and target.claimed_by != agent_name
+        ):
+            raise ValueError(
+                f"Task {task_id} already {target.status.value} by "
+                f"{target.claimed_by or 'unknown owner'}"
+            )
 
         agent = self.load_agent(agent_name) or AgentFile(agent=agent_name)
         # Capture the task being bumped out of current_task: it stays claimed but
