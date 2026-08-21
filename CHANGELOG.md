@@ -11,6 +11,11 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
 
 ### Fixed
 
+- Publish the auto-tagged release to PyPI in the same GitHub Actions run. Tags
+  pushed by the workflow's `GITHUB_TOKEN` do not trigger a second workflow, so
+  the former tag-only publish guard produced green builds and tags through
+  `v0.1.15` while PyPI remained at `0.1.8`.
+
 - Restored the missing `Board.set_grade()` write/return after adding optional
   session and node provenance. The interrupted edit previously built the grade
   document but never persisted it, breaking coordination grading at runtime.

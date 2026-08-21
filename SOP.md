@@ -184,9 +184,9 @@ the `describe` event (`test_spe_describe_event.py`), and the staged lane
 Card `3799733b` revalidated the canonical CMDB, discovery, reconciliation, and
 projection modules against GitHub `main`. Release evidence is the full pytest/Ruff/
 build gate in section 4 plus the consumer integration suites in `skcapstone` and
-`skdashboard`. Fleet consumers update this library only by pulling its GitHub release
-and reinstalling into `~/.skenv`; the dashboard process must then be restarted because
-it imports `skcoord` in-process.
+`skdashboard`. Fleet consumers update this library only from a tagged GitHub release
+(normally the matching PyPI artifact) and reinstall it into `~/.skenv`; the dashboard
+process must then be restarted because it imports `skcoord` in-process.
 
 CMDB library releases never mutate the live store or schedule by themselves.
 The governed network rollout, authenticated CAB evidence, three-shadow gate,
@@ -195,7 +195,8 @@ timer cutover, and rollback sequence are maintained in
 local apply unit and the ATLAS network apply unit are deliberately different
 contracts; substituting one for the other is a release blocker.
 
-This is a library. There is nothing to deploy, restart, or roll back on a host.
+This is a library and has no standalone service. Deploying it means reinstalling the
+consumer environment and restarting only the long-running consumers that imported it.
 A release is a PyPI publish, and consumers pick it up on their next install.
 
 **Do not push a tag by hand.** `.github/workflows/publish.yml` cuts the tag
@@ -212,13 +213,15 @@ itself on a push to `main`:
    asserts the computed version is not a dev/local/`0.0.0` version before
    building, because PyPI would reject that with a 400 after the tag was already
    cut.
-3. `pypi-publish` uploads with Trusted Publishing (OIDC, environment `pypi`,
-   no token).
+3. `pypi-publish` uploads in that same workflow run with Trusted Publishing (OIDC,
+   environment `pypi`, no token). GitHub does not start a second workflow when the
+   preceding job pushes the tag with `GITHUB_TOKEN`; waiting for a tag-push run is the
+   failure that left tags `v0.1.9` through `v0.1.15` absent from PyPI.
 
 Both `build` and `pypi-publish` carry `always() && !cancelled()` guards. That is
 not decoration: a GitHub skip propagates through the job graph, so a bare
-`needs:` on a skipped upstream job silently skips the publish. That exact failure
-shipped a build that passed every guard and published nothing.
+`needs:` on a skipped upstream job silently skips the publish. The publish job is
+gated on the successful build, not on a second event that GitHub will not emit.
 
 Rollback for a library is **forward only**: yank or supersede on PyPI and cut a
 new patch. Consumers pin with `skcoord>=X.Y.Z`.
@@ -415,7 +418,7 @@ block below. No capability is asserted that this repo does not implement.
 ---
 
 <!-- docs-evidence
-verified: 2026-08-14
+verified: 2026-08-21
 checks:
   - name: board root layout matches section 6
     run: grep -q 'self.coord_dir = self.home / "coordination"' src/skcoord/coordination.py && grep -q 'self.tasks_dir = self.coord_dir / "tasks"' src/skcoord/coordination.py && grep -q 'self.agents_dir = self.coord_dir / "agents"' src/skcoord/coordination.py
@@ -437,4 +440,6 @@ checks:
     run: grep -qE 'run: python -m pytest tests/ -q[[:space:]]*$' .github/workflows/ci.yml && grep -qE 'run: ruff check src/ tests/[[:space:]]*$' .github/workflows/ci.yml && ! grep -q '|| true' .github/workflows/ci.yml
   - name: the one-way dependency guard test still exists
     run: grep -q 'def test_imports_do_not_pull_skcapstone' tests/test_smoke.py
+  - name: auto-tagged releases publish in the same workflow run
+    run: python3 -m pytest tests/test_publish_workflow.py -q
 -->
