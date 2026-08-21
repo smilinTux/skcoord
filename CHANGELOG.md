@@ -21,6 +21,12 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
   than guessing. Every repair appends a conflict-free JSONL receipt under
   `coordination/reconciliation/`; a second repair is idempotent.
 
+- Defined the operator-reviewed CHI fleet Node objects as the authoritative
+  CMDB discovery census, including identity/source precedence, the
+  `chiap09`/`chioc09` alias decision, `chipv05` and Windows/WSL handling,
+  deterministic CI identity, four-hour staleness, three-complete-pass
+  retirement, relationship vocabulary, and no-secret credential metadata.
+
 ### Fixed
 
 - Fold acceptance-criteria amendments into the authoritative CardStore

@@ -201,6 +201,37 @@ timer cutover, and rollback sequence are maintained in
 local apply unit and the ATLAS network apply unit are deliberately different
 contracts; substituting one for the other is a release blocker.
 
+### CHI census and discovery acceptance
+
+The authoritative target set is the reviewed fleet Node object set under
+`~/.skcapstone/fleet/objects/node/`; see
+[`docs/adr/0002-chi-node-census-and-ci-contract.md`](docs/adr/0002-chi-node-census-and-ci-contract.md).
+Target resolution is deliberately independent of scan output:
+
+```bash
+python - <<'PY'
+from pathlib import Path
+from skcoord.cmdb_reconcile import resolve_targets
+
+for target in resolve_targets(Path("~/.skcapstone").expanduser()):
+    print(target.host, ",".join(target.provenance))
+PY
+```
+
+Before a baseline, reconcile the fleet objects against the peer directory,
+DNS/Tailscale, live SSH hostnames, and service-health evidence. Record aliases
+and discrepancies in the Node spec; never let an observed host expand scope.
+The 2026-08-21 review resolves `chioc09` as an alias of canonical `chiap09`,
+includes `chipv05`, treats the Windows/WSL endpoints of `chiwk12` as one asset,
+and keeps `chiwk11` in discovery-only scope pending role qualification.
+
+Run `skcapstone cmdb scan` or a credentialed network reconcile without
+`--apply` first. An approved change (currently `chg-a76c0aee`) authorizes the
+window but does not waive explicit vault references, backup evidence, complete
+collector accounting, three checksum-valid shadows, relationship audit, or
+rollback readiness. Card `e5d0c8cb` owns the census contract and `e83b1f4f`
+owns collector coverage.
+
 This is a library and has no standalone service. Deploying it means reinstalling the
 consumer environment and restarting only the long-running consumers that imported it.
 A release is a PyPI publish, and consumers pick it up on their next install.
@@ -448,4 +479,6 @@ checks:
     run: grep -q 'def test_imports_do_not_pull_skcapstone' tests/test_smoke.py
   - name: auto-tagged releases publish in the same workflow run
     run: sed -n '/^  pypi-publish:/,$p' .github/workflows/publish.yml | grep -q "needs.build.result == 'success'" && ! sed -n '/^  pypi-publish:/,$p' .github/workflows/publish.yml | grep -q "startsWith(github.ref, 'refs/tags/')"
+  - name: CHI census contract names the authoritative store and fail-closed lifecycle
+    run: grep -q '~/.skcapstone/fleet/objects/node' docs/adr/0002-chi-node-census-and-ci-contract.md && grep -q 'three complete, checksum-valid passes' docs/adr/0002-chi-node-census-and-ci-contract.md && grep -q 'secret values and private paths are prohibited' docs/adr/0002-chi-node-census-and-ci-contract.md
 -->
