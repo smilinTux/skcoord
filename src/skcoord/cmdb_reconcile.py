@@ -14,7 +14,14 @@ import re
 import threading
 import time
 import uuid
-from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from concurrent.futures import (
+    Future,
+    ThreadPoolExecutor,
+    as_completed,
+)
+from concurrent.futures import (
+    TimeoutError as FuturesTimeoutError,
+)
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -238,7 +245,7 @@ def scan_network(
             result.findings.extend(items)
             if failure:
                 result.failures.append(f"{collector}:{failure}")
-    except TimeoutError:
+    except FuturesTimeoutError:
         deadline_exceeded = True
         for future, (host, collector) in futures.items():
             if not future.done():

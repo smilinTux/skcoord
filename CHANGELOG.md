@@ -9,6 +9,11 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
 
 ## [Unreleased]
 
+- Made bounded CMDB deadline handling portable across supported Python
+  versions by catching `concurrent.futures.TimeoutError` explicitly; Python
+  3.10 no longer leaks a deadline exception instead of returning an incomplete
+  fail-closed scan result.
+
 - Recorded the verified three-shadow CMDB scope, authenticated Chef approval,
   exact ATLAS network unit contract, freeze/report-only cutover sequence, and
   rollback acceptance checks in the operational rollout SOP.
