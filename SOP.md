@@ -179,6 +179,15 @@ the `describe` event (`test_spe_describe_event.py`), and the staged lane
 
 ## 5. Release / Deploy
 
+### 2026-08-21 CMDB source validation
+
+Card `3799733b` revalidated the canonical CMDB, discovery, reconciliation, and
+projection modules against GitHub `main`. Release evidence is the full pytest/Ruff/
+build gate in section 4 plus the consumer integration suites in `skcapstone` and
+`skdashboard`. Fleet consumers update this library only by pulling its GitHub release
+and reinstalling into `~/.skenv`; the dashboard process must then be restarted because
+it imports `skcoord` in-process.
+
 CMDB library releases never mutate the live store or schedule by themselves.
 The governed network rollout, authenticated CAB evidence, three-shadow gate,
 timer cutover, and rollback sequence are maintained in

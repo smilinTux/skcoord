@@ -9,6 +9,12 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
 
 ## [Unreleased]
 
+### Fixed
+
+- Restored the missing `Board.set_grade()` write/return after adding optional
+  session and node provenance. The interrupted edit previously built the grade
+  document but never persisted it, breaking coordination grading at runtime.
+
 - Made bounded CMDB deadline handling portable across supported Python
   versions by catching `concurrent.futures.TimeoutError` explicitly; Python
   3.10 no longer leaks a deadline exception instead of returning an incomplete

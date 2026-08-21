@@ -422,6 +422,8 @@ class Board:
         rubric_version: int = 1,
         confidence: float | None = None,
         pool: str = "private",
+        session_id: str | None = None,
+        node: str | None = None,
     ) -> Path:
         """Write a Joule Economy work grade onto a card (meta.grade).
 
@@ -480,7 +482,7 @@ class Board:
 
         def _mutate(d: dict) -> None:
             meta = d.setdefault("meta", {})
-            meta["grade"] = {
+            grade = {
                 "size": size,
                 "risk": risk,
                 "sensitivity": sensitivity,
@@ -494,6 +496,11 @@ class Board:
                 "pool": pool,
                 "graded_at": _now_iso(),
             }
+            if session_id is not None:
+                grade["session_id"] = session_id
+            if node is not None:
+                grade["node"] = node
+            meta["grade"] = grade
 
         return self._write_task_raw(task_id, _mutate)
 
