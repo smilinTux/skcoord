@@ -243,6 +243,26 @@ and output are not retained. Transport, deadline, or fully unavailable
 collector status makes the scan incomplete and blocks absence or lifecycle
 decisions; successful fallbacks retain explicit `partial` accounting.
 
+### CMDB import and reconciliation contract
+
+Card `e57ef91a` replaces the historical three-host/ITIL seed with the versioned
+discovery model. `CMDBManager.seed_from_inventory()` remains only as
+`skcoord.cmdb.compat-seed/v1` for older clients and now imports declared fleet,
+registry, and agent sources through `discovery.reconcile`; it does not invent
+hosts or derive CI health from incidents.
+
+Use the supported consumer verbs in order: `skcapstone cmdb plan`, review the
+creates/updates/relationship deltas, stale candidates, retirements, validation
+failures, and redaction findings, then use `skcapstone cmdb apply`. An apply
+validates and secret-redacts the complete evidence batch before appending any
+event. Missing targets, unsupported CI types or relationships, partial scans,
+and malformed evidence fail closed. Identical evidence is idempotent.
+
+Run artifacts are canonical JSON plus a sibling SHA-256 file. Status readers
+must use `read_verified_run_artifacts()` and ignore missing or mismatched
+checksums. Missing observations advance retirement only on complete,
+same-scope passes; three complete misses retire by status event, never delete.
+
 This is a library and has no standalone service. Deploying it means reinstalling the
 consumer environment and restarting only the long-running consumers that imported it.
 A release is a PyPI publish, and consumers pick it up on their next install.

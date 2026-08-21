@@ -21,6 +21,12 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
   than guessing. Every repair appends a conflict-free JSONL receipt under
   `coordination/reconciliation/`; a second repair is idempotent.
 
+- Added fail-closed CMDB evidence validation, explicit relationship deltas,
+  secret-redaction findings, stale/retirement plan fields, checksum-verified
+  artifact reads, and concurrent-writer coverage for the supported plan/apply
+  workflow (`e57ef91a`). The legacy seed method is now a versioned compatibility
+  bridge over declared discovery rather than a hard-coded three-host inventory.
+
 - Expanded observed CMDB discovery from four collectors to nine. Cross-node
   scans now cover user/system cron entries (with command arguments redacted),
   non-loopback network interfaces, persistent mounts and database containers,

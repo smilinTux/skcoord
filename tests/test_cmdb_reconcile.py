@@ -19,6 +19,7 @@ from skcoord.cmdb_reconcile import (
     freshness_status,
     normalize_drift,
     operator_summary,
+    read_verified_run_artifacts,
     resolve_targets,
     run_reconcile,
     scan_health_events,
@@ -265,6 +266,18 @@ def test_artifact_rejects_path_like_scan_id(tmp_path: Path) -> None:
         write_run_artifact(tmp_path, {"scan_id": "../escape"})
 
 
+def test_verified_artifact_reader_ignores_tampering(tmp_path: Path) -> None:
+    path, _ = write_run_artifact(
+        tmp_path,
+        {"scan_id": "valid", "ended_at": "2026-08-21T12:00:00+00:00"},
+    )
+    tampered = path.with_name("tampered.json")
+    tampered.write_text('{"scan_id":"tampered"}\n')
+    tampered.with_suffix(".sha256").write_text("0" * 64 + "  tampered.json\n")
+
+    assert [item["scan_id"] for item in read_verified_run_artifacts(tmp_path)] == ["valid"]
+
+
 def test_freshness_slo_handles_missing_fresh_and_stale() -> None:
     now = datetime(2026, 8, 20, tzinfo=timezone.utc)
     assert not freshness_status(None, now, timedelta(hours=4))["fresh"]
@@ -304,6 +317,8 @@ def test_run_artifact_counts_retirement_actions(tmp_path: Path) -> None:
     )
     assert artifact["reconcile"]["retired"] == ["ci-service-gone"]
     assert artifact["reconcile"]["counts"]["retired"] == 1
+    assert artifact["plan"]["retirements"] == ["ci-service-gone"]
+    assert artifact["plan"]["stale_candidates"][0]["action"] == "retire"
 
 
 def test_partial_run_never_reports_orphans(tmp_path: Path) -> None:

@@ -470,19 +470,41 @@ def apply_retirement_lifecycle(
     return actions
 
 
-def _sanitize(value: object) -> object:
+def _sanitize_with_findings(
+    value: object, path: str = "$"
+) -> tuple[object, list[dict[str, str]]]:
+    """Redact secret-named fields and return their paths without their values."""
+    findings: list[dict[str, str]] = []
     if isinstance(value, dict):
-        return {
-            str(k): "[redacted]"
-            if any(s in str(k).lower() for s in _SECRET_KEYS)
-            else _sanitize(v)
-            for k, v in value.items()
-        }
+        clean = {}
+        for raw_key, child in value.items():
+            key = str(raw_key)
+            child_path = f"{path}.{key}"
+            if key == "secret_redaction_findings":
+                clean[key], nested = _sanitize_with_findings(child, child_path)
+                findings.extend(nested)
+            elif any(secret in key.lower() for secret in _SECRET_KEYS):
+                clean[key] = "[redacted]"
+                findings.append({"path": child_path})
+            else:
+                clean[key], nested = _sanitize_with_findings(child, child_path)
+                findings.extend(nested)
+        return clean, findings
     if isinstance(value, (list, tuple)):
-        return [_sanitize(item) for item in value[:1000]]
+        clean_items = []
+        for index, item in enumerate(value[:1000]):
+            clean, nested = _sanitize_with_findings(item, f"{path}[{index}]")
+            clean_items.append(clean)
+            findings.extend(nested)
+        return clean_items, findings
     if isinstance(value, str):
-        return value[:1000]
-    return value
+        return value[:1000], findings
+    return value, findings
+
+
+def _sanitize(value: object) -> object:
+    """Compatibility wrapper for callers that only need the clean value."""
+    return _sanitize_with_findings(value)[0]
 
 
 def write_run_artifact(home: Path, artifact: dict) -> tuple[Path, str]:
@@ -500,6 +522,24 @@ def write_run_artifact(home: Path, artifact: dict) -> tuple[Path, str]:
     atomic_write_text(path, payload)
     atomic_write_text(path.with_suffix(".sha256"), f"{checksum}  {path.name}\n")
     return path, checksum
+
+
+def read_verified_run_artifacts(home: Path) -> list[dict]:
+    """Read checksum-valid reconcile artifacts, newest first, without writing."""
+    directory = Path(home).expanduser() / "cmdb" / "reconcile-runs"
+    verified: list[tuple[float, dict]] = []
+    for path in directory.glob("*.json"):
+        try:
+            payload = path.read_bytes()
+            expected = path.with_suffix(".sha256").read_text(encoding="utf-8").split()[0]
+            if hashlib.sha256(payload).hexdigest() != expected:
+                continue
+            value = json.loads(payload)
+            if isinstance(value, dict):
+                verified.append((path.stat().st_mtime, value))
+        except (OSError, ValueError, IndexError, json.JSONDecodeError):
+            continue
+    return [value for _, value in sorted(verified, key=lambda item: item[0], reverse=True)]
 
 
 def freshness_status(last_success: datetime | None, now: datetime, slo: timedelta) -> dict:
@@ -570,6 +610,22 @@ def run_reconcile(
     report_data = report.as_dict()
     report_data["retired"] = retired
     report_data["counts"]["retired"] = len(retired)
+    scan_validation_failures = [
+        {"scope": "declared", "reason": failure} for failure in scan_result.declared_failures
+    ]
+    scan_validation_failures.extend(
+        {"scope": target.host, "reason": failure}
+        for target in scan_result.targets
+        for failure in target.failures
+    )
+    stale_candidates = sorted(
+        (
+            item
+            for item in lifecycle_actions
+            if item.get("action") in {"miss", "retire"}
+        ),
+        key=lambda item: item.get("ci_id", ""),
+    )
     artifact = {
         "scan_id": scan_id,
         "started_at": started.isoformat(),
@@ -581,6 +637,18 @@ def run_reconcile(
         "scope_fingerprint": scope_fingerprint,
         "completeness": scan_result.completeness(),
         "reconcile": report_data,
+        "plan": {
+            "creates": report.created,
+            "updates": report.updated,
+            "relationships": report.relationships,
+            "stale_candidates": stale_candidates,
+            "retirements": retired,
+            "validation_failures": [
+                *report.validation_failures,
+                *scan_validation_failures,
+            ],
+            "secret_redaction_findings": report.secret_redaction_findings,
+        },
         "drift": {
             "count": len(normalized),
             "by_severity": {
@@ -603,4 +671,11 @@ def run_reconcile(
             ],
         },
     }
-    return artifact, normalized
+    clean_artifact, artifact_redactions = _sanitize_with_findings(artifact)
+    clean_artifact["plan"]["secret_redaction_findings"] = sorted(
+        [*report.secret_redaction_findings, *artifact_redactions],
+        key=lambda item: (item.get("ci_id", ""), item.get("path", "")),
+    )
+    if apply and report.validation_failures:
+        clean_artifact["applied"] = False
+    return clean_artifact, normalized

@@ -562,6 +562,13 @@ def test_reconcile_apply_creates_cis_and_relationships(tmp_path: Path) -> None:
     host_id = make_ci_id(CIType.HOST.value, "alpha01")
     found = [
         DiscoveredCI(
+            "host",
+            "alpha01",
+            "host-facts",
+            observed=True,
+            tags=(DISCOVERED_TAG,),
+        ),
+        DiscoveredCI(
             "service",
             "skgateway",
             "systemd",
@@ -576,9 +583,11 @@ def test_reconcile_apply_creates_cis_and_relationships(tmp_path: Path) -> None:
     reconcile(mgr, found, apply=True)
 
     stored = mgr.list_cis()
-    assert [c.id for c in stored] == [make_ci_id("service", "skgateway")]
-    assert stored[0].attributes["active_state"] == "active"
-    assert [(r.rel_type, r.target) for r in stored[0].relationships] == [("runs_on", host_id)]
+    by_id = {ci.id: ci for ci in stored}
+    assert set(by_id) == {host_id, make_ci_id("service", "skgateway")}
+    service = by_id[make_ci_id("service", "skgateway")]
+    assert service.attributes["active_state"] == "active"
+    assert [(r.rel_type, r.target) for r in service.relationships] == [("runs_on", host_id)]
 
 
 def test_reconcile_is_idempotent(tmp_path: Path) -> None:
@@ -595,6 +604,58 @@ def test_reconcile_is_idempotent(tmp_path: Path) -> None:
     assert second.created == []
     assert second.updated == {}
     assert second.unchanged == [make_ci_id("service", "skgateway")]
+
+
+def test_reconcile_reports_relationships_and_redacts_secret_attributes(tmp_path: Path) -> None:
+    mgr = CMDBManager(tmp_path)
+    host = DiscoveredCI("host", "chiap04", "fleet:node", tags=(DISCOVERED_TAG,))
+    service = DiscoveredCI(
+        "service",
+        "api",
+        "systemd",
+        attributes={"password": "must-not-persist", "port": 443},
+        tags=(DISCOVERED_TAG,),
+        relationships=(("runs_on", host.ci_id),),
+    )
+
+    report = reconcile(mgr, [host, service], apply=True)
+
+    assert report.relationships == [
+        {"ci_id": service.ci_id, "action": "add", "rel_type": "runs_on", "target": host.ci_id}
+    ]
+    assert report.secret_redaction_findings == [
+        {"ci_id": service.ci_id, "path": "attributes.password"}
+    ]
+    assert mgr.get_ci(service.ci_id).attributes["password"] == "[redacted]"
+
+
+def test_reconcile_malformed_evidence_fails_before_any_write(tmp_path: Path) -> None:
+    mgr = CMDBManager(tmp_path)
+    malformed = DiscoveredCI(
+        "service",
+        "api",
+        "systemd",
+        relationships=(("runs_on", "ci-host-missing"),),
+    )
+
+    report = reconcile(mgr, [malformed], apply=True)
+
+    assert report.applied is False
+    assert report.validation_failures[0]["reason"] == "missing target: ci-host-missing"
+    assert mgr.list_cis() == []
+
+
+def test_legacy_seed_is_a_versioned_declared_discovery_bridge(tmp_path: Path) -> None:
+    registry = tmp_path / "registry"
+    registry.mkdir()
+    (registry / "api.json").write_text(json.dumps({"name": "api"}))
+
+    result = CMDBManager(tmp_path).seed_from_inventory()
+
+    assert result["schema"] == "skcoord.cmdb.compat-seed/v1"
+    assert result["deprecated"] is True
+    names = {ci.name for ci in CMDBManager(tmp_path).list_cis()}
+    assert names == {"api"}
 
 
 def test_reconcile_records_changed_attributes(tmp_path: Path) -> None:

@@ -8,6 +8,21 @@
 4. Apply reconciliation only after the dry-run artifact is reviewed.
 5. Retire rather than delete; preview affected dependents first.
 
+Supported operator sequence:
+
+```bash
+skcapstone cmdb plan --network --record-run \
+  --credential HOST=skvault://REFERENCE
+skcapstone cmdb status --json
+skcapstone cmdb apply --network \
+  --credential HOST=skvault://REFERENCE
+skcapstone cmdb drift --json
+```
+
+`cmdb reconcile` remains a timer-compatible alias. New automation should use
+the explicit plan/apply verbs so write intent is visible in logs and reviews.
+Never use the deprecated seed bridge for a fleet baseline.
+
 ## Evidence gate
 
 A timer or fleet object is not proof. Record the effective command, exit code,

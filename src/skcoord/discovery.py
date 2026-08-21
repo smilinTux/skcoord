@@ -35,7 +35,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional, Protocol, Sequence
 
-from .cmdb import CIStatus, CIType, CMDBManager, make_ci_id
+from .cmdb import ALLOWED_RELATIONSHIPS, CIStatus, CIType, CMDBManager, make_ci_id
 
 logger = logging.getLogger("skcoord.discovery")
 
@@ -1382,6 +1382,9 @@ class ReconcileReport:
     updated: dict[str, list[str]] = field(default_factory=dict)
     unchanged: list[str] = field(default_factory=list)
     orphans: list[str] = field(default_factory=list)
+    relationships: list[dict[str, str]] = field(default_factory=list)
+    validation_failures: list[dict[str, str]] = field(default_factory=list)
+    secret_redaction_findings: list[dict[str, str]] = field(default_factory=list)
 
     def as_dict(self) -> dict:
         return {
@@ -1390,13 +1393,109 @@ class ReconcileReport:
             "updated": self.updated,
             "unchanged": self.unchanged,
             "orphans": self.orphans,
+            "relationships": self.relationships,
+            "validation_failures": self.validation_failures,
+            "secret_redaction_findings": self.secret_redaction_findings,
             "counts": {
                 "created": len(self.created),
                 "updated": len(self.updated),
                 "unchanged": len(self.unchanged),
                 "orphans": len(self.orphans),
+                "relationships": len(self.relationships),
+                "validation_failures": len(self.validation_failures),
+                "secret_redaction_findings": len(self.secret_redaction_findings),
             },
         }
+
+
+_SECRET_ATTRIBUTE_KEYS = frozenset(
+    {
+        "api_key",
+        "authorization",
+        "password",
+        "passphrase",
+        "private_key",
+        "secret",
+        "token",
+    }
+)
+
+
+def _redact_attributes(
+    value: Any, *, ci_id: str, path: str = "attributes"
+) -> tuple[Any, list[dict[str, str]]]:
+    """Redact secret-bearing attribute keys and return non-secret findings."""
+    findings: list[dict[str, str]] = []
+    if isinstance(value, dict):
+        clean = {}
+        for raw_key, child in value.items():
+            key = str(raw_key)
+            child_path = f"{path}.{key}"
+            normalized = key.casefold().replace("-", "_")
+            if normalized in _SECRET_ATTRIBUTE_KEYS:
+                clean[key] = "[redacted]"
+                findings.append({"ci_id": ci_id, "path": child_path})
+            else:
+                clean[key], nested = _redact_attributes(child, ci_id=ci_id, path=child_path)
+                findings.extend(nested)
+        return clean, findings
+    if isinstance(value, (list, tuple)):
+        clean_items = []
+        for index, child in enumerate(value):
+            clean, nested = _redact_attributes(child, ci_id=ci_id, path=f"{path}[{index}]")
+            clean_items.append(clean)
+            findings.extend(nested)
+        return clean_items, findings
+    return value, findings
+
+
+def _validated_discovery(
+    discovered: Sequence[DiscoveredCI], mgr: CMDBManager
+) -> tuple[list[DiscoveredCI], list[dict[str, str]], list[dict[str, str]]]:
+    """Normalize one evidence batch and validate it before any event is appended."""
+    normalized = merge(discovered)
+    known_ids = {ci.id for ci in mgr.list_cis()} | {item.ci_id for item in normalized}
+    allowed_types = {item.value for item in CIType}
+    failures: list[dict[str, str]] = []
+    redactions: list[dict[str, str]] = []
+    clean_items: list[DiscoveredCI] = []
+    for item in normalized:
+        ci_id = item.ci_id
+        if item.ci_type not in allowed_types:
+            failures.append({"ci_id": ci_id, "field": "ci_type", "reason": "unsupported"})
+        if not (item.canonical_name or item.name).strip():
+            failures.append({"ci_id": ci_id, "field": "name", "reason": "empty"})
+        if not isinstance(item.attributes, dict):
+            failures.append(
+                {"ci_id": ci_id, "field": "attributes", "reason": "must be an object"}
+            )
+            attributes = {}
+        else:
+            attributes, found = _redact_attributes(item.attributes, ci_id=ci_id)
+            redactions.extend(found)
+        for rel_type, target in item.relationships:
+            if rel_type not in ALLOWED_RELATIONSHIPS:
+                failures.append(
+                    {
+                        "ci_id": ci_id,
+                        "field": "relationships",
+                        "reason": f"unsupported relationship: {rel_type}",
+                    }
+                )
+            elif target == ci_id:
+                failures.append(
+                    {"ci_id": ci_id, "field": "relationships", "reason": "self edge"}
+                )
+            elif target not in known_ids:
+                failures.append(
+                    {
+                        "ci_id": ci_id,
+                        "field": "relationships",
+                        "reason": f"missing target: {target}",
+                    }
+                )
+        clean_items.append(replace(item, attributes=attributes))
+    return clean_items, failures, redactions
 
 
 def _observed_status(item: DiscoveredCI) -> Optional[str]:
@@ -1443,6 +1542,12 @@ def reconcile(
     headline CIStatus. A manually retired CI is never un-retired by reconcile.
     """
     report = ReconcileReport(applied=apply)
+    discovered, report.validation_failures, report.secret_redaction_findings = (
+        _validated_discovery(discovered, mgr)
+    )
+    if report.validation_failures:
+        report.applied = False
+        return report
     existing = {ci.id: ci for ci in mgr.list_cis()}
     by_id: dict[str, DiscoveredCI] = {}
     migrations: list[tuple[str, str]] = []
@@ -1507,7 +1612,20 @@ def reconcile(
                 if derived_status and derived_status != CIStatus.OPERATIONAL.value:
                     mgr.set_status(ci_id, agent, derived_status, note="from observed active_state")
                 for rel_type, target in item.relationships:
+                    report.relationships.append(
+                        {"ci_id": ci_id, "action": "add", "rel_type": rel_type, "target": target}
+                    )
                     mgr.add_relationship(ci_id, agent, rel_type, target, authority=item.authority)
+            else:
+                report.relationships.extend(
+                    {
+                        "ci_id": ci_id,
+                        "action": "add",
+                        "rel_type": rel_type,
+                        "target": target,
+                    }
+                    for rel_type, target in item.relationships
+                )
             continue
 
         evidence = {
@@ -1588,6 +1706,14 @@ def reconcile(
         report.updated[ci_id].extend(f"metadata:{key}" for key in sorted(metadata_changes))
         report.updated[ci_id].extend(f"tag:+{tag}" for tag in missing_tags)
         report.updated[ci_id].extend(f"tag:-{tag}" for tag in stale_tags)
+        report.relationships.extend(
+            {"ci_id": ci_id, "action": "add", "rel_type": rel_type, "target": target}
+            for rel_type, target in missing_rels
+        )
+        report.relationships.extend(
+            {"ci_id": ci_id, "action": "remove", "rel_type": rel_type, "target": target}
+            for rel_type, target in stale_rels
+        )
         if apply:
             for key in changed:
                 mgr.set_attribute(ci_id, agent, key, desired_attributes[key])
@@ -1624,6 +1750,14 @@ def reconcile(
         ):
             continue
         report.updated.setdefault(duplicate_id, []).append(relation)
+        report.relationships.append(
+            {
+                "ci_id": duplicate_id,
+                "action": "add",
+                "rel_type": "alias_of",
+                "target": canonical_id,
+            }
+        )
         if apply:
             mgr.add_relationship(duplicate_id, agent, "alias_of", canonical_id)
 
