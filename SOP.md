@@ -179,6 +179,13 @@ the `describe` event (`test_spe_describe_event.py`), and the staged lane
 
 ## 5. Release / Deploy
 
+CMDB library releases never mutate the live store or schedule by themselves.
+The governed network rollout, authenticated CAB evidence, three-shadow gate,
+timer cutover, and rollback sequence are maintained in
+[`docs/cmdb-reconcile-rollout.md`](docs/cmdb-reconcile-rollout.md). The legacy
+local apply unit and the ATLAS network apply unit are deliberately different
+contracts; substituting one for the other is a release blocker.
+
 This is a library. There is nothing to deploy, restart, or roll back on a host.
 A release is a PyPI publish, and consumers pick it up on their next install.
 
@@ -360,7 +367,7 @@ nodes read the same files and must tolerate a field they have never heard of.
 | **T1 Agile** | N/A, no crypto surface to make agile. | |
 | **T2 Hybrid KEM** | N/A, no key exchange, no encryption at rest. Card `meta` replicates in cleartext by design, which is why a credential must never be placed on a card. | `SECURITY.md` threat model. |
 | **T3 Hybrid signature** | N/A, skcoord signs nothing. Provenance signing (SPE) is applied by the layer above. | |
-| **T4 Transport closed** | **N/A, no transport leg.** No socket is opened. Replication is Syncthing's, and Syncthing owns that transport's security properties. | Nothing imports `requests` / `urllib` / `httpx` / `aiohttp`; `socket` is used only for `gethostname()`. |
+| **T4 Transport closed** | **N/A, no transport leg.** No socket is opened. Replication is Syncthing's, and Syncthing owns that transport's security properties. | Nothing imports a network client; `urllib.parse.quote` only escapes injected Proxmox adapter paths, and `socket` is used only for `gethostname()`. |
 
 **Honest tier statement:** skcoord is a **non-crypto** library. It is the
 integrity boundary for task state, not a confidentiality boundary. It makes no
@@ -412,7 +419,7 @@ checks:
   - name: pure library, no console script and no __main__
     run: test ! -e src/skcoord/__main__.py && ! grep -q 'project.scripts' pyproject.toml
   - name: no network surface (sockets are never opened)
-    run: ! grep -rqE '^\s*(import|from)\s+(requests|urllib|httpx|aiohttp|http\.client)' src/skcoord/ && ! grep -rq 'socket.socket' src/skcoord/
+    run: ! grep -rqE '^\s*(import|from)\s+(requests|httpx|aiohttp|http\.client)' src/skcoord/ && ! grep -rqE '^\s*from\s+urllib\.(request|error)' src/skcoord/ && ! grep -rq 'socket.socket' src/skcoord/
   - name: version stays setuptools-scm derived from a v-semver tag
     run: grep -q 'dynamic = \["version"\]' pyproject.toml && grep -q 'tag_regex' pyproject.toml && ! grep -qE '^version[[:space:]]*=' pyproject.toml
   - name: documented WIP limits match the code

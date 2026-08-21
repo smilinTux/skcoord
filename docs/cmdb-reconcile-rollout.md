@@ -3,6 +3,24 @@
 The orchestrator in `skcoord.cmdb_reconcile` is a library boundary. Installing
 the package does not alter a timer, target set, or live CMDB.
 
+## Verified rollout state (2026-08-20)
+
+Three distinct checksum-valid, complete credentialed shadows passed with the
+same reviewed scope fingerprint
+`3cb1e77f416bc14fd949f24502bf11887d046ab2b26150856843b838ea11fe7e`.
+Targets are `noroc2027`, `192.168.0.41`, and `192.168.0.100`; each target has
+an exact `skvault://` SSH reference and no inline secret. Change
+`chg-a543c87b` has a single-use authenticated Chef approval carrying role,
+fingerprint, and authorization provenance. Signing the protected/freeze plane
+did not lift the fleet freeze.
+
+The remaining cutover is operational, not a waiver: install the tagged
+`skcapstone-cmdb-reconcile-network.service` and its owner-reviewed `0700`
+launcher, complete the fault/rollback drill, make generic ATLAS report-only
+during the narrow change window, then run the governed action. The old
+`skcapstone-cmdb-reconcile.timer` still targets local-only apply and remains
+the rollback path until network apply and artifact/audit readback succeed.
+
 ## Shadow gate
 
 1. Resolve targets from fleet node objects plus an explicitly reviewed source
@@ -61,16 +79,23 @@ freshness SLO.
 1. Capture `systemctl --user cat`, `show`, and `list-timers` output for both
    units. Record effective command, code version, environment, calendar, and
    last result. Reading these is not approval to mutate them.
-2. Install the candidate as a distinct `*-shadow.service`/`.timer`; its command
-   must omit `--apply`, pin reviewed targets, and retain artifacts.
+2. Install the candidate shadow oneshot and the distinct
+   `skcapstone-cmdb-reconcile-network.service`; shadow must omit `--apply`, pin
+   reviewed targets, and retain artifacts. Network apply must be reachable only
+   through the guarded launcher and ATLAS change gate.
 3. Pass the three-run machine gate and ownership preview. Back up the complete
    CMDB before enrollment.
 4. Require an approved change record naming both units, artifact checksums,
    plan digest, rollback owner, and observation window.
-5. Stop/disable the old timer only in that window; keep its files installed.
-   Enable the candidate in dry-run mode and validate its scheduled artifact.
-6. Add apply mode only after a second approval tied to that artifact. Verify
-   the effective unit after daemon reload and retain the command output.
+5. Keep the fleet frozen through drills. Before the approved apply, remove
+   generic `--honor` from the effective ATLAS schedule and verify report-only
+   readback; only then may the human lift freeze for this narrow workflow.
+6. Start network apply through
+   `skcapstone cmdb operator act apply-cmdb-reconcile --change-id <id>`.
+   Verify the resulting artifact checksum, completeness, scope, relationship
+   audit, lifecycle outcome, and effective unit.
+7. Stop/disable the old timer only after acceptance; keep its files installed.
+   On any failed check, refreeze immediately and follow Rollback.
 
 Missing credentials, reachability, backup evidence, checksums, approval, or
 rollback authority is a blocker, not a reason to weaken a gate.

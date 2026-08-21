@@ -9,6 +9,10 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
 
 ## [Unreleased]
 
+- Recorded the verified three-shadow CMDB scope, authenticated Chef approval,
+  exact ATLAS network unit contract, freeze/report-only cutover sequence, and
+  rollback acceptance checks in the operational rollout SOP.
+
 ### Fixed
 - **The release model in `publish.yml` matches what the repo documents (CMDB-7).**
   PR #4 switched the trigger to tags-only but left the `tag` job in place — and
