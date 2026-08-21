@@ -142,6 +142,7 @@ def test_vault_resolver_and_ssh_runner_enforce_strict_host_keys(tmp_path: Path) 
             "username": "collector",
             "identity_file": str(identity),
             "known_hosts_file": str(known_hosts),
+            "hostname": "192.0.2.10",
             "port": 2222,
         }
     )
@@ -152,7 +153,8 @@ def test_vault_resolver_and_ssh_runner_enforce_strict_host_keys(tmp_path: Path) 
     assert "StrictHostKeyChecking=yes" in command
     assert f"UserKnownHostsFile={known_hosts}" in command
     assert "BatchMode=yes" in command and "IdentitiesOnly=yes" in command
-    assert "collector@pve1.internal" in command
+    assert "collector@192.0.2.10" in command
+    assert credential.hostname == "192.0.2.10"
     assert command[command.index("-p") + 1] == "2222"
     assert "skvault://" not in " ".join(command)
     assert repr(credential) == "SSHCredential(<redacted>)"

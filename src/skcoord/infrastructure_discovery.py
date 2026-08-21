@@ -263,6 +263,7 @@ class SSHCredential:
     identity_file: Path
     known_hosts_file: Path
     port: int = 22
+    hostname: str = ""
 
     def __repr__(self) -> str:
         return "SSHCredential(<redacted>)"
@@ -286,6 +287,9 @@ class SKVaultCredentialResolver:
         username = str(record.get("username", ""))
         identity = Path(str(record.get("identity_file", ""))).expanduser()
         known_hosts = Path(str(record.get("known_hosts_file", ""))).expanduser()
+        hostname = (
+            normalize_host(str(record["hostname"])) if str(record.get("hostname", "")).strip() else ""
+        )
         try:
             port = int(record.get("port", 22))
         except (TypeError, ValueError) as exc:
@@ -306,7 +310,7 @@ class SKVaultCredentialResolver:
                 raise ValueError(f"SSH {label} must not be group/world writable")
         if identity.stat().st_mode & 0o077:
             raise ValueError("SSH identity file must not be group/world accessible")
-        return SSHCredential(username, identity, known_hosts, port)
+        return SSHCredential(username, identity, known_hosts, port, hostname)
 
 
 @dataclass
@@ -340,7 +344,7 @@ class SecureSSHRunner:
             str(self.credential.port),
             "-i",
             str(self.credential.identity_file),
-            f"{self.credential.username}@{self.host}",
+            f"{self.credential.username}@{self.credential.hostname or self.host}",
             remote,
         ]
 

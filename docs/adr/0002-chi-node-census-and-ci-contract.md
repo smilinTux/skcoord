@@ -81,6 +81,8 @@ shadow artifacts block apply even when a change is approved.
 The metadata may select a bounded TCP port for reviewed WSL endpoints; the
 runner still requires pinned known hosts, protected key paths, batch mode, and
 strict host-key checking.
+It may also select a validated transport hostname without changing the
+canonical target name used for CI identity and scan accounting.
 
 `chiap09` remains read-only while its dirty-worktree remediation is open, and
 `chiwk11` remains discovery-only until runtime-role qualification completes.
