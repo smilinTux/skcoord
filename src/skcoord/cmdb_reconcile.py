@@ -66,6 +66,18 @@ class Target:
     provenance: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class CollectorCoverage:
+    """Non-secret command/result accounting for one collector invocation."""
+
+    collector: str
+    commands_attempted: int
+    commands_succeeded: int
+    commands_unavailable: int
+    findings: int
+    status: str
+
+
 @dataclass
 class TargetResult:
     """Bounded collector result for one target."""
@@ -76,11 +88,16 @@ class TargetResult:
     completed_collectors: int = 0
     findings: list[DiscoveredCI] = field(default_factory=list)
     failures: list[str] = field(default_factory=list)
+    coverage: list[CollectorCoverage] = field(default_factory=list)
     duration_seconds: float = 0.0
 
     @property
     def complete(self) -> bool:
-        return self.completed_collectors == self.expected_collectors and not self.failures
+        return (
+            self.completed_collectors == self.expected_collectors
+            and not self.failures
+            and not any(record.status == "unavailable" for record in self.coverage)
+        )
 
 
 @dataclass
@@ -108,12 +125,17 @@ class ScanResult:
     def completeness(self) -> dict:
         expected = sum(item.expected_collectors for item in self.targets)
         completed = sum(item.completed_collectors for item in self.targets)
+        coverage = [record for item in self.targets for record in item.coverage]
         return {
             "complete": self.complete,
             "targets_expected": len(self.targets),
             "targets_complete": sum(item.complete for item in self.targets),
             "collectors_expected": expected,
             "collectors_complete": completed,
+            "collectors_partial": sum(record.status == "partial" for record in coverage),
+            "collectors_unavailable": sum(
+                record.status == "unavailable" for record in coverage
+            ),
             "deadline_exceeded": self.deadline_exceeded,
             "failure_budget_exceeded": self.failure_budget_exceeded,
         }
@@ -151,6 +173,45 @@ class OrchestrationConfig:
             raise ValueError("concurrency limits must be positive")
         if self.deadline_seconds <= 0 or self.failure_budget < 0:
             raise ValueError("deadline must be positive and failure_budget non-negative")
+
+
+@dataclass
+class _CoverageRunner:
+    """Record result availability without retaining commands or output."""
+
+    inner: CommandRunner
+    commands_attempted: int = 0
+    commands_succeeded: int = 0
+    commands_unavailable: int = 0
+
+    @property
+    def host(self) -> str:
+        return self.inner.host
+
+    def run(self, argv: Sequence[str]) -> str | None:
+        self.commands_attempted += 1
+        result = self.inner.run(argv)
+        if result is None:
+            self.commands_unavailable += 1
+        else:
+            self.commands_succeeded += 1
+        return result
+
+    def record(self, collector: str, findings: int) -> CollectorCoverage:
+        if self.commands_succeeded == 0:
+            status = "unavailable"
+        elif self.commands_unavailable:
+            status = "partial"
+        else:
+            status = "complete"
+        return CollectorCoverage(
+            collector,
+            self.commands_attempted,
+            self.commands_succeeded,
+            self.commands_unavailable,
+            findings,
+            status,
+        )
 
 
 def resolve_targets(
@@ -209,12 +270,13 @@ def scan_network(
 
     def invoke(
         host: str, observer: Callable[[CommandRunner], list[DiscoveredCI]]
-    ) -> tuple[str, str, list[DiscoveredCI], str]:
+    ) -> tuple[str, str, list[DiscoveredCI], str, CollectorCoverage | None]:
         with semaphores[host]:
             try:
                 runner = runner_factory(host)
                 if runner.run(["true"]) is None:
-                    return host, observer.__name__, [], "transport_unavailable"
+                    return host, observer.__name__, [], "transport_unavailable", None
+                covered = _CoverageRunner(runner)
                 items = [
                     replace(
                         item,
@@ -222,11 +284,13 @@ def scan_network(
                         scan_id=item.scan_id or scan_id,
                         authority=item.authority or f"network:{host}",
                     )
-                    for item in observer(runner)
+                    for item in observer(covered)
                 ]
-                return host, observer.__name__, items, ""
+                return host, observer.__name__, items, "", covered.record(
+                    observer.__name__, len(items)
+                )
             except Exception as exc:  # noqa: BLE001
-                return host, observer.__name__, [], type(exc).__name__
+                return host, observer.__name__, [], type(exc).__name__, None
 
     pool = ThreadPoolExecutor(
         max_workers=config.global_concurrency, thread_name_prefix="cmdb-scan"
@@ -239,10 +303,12 @@ def scan_network(
     try:
         remaining = max(0.0, config.deadline_seconds - (time.monotonic() - started))
         for future in as_completed(futures, timeout=remaining):
-            host, collector, items, failure = future.result()
+            host, collector, items, failure, coverage = future.result()
             result = results[host]
             result.completed_collectors += 1
             result.findings.extend(items)
+            if coverage is not None:
+                result.coverage.append(coverage)
             if failure:
                 result.failures.append(f"{collector}:{failure}")
     except FuturesTimeoutError:
@@ -256,6 +322,7 @@ def scan_network(
 
     for result in results.values():
         result.duration_seconds = round(time.monotonic() - started, 6)
+        result.coverage.sort(key=lambda record: record.collector)
         found.extend(result.findings)
     failures = len(declared_failures) + sum(len(item.failures) for item in results.values())
     return ScanResult(

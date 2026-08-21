@@ -237,9 +237,11 @@ services/timers; Docker/Podman containers and Compose ownership; stable TCP
 listeners; user/system crontab entries; network interfaces; persistent mounts
 and database containers; remote agent homes; and the local Ollama model API.
 Cron arguments are never retained, and interface addresses are evidence rather
-than host aliases. A missing binary yields an empty collector result but still
-appears in per-target collector accounting; transport or deadline failure makes
-the scan incomplete and blocks absence or lifecycle decisions.
+than host aliases. Each target records per-collector command attempt, success,
+and unavailable counts plus a complete/partial/unavailable status; command text
+and output are not retained. Transport, deadline, or fully unavailable
+collector status makes the scan incomplete and blocks absence or lifecycle
+decisions; successful fallbacks retain explicit `partial` accounting.
 
 This is a library and has no standalone service. Deploying it means reinstalling the
 consumer environment and restarting only the long-running consumers that imported it.

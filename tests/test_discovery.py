@@ -1035,6 +1035,15 @@ def test_docker_collector_is_empty_without_docker() -> None:
     assert collect_docker_containers(FakeRunner(answers={})) == []
 
 
+def test_container_runtime_inventory_is_a_fixed_non_secret_fallback() -> None:
+    runner = FakeRunner(answers={"python3": '{"docker": false, "podman": false}\n'})
+
+    assert collect_docker_containers(runner) == []
+    assert runner.calls[0][:2] == ["python3", "-c"]
+    assert "docker" in runner.calls[0][2]
+    assert "podman" in runner.calls[0][2]
+
+
 def test_drift_reports_stored_cis_no_collector_saw(tmp_path: Path) -> None:
     mgr = CMDBManager(tmp_path)
     mgr.create_ci("decommissioned", "service", tags=[DISCOVERED_TAG])

@@ -28,6 +28,11 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
   Docker/Podman Compose labels in addition to host, systemd, container, and
   listening-port evidence. Collector totals remain part of the checksummed
   shadow scope, so a release cannot silently claim the old coverage contract.
+  Each target now also records command attempt/success/unavailable counts and a
+  complete/partial/unavailable collector status without retaining command text
+  or output, making WSL, permission, and missing-tool gaps explicit. A fully
+  unavailable collector makes its target and scan incomplete; a successful
+  fallback with unavailable optional commands remains explicit `partial`.
 
 - Defined the operator-reviewed CHI fleet Node objects as the authoritative
   CMDB discovery census, including identity/source precedence, the

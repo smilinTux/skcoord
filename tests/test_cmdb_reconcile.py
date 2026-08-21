@@ -102,6 +102,65 @@ def test_transport_failure_cannot_be_a_complete_empty_scan(tmp_path: Path) -> No
     assert all("transport_unavailable" in failure for failure in result.targets[0].failures)
 
 
+def test_tool_gaps_are_explicit_coverage_without_command_text(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import skcoord.cmdb_reconcile as module
+
+    class MixedRunner:
+        host = "mixed"
+
+        def run(self, argv):
+            if argv == ["true"] or argv == ["available"]:
+                return ""
+            return None
+
+    def mixed(runner: MixedRunner) -> list[DiscoveredCI]:
+        runner.run(["available"])
+        runner.run(["missing", "--token", "must-not-survive"])
+        return []
+
+    monkeypatch.setattr(module, "OBSERVED_COLLECTORS", (mixed,))
+    result = scan_network(tmp_path, [Target("mixed", ("fleet",))], lambda _host: MixedRunner())
+
+    assert result.complete
+    assert result.completeness()["collectors_partial"] == 1
+    coverage = result.targets[0].coverage[0]
+    assert coverage.status == "partial"
+    assert coverage.commands_attempted == 2
+    assert coverage.commands_succeeded == 1
+    assert coverage.commands_unavailable == 1
+    assert "token" not in json.dumps(coverage.__dict__)
+    assert "must-not-survive" not in json.dumps(coverage.__dict__)
+
+
+def test_fully_unavailable_collector_makes_target_incomplete(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import skcoord.cmdb_reconcile as module
+
+    class UnavailableRunner:
+        host = "partial"
+
+        def run(self, argv):
+            return "" if argv == ["true"] else None
+
+    def unavailable(runner: UnavailableRunner) -> list[DiscoveredCI]:
+        runner.run(["missing"])
+        return []
+
+    monkeypatch.setattr(module, "OBSERVED_COLLECTORS", (unavailable,))
+    result = scan_network(
+        tmp_path,
+        [Target("partial", ("fleet",))],
+        lambda _host: UnavailableRunner(),
+    )
+
+    assert not result.complete
+    assert result.completeness()["collectors_unavailable"] == 1
+    assert result.targets[0].coverage[0].status == "unavailable"
+
+
 def test_partial_scan_suppresses_absence_drift_and_deduplicates() -> None:
     findings = [
         DriftFinding("ci-service-a", "declared_not_observed", "missing"),

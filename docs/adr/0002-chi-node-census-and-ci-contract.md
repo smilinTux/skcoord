@@ -59,6 +59,13 @@ are excluded from datastore CIs. Credentialless network fingerprinting and
 authenticated Proxmox API inventory remain separate, bounded adapters and do
 not implicitly expand the reviewed Node scope.
 
+Every target artifact includes non-secret per-collector coverage: command
+attempt, success, and unavailable counts; finding count; and a
+complete/partial/unavailable result. It stores neither command text nor output.
+Transport/deadline failures and a fully unavailable collector remain hard
+incomplete scans. A successful fallback with a missing optional tool remains an
+explicit partial-coverage fact and cannot disappear silently.
+
 ## Source precedence and lifecycle
 
 Precedence is:

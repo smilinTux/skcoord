@@ -642,6 +642,17 @@ def collect_docker_containers(runner: CommandRunner) -> list[DiscoveredCI]:
     they are declared, never observed, and drift reports them as missing when
     they are running perfectly well.
     """
+    # A target with no container runtime is a valid workstation profile, not a
+    # transport failure.  This fixed, non-secret fallback makes that absence an
+    # explicit partial coverage result instead of an unavailable collector.
+    runner.run(
+        [
+            "python3",
+            "-c",
+            "import json,shutil; print(json.dumps({n: bool(shutil.which(n)) "
+            "for n in ('docker','podman')}))",
+        ]
+    )
     out: list[DiscoveredCI] = []
     seen: set[str] = set()
     for runtime in ("docker", "podman"):
@@ -1197,21 +1208,31 @@ def collect_model_endpoints(runner: CommandRunner) -> list[DiscoveredCI]:
     """Observed Ollama endpoint, version and bounded installed-model inventory."""
     models = runner.run(["ollama", "list"])
     version = runner.run(
-        ["curl", "-fsS", "--max-time", "2", "http://127.0.0.1:11434/api/version"]
+        [
+            "python3",
+            "-c",
+            "import urllib.request; "
+            "u='http://127.0.0.1:11434/api/version'; "
+            "\ntry: print(urllib.request.urlopen(u, timeout=2).read().decode())"
+            "\nexcept Exception: print('{}')",
+        ]
     )
-    if not models and not version:
+    parsed: dict[str, Any] = {}
+    if version:
+        try:
+            candidate = json.loads(version)
+            if isinstance(candidate, dict):
+                parsed = candidate
+        except (TypeError, ValueError):
+            pass
+    if not models and not parsed.get("version"):
         return []
     attributes: dict[str, Any] = {
         "endpoint": "http://127.0.0.1:11434",
-        "health_observed": bool(version),
+        "health_observed": bool(parsed.get("version")),
     }
-    if version:
-        try:
-            parsed = json.loads(version)
-            if isinstance(parsed, dict) and parsed.get("version"):
-                attributes["version"] = parsed["version"]
-        except (TypeError, ValueError):
-            pass
+    if parsed.get("version"):
+        attributes["version"] = parsed["version"]
     if models:
         names = [line.split()[0] for line in models.splitlines()[1:] if line.split()]
         attributes["models"] = sorted(set(names))[:100]
