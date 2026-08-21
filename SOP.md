@@ -441,5 +441,5 @@ checks:
   - name: the one-way dependency guard test still exists
     run: grep -q 'def test_imports_do_not_pull_skcapstone' tests/test_smoke.py
   - name: auto-tagged releases publish in the same workflow run
-    run: python3 -m pytest tests/test_publish_workflow.py -q
+    run: sed -n '/^  pypi-publish:/,$p' .github/workflows/publish.yml | grep -q "needs.build.result == 'success'" && ! sed -n '/^  pypi-publish:/,$p' .github/workflows/publish.yml | grep -q "startsWith(github.ref, 'refs/tags/')"
 -->
