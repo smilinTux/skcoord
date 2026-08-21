@@ -9,6 +9,18 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
 
 ## [Unreleased]
 
+### Added
+- **Kanban lifecycle and agent projection reconciliation.** The authoritative
+  event-sourced card can reach Review or Done while an interrupted caller leaves
+  `agents/<name>.json` reporting the card as current work. `audit_lifecycle()`
+  now reports those disagreements without writing, and `repair_lifecycle()`
+  explicitly converges only the mutable agent projection. Review retains the
+  accountable owner but clears active execution, Done clears claims while
+  preserving completion history, and reopen removes stale completion state.
+  Recent orphan work or multiple recent active owners stop the repair rather
+  than guessing. Every repair appends a conflict-free JSONL receipt under
+  `coordination/reconciliation/`; a second repair is idempotent.
+
 ### Fixed
 
 - Publish the auto-tagged release to PyPI in the same GitHub Actions run. Tags
