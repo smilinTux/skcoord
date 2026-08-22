@@ -61,7 +61,15 @@ def _depends_on(ci) -> set[str]:
 
 def _collect(runner: FakeRunner, scopes=("--user",), kinds=("service",)) -> list[DiscoveredCI]:
     """Collect with the authority scan() would stamp, so reconcile converges edges."""
-    return [
+    host = DiscoveredCI(
+        ci_type=CIType.HOST.value,
+        name=runner.host,
+        source="test",
+        observed=True,
+        node=runner.host,
+        authority=AUTHORITY_OBSERVED,
+    )
+    return [host] + [
         replace(ci, authority=AUTHORITY_OBSERVED)
         for ci in collect_systemd_units(runner, scopes=scopes, kinds=kinds)
     ]

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import socket
+import sys
+from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -22,9 +24,14 @@ from skcoord.lifecycle import (
 
 
 @pytest.fixture(autouse=True)
-def _store_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Force the event-sourced card store for lifecycle tests."""
+def _store_enabled(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Force the card store and isolate lazy SKCapstone imports per test."""
+    loaded_modules = set(sys.modules)
     monkeypatch.setenv("SKCOORD_CARD_STORE", "1")
+    yield
+    for module_name in set(sys.modules) - loaded_modules:
+        if module_name == "skcapstone" or module_name.startswith("skcapstone."):
+            sys.modules.pop(module_name, None)
 
 
 def _task(board: Board, task_id: str = "task0001") -> Task:

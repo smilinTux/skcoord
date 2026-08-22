@@ -19,13 +19,14 @@ from skcoord.cmdb_reconcile import (
     freshness_status,
     normalize_drift,
     operator_summary,
+    read_verified_run_artifacts,
     resolve_targets,
     run_reconcile,
     scan_health_events,
     scan_network,
     write_run_artifact,
 )
-from skcoord.discovery import DISCOVERED_TAG, DiscoveredCI, DriftFinding
+from skcoord.discovery import DISCOVERED_TAG, OBSERVED_COLLECTORS, DiscoveredCI, DriftFinding
 
 
 class CannedRunner:
@@ -63,8 +64,8 @@ def test_network_scan_reports_complete_target_accounting(tmp_path: Path) -> None
         OrchestrationConfig(global_concurrency=2, per_host_concurrency=1, deadline_seconds=2),
     )
     assert result.complete
-    assert result.completeness()["collectors_expected"] == 4
-    assert result.completeness()["collectors_complete"] == 4
+    assert result.completeness()["collectors_expected"] == len(OBSERVED_COLLECTORS)
+    assert result.completeness()["collectors_complete"] == len(OBSERVED_COLLECTORS)
     assert any(item.name == "nor.local" for item in result.discovered)
 
 
@@ -100,6 +101,65 @@ def test_transport_failure_cannot_be_a_complete_empty_scan(tmp_path: Path) -> No
     assert not result.complete
     assert result.completeness()["targets_complete"] == 0
     assert all("transport_unavailable" in failure for failure in result.targets[0].failures)
+
+
+def test_tool_gaps_are_explicit_coverage_without_command_text(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import skcoord.cmdb_reconcile as module
+
+    class MixedRunner:
+        host = "mixed"
+
+        def run(self, argv):
+            if argv == ["true"] or argv == ["available"]:
+                return ""
+            return None
+
+    def mixed(runner: MixedRunner) -> list[DiscoveredCI]:
+        runner.run(["available"])
+        runner.run(["missing", "--token", "must-not-survive"])
+        return []
+
+    monkeypatch.setattr(module, "OBSERVED_COLLECTORS", (mixed,))
+    result = scan_network(tmp_path, [Target("mixed", ("fleet",))], lambda _host: MixedRunner())
+
+    assert result.complete
+    assert result.completeness()["collectors_partial"] == 1
+    coverage = result.targets[0].coverage[0]
+    assert coverage.status == "partial"
+    assert coverage.commands_attempted == 2
+    assert coverage.commands_succeeded == 1
+    assert coverage.commands_unavailable == 1
+    assert "token" not in json.dumps(coverage.__dict__)
+    assert "must-not-survive" not in json.dumps(coverage.__dict__)
+
+
+def test_fully_unavailable_collector_makes_target_incomplete(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import skcoord.cmdb_reconcile as module
+
+    class UnavailableRunner:
+        host = "partial"
+
+        def run(self, argv):
+            return "" if argv == ["true"] else None
+
+    def unavailable(runner: UnavailableRunner) -> list[DiscoveredCI]:
+        runner.run(["missing"])
+        return []
+
+    monkeypatch.setattr(module, "OBSERVED_COLLECTORS", (unavailable,))
+    result = scan_network(
+        tmp_path,
+        [Target("partial", ("fleet",))],
+        lambda _host: UnavailableRunner(),
+    )
+
+    assert not result.complete
+    assert result.completeness()["collectors_unavailable"] == 1
+    assert result.targets[0].coverage[0].status == "unavailable"
 
 
 def test_partial_scan_suppresses_absence_drift_and_deduplicates() -> None:
@@ -206,6 +266,18 @@ def test_artifact_rejects_path_like_scan_id(tmp_path: Path) -> None:
         write_run_artifact(tmp_path, {"scan_id": "../escape"})
 
 
+def test_verified_artifact_reader_ignores_tampering(tmp_path: Path) -> None:
+    path, _ = write_run_artifact(
+        tmp_path,
+        {"scan_id": "valid", "ended_at": "2026-08-21T12:00:00+00:00"},
+    )
+    tampered = path.with_name("tampered.json")
+    tampered.write_text('{"scan_id":"tampered"}\n')
+    tampered.with_suffix(".sha256").write_text("0" * 64 + "  tampered.json\n")
+
+    assert [item["scan_id"] for item in read_verified_run_artifacts(tmp_path)] == ["valid"]
+
+
 def test_freshness_slo_handles_missing_fresh_and_stale() -> None:
     now = datetime(2026, 8, 20, tzinfo=timezone.utc)
     assert not freshness_status(None, now, timedelta(hours=4))["fresh"]
@@ -245,6 +317,8 @@ def test_run_artifact_counts_retirement_actions(tmp_path: Path) -> None:
     )
     assert artifact["reconcile"]["retired"] == ["ci-service-gone"]
     assert artifact["reconcile"]["counts"]["retired"] == 1
+    assert artifact["plan"]["retirements"] == ["ci-service-gone"]
+    assert artifact["plan"]["stale_candidates"][0]["action"] == "retire"
 
 
 def test_partial_run_never_reports_orphans(tmp_path: Path) -> None:

@@ -153,7 +153,7 @@ dev version.
 ## 4. Test (the green-bar gate)
 
 ```bash
-~/.skenv/bin/python -m pytest tests/ -q     # 71 tests
+~/.skenv/bin/python -m pytest tests/ -q     # 231 tests
 ~/.skenv/bin/python -m ruff check src/ tests/
 ```
 
@@ -200,6 +200,68 @@ timer cutover, and rollback sequence are maintained in
 [`docs/cmdb-reconcile-rollout.md`](docs/cmdb-reconcile-rollout.md). The legacy
 local apply unit and the ATLAS network apply unit are deliberately different
 contracts; substituting one for the other is a release blocker.
+
+### CHI census and discovery acceptance
+
+The authoritative target set is the reviewed fleet Node object set under
+`~/.skcapstone/fleet/objects/node/`; see
+[`docs/adr/0003-chi-node-census-and-ci-contract.md`](docs/adr/0003-chi-node-census-and-ci-contract.md).
+Target resolution is deliberately independent of scan output:
+
+```bash
+python - <<'PY'
+from pathlib import Path
+from skcoord.cmdb_reconcile import resolve_targets
+
+for target in resolve_targets(Path("~/.skcapstone").expanduser()):
+    print(target.host, ",".join(target.provenance))
+PY
+```
+
+Before a baseline, reconcile the fleet objects against the peer directory,
+DNS/Tailscale, live SSH hostnames, and service-health evidence. Record aliases
+and discrepancies in the Node spec; never let an observed host expand scope.
+The 2026-08-21 review resolves `chioc09` as an alias of canonical `chiap09`,
+includes `chipv05`, treats the Windows/WSL endpoints of `chiwk12` as one asset,
+and keeps `chiwk11` in discovery-only scope pending role qualification.
+
+Run `skcapstone cmdb scan` or a credentialed network reconcile without
+`--apply` first. An approved change (currently `chg-a76c0aee`) authorizes the
+window but does not waive explicit vault references, backup evidence, complete
+collector accounting, three checksum-valid shadows, relationship audit, or
+rollback readiness. Card `e5d0c8cb` owns the census contract and `e83b1f4f`
+owns collector coverage.
+
+The observed scanner contract contains nine collectors: host facts; systemd
+services/timers; Docker/Podman containers and Compose ownership; stable TCP
+listeners; user/system crontab entries; network interfaces; persistent mounts
+and database containers; remote agent homes; and the local Ollama model API.
+Cron arguments are never retained, and interface addresses are evidence rather
+than host aliases. Each target records per-collector command attempt, success,
+and unavailable counts plus a complete/partial/unavailable status; command text
+and output are not retained. Transport, deadline, or fully unavailable
+collector status makes the scan incomplete and blocks absence or lifecycle
+decisions; successful fallbacks retain explicit `partial` accounting.
+
+### CMDB import and reconciliation contract
+
+Card `e57ef91a` replaces the historical three-host/ITIL seed with the versioned
+discovery model. `CMDBManager.seed_from_inventory()` remains only as
+`skcoord.cmdb.compat-seed/v1` for older clients and now imports declared fleet,
+registry, and agent sources through `discovery.reconcile`; it does not invent
+hosts or derive CI health from incidents.
+
+Use the supported consumer verbs in order: `skcapstone cmdb plan`, review the
+creates/updates/relationship deltas, stale candidates, retirements, validation
+failures, and redaction findings, then use `skcapstone cmdb apply`. An apply
+validates and secret-redacts the complete evidence batch before appending any
+event. Missing targets, unsupported CI types or relationships, partial scans,
+and malformed evidence fail closed. Identical evidence is idempotent.
+
+Run artifacts are canonical JSON plus a sibling SHA-256 file. Status readers
+must use `read_verified_run_artifacts()` and ignore missing or mismatched
+checksums. Missing observations advance retirement only on complete,
+same-scope passes; three complete misses retire by status event, never delete.
 
 This is a library and has no standalone service. Deploying it means reinstalling the
 consumer environment and restarting only the long-running consumers that imported it.
@@ -448,4 +510,6 @@ checks:
     run: grep -q 'def test_imports_do_not_pull_skcapstone' tests/test_smoke.py
   - name: auto-tagged releases publish in the same workflow run
     run: sed -n '/^  pypi-publish:/,$p' .github/workflows/publish.yml | grep -q "needs.build.result == 'success'" && ! sed -n '/^  pypi-publish:/,$p' .github/workflows/publish.yml | grep -q "startsWith(github.ref, 'refs/tags/')"
+  - name: CHI census contract names the authoritative store and fail-closed lifecycle
+    run: grep -q '~/.skcapstone/fleet/objects/node' docs/adr/0003-chi-node-census-and-ci-contract.md && grep -q 'three complete, checksum-valid passes' docs/adr/0003-chi-node-census-and-ci-contract.md && grep -q 'secret values and private paths are prohibited' docs/adr/0003-chi-node-census-and-ci-contract.md
 -->

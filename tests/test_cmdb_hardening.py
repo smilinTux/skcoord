@@ -1,9 +1,30 @@
+import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
 
 from skcoord.cmdb import CMDBManager
 from skcoord.cmdb_projection import build_snapshot, project
+
+
+def test_concurrent_writer_events_are_locked_and_replayable(tmp_path: Path) -> None:
+    mgr = CMDBManager(tmp_path)
+    ci = mgr.create_ci("api", "service")
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(
+            pool.map(
+                lambda value: mgr.set_attribute(ci.id, "scanner", "sample", value),
+                range(40),
+            )
+        )
+
+    event_path = next((tmp_path / "cmdb" / ci.id / "events").glob("*.jsonl"))
+    events = [json.loads(line) for line in event_path.read_text().splitlines()]
+    assert len(events) == 40
+    assert sorted(event["seq"] for event in events) == list(range(40))
+    assert mgr.get_ci(ci.id).attributes["sample"] in range(40)
 
 
 def test_relationship_audit_and_transitive_impact_are_bounded(tmp_path: Path) -> None:
