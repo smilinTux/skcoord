@@ -22,6 +22,7 @@ it creates, it updates, and it *reports* what it no longer sees.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -34,7 +35,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional, Protocol, Sequence
 
-from .cmdb import CIStatus, CIType, CMDBManager, make_ci_id
+from .cmdb import ALLOWED_RELATIONSHIPS, CIStatus, CIType, CMDBManager, make_ci_id
 
 logger = logging.getLogger("skcoord.discovery")
 
@@ -635,42 +636,77 @@ def collect_systemd_units(
 
 
 def collect_docker_containers(runner: CommandRunner) -> list[DiscoveredCI]:
-    """Service CIs for running containers.
+    """Service CIs for running Docker and Podman containers.
 
     Several fleet services declare ``runtime: docker``. Without this collector
     they are declared, never observed, and drift reports them as missing when
     they are running perfectly well.
     """
-    stdout = runner.run(
-        ["docker", "ps", "--format", "{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}"]
+    # A target with no container runtime is a valid workstation profile, not a
+    # transport failure.  This fixed, non-secret fallback makes that absence an
+    # explicit partial coverage result instead of an unavailable collector.
+    runner.run(
+        [
+            "python3",
+            "-c",
+            "import json,shutil; print(json.dumps({n: bool(shutil.which(n)) "
+            "for n in ('docker','podman')}))",
+        ]
     )
-    if not stdout:
-        return []
     out: list[DiscoveredCI] = []
-    for line in stdout.splitlines():
-        parts = line.split("\t")
-        if not parts or not parts[0].strip():
-            continue
-        name = parts[0].strip()
-        attributes: dict[str, Any] = {"runtime": "docker", "origin": "container"}
-        if len(parts) > 1 and parts[1].strip():
-            attributes["image"] = parts[1].strip()
-        if len(parts) > 2 and parts[2].strip():
-            attributes["container_status"] = parts[2].strip()
-        if len(parts) > 3 and parts[3].strip():
-            attributes["container_ports"] = parts[3].strip()
-        out.append(
-            DiscoveredCI(
-                ci_type=CIType.SERVICE.value,
-                name=name,
-                source="docker",
-                observed=True,
-                node=runner.host,
-                attributes=attributes,
-                tags=("docker", DISCOVERED_TAG),
-                relationships=(("runs_on", make_ci_id(CIType.HOST.value, runner.host)),),
-            )
+    seen: set[str] = set()
+    for runtime in ("docker", "podman"):
+        stdout = runner.run(
+            [
+                runtime,
+                "ps",
+                "--format",
+                "{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}\t{{.Labels}}",
+            ]
         )
+        if not stdout:
+            continue
+        for line in stdout.splitlines():
+            parts = line.split("\t")
+            if not parts or not parts[0].strip():
+                continue
+            name = parts[0].strip()
+            if name in seen:
+                continue
+            seen.add(name)
+            attributes: dict[str, Any] = {"runtime": runtime, "origin": "container"}
+            if len(parts) > 1 and parts[1].strip():
+                attributes["image"] = parts[1].strip()
+            if len(parts) > 2 and parts[2].strip():
+                attributes["container_status"] = parts[2].strip()
+            if len(parts) > 3 and parts[3].strip():
+                attributes["container_ports"] = parts[3].strip()
+            if len(parts) > 4 and parts[4].strip():
+                labels = dict(
+                    part.split("=", 1)
+                    for part in parts[4].split(",")
+                    if "=" in part
+                    and part.split("=", 1)[0]
+                    in {
+                        "com.docker.compose.project",
+                        "com.docker.compose.service",
+                        "io.podman.compose.project",
+                    }
+                )
+                if labels:
+                    attributes["compose"] = labels
+            out.append(
+                DiscoveredCI(
+                    ci_type=CIType.SERVICE.value,
+                    name=name,
+                    source=runtime,
+                    observed=True,
+                    node=runner.host,
+                    attributes=attributes,
+                    tags=(runtime, DISCOVERED_TAG),
+                    relationships=(("runs_on", make_ci_id(CIType.HOST.value, runner.host)),),
+                )
+            )
     return out
 
 
@@ -848,7 +884,6 @@ def collect_host_facts(runner: CommandRunner) -> list[DiscoveredCI]:
             )
             if ips:
                 attributes["ip_addresses"] = ips
-                aliases.update(ips)
         except (TypeError, ValueError, KeyError):
             pass
 
@@ -906,6 +941,317 @@ def collect_host_facts(runner: CommandRunner) -> list[DiscoveredCI]:
     ]
 
 
+def _cron_rows(text: str, *, system: bool) -> list[tuple[str, str, str]]:
+    """Return schedule, principal and command-name triples without secret arguments."""
+    rows: list[tuple[str, str, str]] = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or ("=" in line and not line.startswith("@")):
+            continue
+        parts = line.split()
+        if line.startswith("@"):
+            minimum = 3 if system else 2
+            if len(parts) < minimum:
+                continue
+            schedule = parts[0]
+            principal = parts[1] if system else "current-user"
+            command = parts[2] if system else parts[1]
+        else:
+            minimum = 7 if system else 6
+            if len(parts) < minimum:
+                continue
+            schedule = " ".join(parts[:5])
+            principal = parts[5] if system else "current-user"
+            command = parts[6] if system else parts[5]
+        rows.append((schedule, principal, Path(command).name[:120]))
+    return rows
+
+
+def collect_cron_jobs(runner: CommandRunner) -> list[DiscoveredCI]:
+    """Observed user and system crontab entries with command arguments redacted."""
+    sources = (
+        ("user", runner.run(["crontab", "-l"]), False),
+        ("system", runner.run(["cat", "/etc/crontab"]), True),
+    )
+    out: list[DiscoveredCI] = []
+    for scope, text, system in sources:
+        if not text:
+            continue
+        for schedule, principal, command_name in _cron_rows(text, system=system):
+            fingerprint = hashlib.sha256(
+                f"{scope}\0{schedule}\0{principal}\0{command_name}".encode()
+            ).hexdigest()[:16]
+            out.append(
+                DiscoveredCI(
+                    ci_type=CIType.SERVICE.value,
+                    name=f"{runner.host}:cron:{scope}:{fingerprint}",
+                    source=f"cron:{scope}",
+                    observed=True,
+                    node=runner.host,
+                    attributes={
+                        "schedule": schedule,
+                        "principal": principal,
+                        "command_name": command_name,
+                        "command_arguments_redacted": True,
+                    },
+                    tags=("cronjob", "scheduler", DISCOVERED_TAG),
+                    relationships=(("runs_on", make_ci_id(CIType.HOST.value, runner.host)),),
+                )
+            )
+    return out
+
+
+def collect_network_interfaces(runner: CommandRunner) -> list[DiscoveredCI]:
+    """Network CIs for non-loopback interfaces and their observed identities."""
+    stdout = runner.run(["ip", "-j", "address", "show"])
+    if not stdout:
+        return []
+    try:
+        interfaces = json.loads(stdout)
+    except (TypeError, ValueError):
+        return []
+    out: list[DiscoveredCI] = []
+    for interface in interfaces if isinstance(interfaces, list) else []:
+        if not isinstance(interface, dict):
+            continue
+        name = str(interface.get("ifname", "")).strip()
+        if not name or name == "lo":
+            continue
+        addresses = sorted(
+            {
+                str(info.get("local"))
+                for info in interface.get("addr_info", [])
+                if isinstance(info, dict)
+                and info.get("local")
+                and info.get("scope") in ("global", "site")
+            }
+        )
+        attributes: dict[str, Any] = {
+            "interface": name,
+            "operstate": interface.get("operstate", "unknown"),
+            "addresses": addresses,
+        }
+        if interface.get("address"):
+            attributes["mac_address"] = interface["address"]
+        out.append(
+            DiscoveredCI(
+                ci_type=CIType.NETWORK.value,
+                name=f"{runner.host}:{name}",
+                source="ip-address",
+                observed=True,
+                node=runner.host,
+                attributes=attributes,
+                tags=("network-interface", DISCOVERED_TAG),
+                relationships=(("runs_on", make_ci_id(CIType.HOST.value, runner.host)),),
+            )
+        )
+    return out
+
+
+_PSEUDO_FILESYSTEMS = {
+    "autofs",
+    "bpf",
+    "cgroup",
+    "cgroup2",
+    "configfs",
+    "debugfs",
+    "devpts",
+    "devtmpfs",
+    "efivarfs",
+    "fusectl",
+    "hugetlbfs",
+    "mqueue",
+    "proc",
+    "pstore",
+    "securityfs",
+    "sysfs",
+    "tracefs",
+}
+
+_PERSISTENT_FILESYSTEMS = {
+    "9p",
+    "btrfs",
+    "ceph",
+    "cifs",
+    "drvfs",
+    "ext2",
+    "ext3",
+    "ext4",
+    "fuseblk",
+    "nfs",
+    "nfs4",
+    "ntfs",
+    "ntfs3",
+    "smb3",
+    "vfat",
+    "xfs",
+    "zfs",
+}
+
+
+def _walk_filesystems(rows: object) -> Iterable[dict]:
+    """Flatten findmnt's recursive JSON tree without trusting child shape."""
+    if not isinstance(rows, list):
+        return
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        yield row
+        yield from _walk_filesystems(row.get("children"))
+
+
+def collect_datastores(runner: CommandRunner) -> list[DiscoveredCI]:
+    """Persistent filesystem mounts and database-like containers as datastores."""
+    out: list[DiscoveredCI] = []
+    stdout = runner.run(
+        ["findmnt", "-J", "-b", "-o", "TARGET,SOURCE,FSTYPE,SIZE,USED,AVAIL,USE%"]
+    )
+    if stdout:
+        try:
+            filesystems = json.loads(stdout).get("filesystems", [])
+        except (TypeError, ValueError):
+            filesystems = []
+        for filesystem in _walk_filesystems(filesystems):
+            target = str(filesystem.get("target", "")).strip()
+            fstype = str(filesystem.get("fstype", "")).strip().lower()
+            if (
+                not target
+                or fstype in _PSEUDO_FILESYSTEMS
+                or fstype not in _PERSISTENT_FILESYSTEMS
+            ):
+                continue
+            attributes = {
+                key: filesystem[key]
+                for key in ("source", "fstype", "size", "used", "avail", "use%")
+                if filesystem.get(key) not in (None, "")
+            }
+            attributes["mountpoint"] = target
+            out.append(
+                DiscoveredCI(
+                    ci_type=CIType.DATASTORE.value,
+                    name=f"{runner.host}:mount:{target}",
+                    source="findmnt",
+                    observed=True,
+                    node=runner.host,
+                    attributes=attributes,
+                    tags=("mount", "datastore", DISCOVERED_TAG),
+                    relationships=(("runs_on", make_ci_id(CIType.HOST.value, runner.host)),),
+                )
+            )
+
+    database_hint = re.compile(
+        r"(?:postgres|skmem-pg|mysql|mariadb|mongo|redis|qdrant|weaviate|neo4j|falkor)",
+        re.IGNORECASE,
+    )
+    seen: set[str] = set()
+    for runtime in ("docker", "podman"):
+        containers = runner.run([runtime, "ps", "--format", "{{.Names}}\t{{.Image}}"])
+        if not containers:
+            continue
+        for line in containers.splitlines():
+            name, _, image = line.partition("\t")
+            name = name.strip()
+            image = image.strip()
+            if not name or name in seen or not database_hint.search(f"{name} {image}"):
+                continue
+            seen.add(name)
+            out.append(
+                DiscoveredCI(
+                    ci_type=CIType.DATASTORE.value,
+                    name=f"{runner.host}:container:{name}",
+                    source=f"{runtime}:datastore",
+                    observed=True,
+                    node=runner.host,
+                    attributes={"runtime": runtime, "container": name, "image": image},
+                    tags=(runtime, "database", "datastore", DISCOVERED_TAG),
+                    relationships=(("runs_on", make_ci_id(CIType.HOST.value, runner.host)),),
+                )
+            )
+    return out
+
+
+_AGENT_LIST_SCRIPT = """import json
+from pathlib import Path
+p = Path.home() / '.skcapstone' / 'agents'
+print(json.dumps(sorted(x.name for x in p.iterdir() if x.is_dir()))) if p.is_dir() else print('[]')
+"""
+
+
+def collect_observed_agents(runner: CommandRunner) -> list[DiscoveredCI]:
+    """Agent homes observed on the target rather than declared on the scanner."""
+    stdout = runner.run(["python3", "-c", _AGENT_LIST_SCRIPT])
+    if not stdout:
+        return []
+    try:
+        names = json.loads(stdout)
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(names, list):
+        return []
+    return [
+        DiscoveredCI(
+            ci_type=CIType.AGENT.value,
+            name=str(name),
+            source="agent-home",
+            observed=True,
+            node=runner.host,
+            attributes={"home_present": True},
+            tags=("agent", DISCOVERED_TAG),
+            relationships=(("runs_on", make_ci_id(CIType.HOST.value, runner.host)),),
+        )
+        for name in names
+        if str(name).strip() and not str(name).endswith("-template")
+    ]
+
+
+def collect_model_endpoints(runner: CommandRunner) -> list[DiscoveredCI]:
+    """Observed Ollama endpoint, version and bounded installed-model inventory."""
+    models = runner.run(["ollama", "list"])
+    version = runner.run(
+        [
+            "python3",
+            "-c",
+            "import urllib.request; "
+            "u='http://127.0.0.1:11434/api/version'; "
+            "\ntry: print(urllib.request.urlopen(u, timeout=2).read().decode())"
+            "\nexcept Exception: print('{}')",
+        ]
+    )
+    parsed: dict[str, Any] = {}
+    if version:
+        try:
+            candidate = json.loads(version)
+            if isinstance(candidate, dict):
+                parsed = candidate
+        except (TypeError, ValueError):
+            pass
+    if not models and not parsed.get("version"):
+        return []
+    attributes: dict[str, Any] = {
+        "endpoint": "http://127.0.0.1:11434",
+        "health_observed": bool(parsed.get("version")),
+    }
+    if parsed.get("version"):
+        attributes["version"] = parsed["version"]
+    if models:
+        names = [line.split()[0] for line in models.splitlines()[1:] if line.split()]
+        attributes["models"] = sorted(set(names))[:100]
+        attributes["model_count"] = len(set(names))
+        attributes["models_truncated"] = len(set(names)) > 100
+    return [
+        DiscoveredCI(
+            ci_type=CIType.SERVICE.value,
+            name=f"{runner.host}:ollama",
+            source="ollama",
+            observed=True,
+            node=runner.host,
+            attributes=attributes,
+            tags=("model-api", "ollama", DISCOVERED_TAG),
+            relationships=(("runs_on", make_ci_id(CIType.HOST.value, runner.host)),),
+        )
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Scan
 # ---------------------------------------------------------------------------
@@ -921,6 +1267,11 @@ OBSERVED_COLLECTORS: tuple[Callable[[CommandRunner], list[DiscoveredCI]], ...] =
     collect_systemd_units,
     collect_docker_containers,
     collect_listening_ports,
+    collect_cron_jobs,
+    collect_network_interfaces,
+    collect_datastores,
+    collect_observed_agents,
+    collect_model_endpoints,
 )
 
 
@@ -1031,6 +1382,9 @@ class ReconcileReport:
     updated: dict[str, list[str]] = field(default_factory=dict)
     unchanged: list[str] = field(default_factory=list)
     orphans: list[str] = field(default_factory=list)
+    relationships: list[dict[str, str]] = field(default_factory=list)
+    validation_failures: list[dict[str, str]] = field(default_factory=list)
+    secret_redaction_findings: list[dict[str, str]] = field(default_factory=list)
 
     def as_dict(self) -> dict:
         return {
@@ -1039,13 +1393,109 @@ class ReconcileReport:
             "updated": self.updated,
             "unchanged": self.unchanged,
             "orphans": self.orphans,
+            "relationships": self.relationships,
+            "validation_failures": self.validation_failures,
+            "secret_redaction_findings": self.secret_redaction_findings,
             "counts": {
                 "created": len(self.created),
                 "updated": len(self.updated),
                 "unchanged": len(self.unchanged),
                 "orphans": len(self.orphans),
+                "relationships": len(self.relationships),
+                "validation_failures": len(self.validation_failures),
+                "secret_redaction_findings": len(self.secret_redaction_findings),
             },
         }
+
+
+_SECRET_ATTRIBUTE_KEYS = frozenset(
+    {
+        "api_key",
+        "authorization",
+        "password",
+        "passphrase",
+        "private_key",
+        "secret",
+        "token",
+    }
+)
+
+
+def _redact_attributes(
+    value: Any, *, ci_id: str, path: str = "attributes"
+) -> tuple[Any, list[dict[str, str]]]:
+    """Redact secret-bearing attribute keys and return non-secret findings."""
+    findings: list[dict[str, str]] = []
+    if isinstance(value, dict):
+        clean = {}
+        for raw_key, child in value.items():
+            key = str(raw_key)
+            child_path = f"{path}.{key}"
+            normalized = key.casefold().replace("-", "_")
+            if normalized in _SECRET_ATTRIBUTE_KEYS:
+                clean[key] = "[redacted]"
+                findings.append({"ci_id": ci_id, "path": child_path})
+            else:
+                clean[key], nested = _redact_attributes(child, ci_id=ci_id, path=child_path)
+                findings.extend(nested)
+        return clean, findings
+    if isinstance(value, (list, tuple)):
+        clean_items = []
+        for index, child in enumerate(value):
+            clean, nested = _redact_attributes(child, ci_id=ci_id, path=f"{path}[{index}]")
+            clean_items.append(clean)
+            findings.extend(nested)
+        return clean_items, findings
+    return value, findings
+
+
+def _validated_discovery(
+    discovered: Sequence[DiscoveredCI], mgr: CMDBManager
+) -> tuple[list[DiscoveredCI], list[dict[str, str]], list[dict[str, str]]]:
+    """Normalize one evidence batch and validate it before any event is appended."""
+    normalized = merge(discovered)
+    known_ids = {ci.id for ci in mgr.list_cis()} | {item.ci_id for item in normalized}
+    allowed_types = {item.value for item in CIType}
+    failures: list[dict[str, str]] = []
+    redactions: list[dict[str, str]] = []
+    clean_items: list[DiscoveredCI] = []
+    for item in normalized:
+        ci_id = item.ci_id
+        if item.ci_type not in allowed_types:
+            failures.append({"ci_id": ci_id, "field": "ci_type", "reason": "unsupported"})
+        if not (item.canonical_name or item.name).strip():
+            failures.append({"ci_id": ci_id, "field": "name", "reason": "empty"})
+        if not isinstance(item.attributes, dict):
+            failures.append(
+                {"ci_id": ci_id, "field": "attributes", "reason": "must be an object"}
+            )
+            attributes = {}
+        else:
+            attributes, found = _redact_attributes(item.attributes, ci_id=ci_id)
+            redactions.extend(found)
+        for rel_type, target in item.relationships:
+            if rel_type not in ALLOWED_RELATIONSHIPS:
+                failures.append(
+                    {
+                        "ci_id": ci_id,
+                        "field": "relationships",
+                        "reason": f"unsupported relationship: {rel_type}",
+                    }
+                )
+            elif target == ci_id:
+                failures.append(
+                    {"ci_id": ci_id, "field": "relationships", "reason": "self edge"}
+                )
+            elif target not in known_ids:
+                failures.append(
+                    {
+                        "ci_id": ci_id,
+                        "field": "relationships",
+                        "reason": f"missing target: {target}",
+                    }
+                )
+        clean_items.append(replace(item, attributes=attributes))
+    return clean_items, failures, redactions
 
 
 def _observed_status(item: DiscoveredCI) -> Optional[str]:
@@ -1092,6 +1542,12 @@ def reconcile(
     headline CIStatus. A manually retired CI is never un-retired by reconcile.
     """
     report = ReconcileReport(applied=apply)
+    discovered, report.validation_failures, report.secret_redaction_findings = (
+        _validated_discovery(discovered, mgr)
+    )
+    if report.validation_failures:
+        report.applied = False
+        return report
     existing = {ci.id: ci for ci in mgr.list_cis()}
     by_id: dict[str, DiscoveredCI] = {}
     migrations: list[tuple[str, str]] = []
@@ -1156,7 +1612,20 @@ def reconcile(
                 if derived_status and derived_status != CIStatus.OPERATIONAL.value:
                     mgr.set_status(ci_id, agent, derived_status, note="from observed active_state")
                 for rel_type, target in item.relationships:
+                    report.relationships.append(
+                        {"ci_id": ci_id, "action": "add", "rel_type": rel_type, "target": target}
+                    )
                     mgr.add_relationship(ci_id, agent, rel_type, target, authority=item.authority)
+            else:
+                report.relationships.extend(
+                    {
+                        "ci_id": ci_id,
+                        "action": "add",
+                        "rel_type": rel_type,
+                        "target": target,
+                    }
+                    for rel_type, target in item.relationships
+                )
             continue
 
         evidence = {
@@ -1237,6 +1706,14 @@ def reconcile(
         report.updated[ci_id].extend(f"metadata:{key}" for key in sorted(metadata_changes))
         report.updated[ci_id].extend(f"tag:+{tag}" for tag in missing_tags)
         report.updated[ci_id].extend(f"tag:-{tag}" for tag in stale_tags)
+        report.relationships.extend(
+            {"ci_id": ci_id, "action": "add", "rel_type": rel_type, "target": target}
+            for rel_type, target in missing_rels
+        )
+        report.relationships.extend(
+            {"ci_id": ci_id, "action": "remove", "rel_type": rel_type, "target": target}
+            for rel_type, target in stale_rels
+        )
         if apply:
             for key in changed:
                 mgr.set_attribute(ci_id, agent, key, desired_attributes[key])
@@ -1273,6 +1750,14 @@ def reconcile(
         ):
             continue
         report.updated.setdefault(duplicate_id, []).append(relation)
+        report.relationships.append(
+            {
+                "ci_id": duplicate_id,
+                "action": "add",
+                "rel_type": "alias_of",
+                "target": canonical_id,
+            }
+        )
         if apply:
             mgr.add_relationship(duplicate_id, agent, "alias_of", canonical_id)
 

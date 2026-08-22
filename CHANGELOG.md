@@ -21,6 +21,31 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
   than guessing. Every repair appends a conflict-free JSONL receipt under
   `coordination/reconciliation/`; a second repair is idempotent.
 
+- Added fail-closed CMDB evidence validation, explicit relationship deltas,
+  secret-redaction findings, stale/retirement plan fields, checksum-verified
+  artifact reads, and concurrent-writer coverage for the supported plan/apply
+  workflow (`e57ef91a`). The legacy seed method is now a versioned compatibility
+  bridge over declared discovery rather than a hard-coded three-host inventory.
+
+- Expanded observed CMDB discovery from four collectors to nine. Cross-node
+  scans now cover user/system cron entries (with command arguments redacted),
+  non-loopback network interfaces, persistent mounts and database containers,
+  remote agent homes, Ollama endpoint/model health, Podman containers, and
+  Docker/Podman Compose labels in addition to host, systemd, container, and
+  listening-port evidence. Collector totals remain part of the checksummed
+  shadow scope, so a release cannot silently claim the old coverage contract.
+  Each target now also records command attempt/success/unavailable counts and a
+  complete/partial/unavailable collector status without retaining command text
+  or output, making WSL, permission, and missing-tool gaps explicit. A fully
+  unavailable collector makes its target and scan incomplete; a successful
+  fallback with unavailable optional commands remains explicit `partial`.
+
+- Defined the operator-reviewed CHI fleet Node objects as the authoritative
+  CMDB discovery census, including identity/source precedence, the
+  `chiap09`/`chioc09` alias decision, `chipv05` and Windows/WSL handling,
+  deterministic CI identity, four-hour staleness, three-complete-pass
+  retirement, relationship vocabulary, and no-secret credential metadata.
+
 ### Fixed
 
 - Fold acceptance-criteria amendments into the authoritative CardStore
@@ -38,6 +63,19 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
   rewrites no history and fabricates no vote. The raw-status CAB bypass guard
   stays fail-closed: no vote written after the cutoff can satisfy the legacy
   clause, and new changes still require authenticated provenance.
+
+- Stopped promoting every observed host interface address into a CMDB identity
+  alias. Reused container-bridge addresses caused a ten-node CHI scan to merge
+  all hosts into one CI; addresses remain provenance-rich attributes while
+  governed names and explicit aliases control identity reconciliation.
+
+- Added a validated optional SSH port to the skvault metadata adapter and
+  strict SSH runner, allowing WSL targets on port 2222 without inline options
+  or reliance on ambient SSH configuration.
+
+- Separated the canonical target identity from an optional validated SSH
+  transport hostname so dual Windows/WSL nodes remain one CI while collection
+  reaches the reviewed WSL endpoint.
 
 - Publish the auto-tagged release to PyPI in the same GitHub Actions run. Tags
   pushed by the workflow's `GITHUB_TOKEN` do not trigger a second workflow, so

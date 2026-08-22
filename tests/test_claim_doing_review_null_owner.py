@@ -9,6 +9,9 @@ pattern of test_claim_ready_null_owner.py.
 
 from __future__ import annotations
 
+import sys
+from collections.abc import Iterator
+
 import pytest
 
 from skcoord.coordination import Board, Task, TaskStatus
@@ -16,9 +19,14 @@ from skcoord.lifecycle import transition_task
 
 
 @pytest.fixture(autouse=True)
-def _store_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Force the event-sourced card store, the read path the bug lives on."""
+def _store_enabled(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Force the card store and isolate lazy SKCapstone imports per test."""
+    loaded_modules = set(sys.modules)
     monkeypatch.setenv("SKCOORD_CARD_STORE", "1")
+    yield
+    for module_name in set(sys.modules) - loaded_modules:
+        if module_name == "skcapstone" or module_name.startswith("skcapstone."):
+            sys.modules.pop(module_name, None)
 
 
 def _task(board: Board, task_id: str, **kw) -> Task:

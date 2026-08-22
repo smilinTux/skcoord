@@ -528,83 +528,27 @@ class CMDBManager:
         return self.get_ci(cid)
 
     def seed_from_inventory(self, agent: str = "cmdb-seed") -> dict:
-        """Auto-populate CIs from the fleet + ITIL data (idempotent).
+        """Compatibility bridge to the versioned discovery reconciler.
 
-        Creates host CIs for the known nodes, agent CIs, and a service CI for
-        every service referenced by an ITIL incident, wiring services to run on
-        their host and reflecting current incident status as CI health.
-
-        Status note (CMDB-6): CIStatus derived here from incident severity is a
-        legacy fallback. Once discovery-owned (tagged ``discovered``), a CI's
-        status is owned by :func:`skcoord.discovery.reconcile`, which derives it
-        from the observed systemd state and overrides incident-derived health.
-        Precedence: observed state > ITIL incident health on the CIStatus field.
+        This method remains only for older dashboard clients that still call
+        ``POST /api/cmdb/seed``. It imports declared fleet, registry, and agent
+        sources through the same schema-driven reconciler as the supported CLI;
+        it never invents hosts or derives asset health from ITIL incidents.
         """
-        hosts = {
-            "noroc2027": {"desc": ".158 primary / dev source-of-truth", "ip": "192.168.0.158"},
-            "cbrd21-laptop12thgenintelcore": {
-                "desc": ".41 heavy-build mirror",
-                "ip": "192.168.0.41",
-            },
-            "comfyui": {
-                "desc": ".100 GPU (RTX 5060 Ti) / LLM + embeddings",
-                "ip": "192.168.0.100",
-            },
-        }
-        created = 0
-        for name, meta in hosts.items():
-            self.create_ci(
-                name,
-                CIType.HOST.value,
-                description=meta["desc"],
-                attributes={"ip": meta["ip"]},
-                tags=["fleet"],
-            )
-            created += 1
-        for a in ("lumina", "opus", "jarvis"):
-            self.create_ci(
-                a,
-                CIType.AGENT.value,
-                description=f"{a} sovereign agent",
-                node="noroc2027",
-                tags=["agent"],
-            )
-            created += 1
+        from .discovery import reconcile, scan
 
-        # Service CIs from ITIL incident affected_services; health from open incidents.
-        services: dict[str, str] = {}  # service -> worst open severity
-        try:
-            from .itil import ITILManager
-
-            mgr = ITILManager(self.home)
-            rank = {"sev1": 0, "sev2": 1, "sev3": 2, "sev4": 3}
-            for inc in mgr.list_incidents():
-                open_ = inc.status.value not in ("resolved", "closed")
-                for svc in inc.affected_services or []:
-                    if open_:
-                        cur = services.get(svc)
-                        if cur is None or rank.get(inc.severity.value, 9) < rank.get(cur, 9):
-                            services[svc] = inc.severity.value
-                    else:
-                        services.setdefault(svc, None)
-        except Exception:  # noqa: BLE001
-            pass
-        for svc, worst in services.items():
-            ci = self.create_ci(svc, CIType.SERVICE.value, node="noroc2027", tags=["service"])
-            status = (
-                CIStatus.DOWN.value
-                if worst in ("sev1", "sev2")
-                else CIStatus.DEGRADED.value
-                if worst == "sev3"
-                else CIStatus.OPERATIONAL.value
-            )
-            if ci and ci.status != status:
-                self.set_status(ci.id, agent, status, note="from incident health")
-            self.add_relationship(
-                ci.id, agent, "runs_on", make_ci_id(CIType.HOST.value, "noroc2027")
-            )
-            created += 1
-        return {"cis": len(self.list_cis()), "touched": created}
+        discovered = scan(self.home, runners=(), include_declared=True)
+        report = reconcile(self, discovered, agent=agent, apply=True, scan_complete=False)
+        result = report.as_dict()
+        result.update(
+            {
+                "schema": "skcoord.cmdb.compat-seed/v1",
+                "deprecated": True,
+                "cis": len(self.list_cis()),
+                "touched": len(report.created) + len(report.updated),
+            }
+        )
+        return result
 
     def impact_analysis(self, ci_id: str) -> dict:
         """What depends on this CI (cascade) + which open incidents affect it."""

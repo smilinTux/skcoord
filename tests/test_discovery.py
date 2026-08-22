@@ -24,10 +24,15 @@ from skcoord.discovery import (
     ObservationState,
     ci_observation_state,
     collect_agents,
+    collect_cron_jobs,
+    collect_datastores,
     collect_docker_containers,
     collect_fleet_objects,
     collect_host_facts,
     collect_listening_ports,
+    collect_model_endpoints,
+    collect_network_interfaces,
+    collect_observed_agents,
     collect_registry,
     collect_systemd_units,
     device_from_fingerprint,
@@ -76,6 +81,31 @@ FragmentPath=/home/cbrd21/.config/systemd/user/backup.timer
 DOCKER_OUTPUT = (
     "skchat-coturn\tcoturn/coturn:4.6\tUp 9 days\t0.0.0.0:3478->3478/tcp\n"
     "skmem-pg\t43fc80538777\tUp 9 days\t\n"
+)
+
+FINDMNT_OUTPUT = json.dumps(
+    {
+        "filesystems": [
+            {
+                "target": "/",
+                "source": "/dev/sda2",
+                "fstype": "ext4",
+                "size": 1000,
+                "used": 400,
+                "avail": 600,
+                "use%": "40%",
+                "children": [
+                    {
+                        "target": "/mnt/data",
+                        "source": "server:/data",
+                        "fstype": "nfs4",
+                    },
+                    {"target": "/run", "source": "tmpfs", "fstype": "tmpfs"},
+                ],
+            },
+            {"target": "/proc", "source": "proc", "fstype": "proc"},
+        ]
+    }
 )
 
 
@@ -280,7 +310,7 @@ def test_host_facts_normalise_linux_capacity_and_preserve_provenance() -> None:
     assert host.attributes["filesystems"][0]["used_bytes"] == 4000
     assert host.attributes["ip_addresses"] == ["192.0.2.10"]
     assert "lscpu" in host.attributes["fact_provenance"]
-    assert "192.0.2.10" in host.identity_aliases
+    assert "192.0.2.10" not in host.identity_aliases
 
 
 def test_host_fact_failures_are_missing_not_zero() -> None:
@@ -290,13 +320,113 @@ def test_host_fact_failures_are_missing_not_zero() -> None:
     assert "cpu_logical" not in host.attributes
 
 
+def test_cron_jobs_are_observed_without_persisting_command_arguments() -> None:
+    runner = FakeRunner(
+        answers={
+            "/etc/crontab": "0 2 * * * root /usr/local/sbin/backup --password nope\n",
+            "crontab": "*/5 * * * * /usr/local/bin/reconcile --token secret-value\n",
+        }
+    )
+    found = collect_cron_jobs(runner)
+
+    assert len(found) == 2
+    assert {ci.attributes["command_name"] for ci in found} == {"reconcile", "backup"}
+    assert all(ci.attributes["command_arguments_redacted"] for ci in found)
+    assert "secret-value" not in json.dumps([ci.attributes for ci in found])
+    assert "nope" not in json.dumps([ci.attributes for ci in found])
+
+
+def test_network_interfaces_are_first_class_cis() -> None:
+    runner = FakeRunner(
+        host="alpha",
+        answers={
+            "ip -j": json.dumps(
+                [
+                    {"ifname": "lo", "addr_info": []},
+                    {
+                        "ifname": "eth0",
+                        "operstate": "UP",
+                        "address": "02:00:00:00:00:01",
+                        "addr_info": [{"local": "192.0.2.10", "scope": "global"}],
+                    },
+                ]
+            )
+        },
+    )
+    found = collect_network_interfaces(runner)
+
+    assert [ci.name for ci in found] == ["alpha:eth0"]
+    assert found[0].ci_type == CIType.NETWORK.value
+    assert found[0].attributes["addresses"] == ["192.0.2.10"]
+
+
+def test_mounts_and_database_containers_are_datastore_cis() -> None:
+    runner = FakeRunner(
+        host="alpha",
+        answers={
+            "findmnt": FINDMNT_OUTPUT,
+            "docker ps": "skmem-pg\tpostgres:16\nweb\tnginx:latest\n",
+        },
+    )
+    found = collect_datastores(runner)
+
+    assert {ci.name for ci in found} == {
+        "alpha:mount:/",
+        "alpha:mount:/mnt/data",
+        "alpha:container:skmem-pg",
+    }
+    assert all(ci.ci_type == CIType.DATASTORE.value for ci in found)
+    assert not any(ci.attributes.get("mountpoint") == "/proc" for ci in found)
+
+
+def test_remote_agent_homes_are_observed_on_their_host() -> None:
+    found = collect_observed_agents(
+        FakeRunner(host="alpha", answers={"python3": '["jarvis", "lumina-template"]\n'})
+    )
+
+    assert [ci.name for ci in found] == ["jarvis"]
+    assert found[0].observed is True
+    assert found[0].node == "alpha"
+
+
+def test_model_endpoint_records_health_version_and_bounded_models() -> None:
+    runner = FakeRunner(
+        host="alpha",
+        answers={
+            "ollama list": "NAME ID SIZE MODIFIED\nqwen3:latest abc 1GB now\n",
+            "api/version": '{"version":"0.11.0"}\n',
+        },
+    )
+    endpoint = collect_model_endpoints(runner)[0]
+
+    assert endpoint.name == "alpha:ollama"
+    assert endpoint.attributes["health_observed"] is True
+    assert endpoint.attributes["version"] == "0.11.0"
+    assert endpoint.attributes["models"] == ["qwen3:latest"]
+
+
+def test_shared_interface_addresses_do_not_merge_distinct_hosts() -> None:
+    """Container bridges reuse RFC1918 addresses on unrelated machines."""
+    answers = {
+        "uname": "Linux 6.8\n",
+        "ip -j": json.dumps(
+            [{"ifname": "docker0", "addr_info": [{"local": "172.17.0.1", "scope": "global"}]}]
+        ),
+    }
+
+    alpha = collect_host_facts(FakeRunner(host="alpha", answers=answers))[0]
+    beta = collect_host_facts(FakeRunner(host="beta", answers=answers))[0]
+
+    assert len(merge([alpha, beta])) == 2
+
+
 def test_alias_overlap_merges_host_sightings_under_declared_canonical_name() -> None:
     declared = DiscoveredCI(
         "host",
         "alpha.example",
         "fleet:node",
         canonical_name="alpha.example",
-        aliases=("ssh-alpha", "192.0.2.10"),
+        aliases=("ssh-alpha",),
     )
     observed = DiscoveredCI(
         "host",
@@ -304,12 +434,12 @@ def test_alias_overlap_merges_host_sightings_under_declared_canonical_name() -> 
         "host",
         observed=True,
         canonical_name="ssh-alpha",
-        aliases=("192.0.2.10",),
+        aliases=("ssh-alpha",),
     )
     folded = merge([declared, observed])
     assert len(folded) == 1
     assert folded[0].ci_id == make_ci_id("host", "alpha.example")
-    assert set(folded[0].identity_aliases) == {"alpha.example", "ssh-alpha", "192.0.2.10"}
+    assert set(folded[0].identity_aliases) == {"alpha.example", "ssh-alpha"}
 
 
 def test_fingerprint_only_asset_is_an_unmanaged_device() -> None:
@@ -432,6 +562,13 @@ def test_reconcile_apply_creates_cis_and_relationships(tmp_path: Path) -> None:
     host_id = make_ci_id(CIType.HOST.value, "alpha01")
     found = [
         DiscoveredCI(
+            "host",
+            "alpha01",
+            "host-facts",
+            observed=True,
+            tags=(DISCOVERED_TAG,),
+        ),
+        DiscoveredCI(
             "service",
             "skgateway",
             "systemd",
@@ -446,9 +583,11 @@ def test_reconcile_apply_creates_cis_and_relationships(tmp_path: Path) -> None:
     reconcile(mgr, found, apply=True)
 
     stored = mgr.list_cis()
-    assert [c.id for c in stored] == [make_ci_id("service", "skgateway")]
-    assert stored[0].attributes["active_state"] == "active"
-    assert [(r.rel_type, r.target) for r in stored[0].relationships] == [("runs_on", host_id)]
+    by_id = {ci.id: ci for ci in stored}
+    assert set(by_id) == {host_id, make_ci_id("service", "skgateway")}
+    service = by_id[make_ci_id("service", "skgateway")]
+    assert service.attributes["active_state"] == "active"
+    assert [(r.rel_type, r.target) for r in service.relationships] == [("runs_on", host_id)]
 
 
 def test_reconcile_is_idempotent(tmp_path: Path) -> None:
@@ -465,6 +604,58 @@ def test_reconcile_is_idempotent(tmp_path: Path) -> None:
     assert second.created == []
     assert second.updated == {}
     assert second.unchanged == [make_ci_id("service", "skgateway")]
+
+
+def test_reconcile_reports_relationships_and_redacts_secret_attributes(tmp_path: Path) -> None:
+    mgr = CMDBManager(tmp_path)
+    host = DiscoveredCI("host", "chiap04", "fleet:node", tags=(DISCOVERED_TAG,))
+    service = DiscoveredCI(
+        "service",
+        "api",
+        "systemd",
+        attributes={"password": "must-not-persist", "port": 443},
+        tags=(DISCOVERED_TAG,),
+        relationships=(("runs_on", host.ci_id),),
+    )
+
+    report = reconcile(mgr, [host, service], apply=True)
+
+    assert report.relationships == [
+        {"ci_id": service.ci_id, "action": "add", "rel_type": "runs_on", "target": host.ci_id}
+    ]
+    assert report.secret_redaction_findings == [
+        {"ci_id": service.ci_id, "path": "attributes.password"}
+    ]
+    assert mgr.get_ci(service.ci_id).attributes["password"] == "[redacted]"
+
+
+def test_reconcile_malformed_evidence_fails_before_any_write(tmp_path: Path) -> None:
+    mgr = CMDBManager(tmp_path)
+    malformed = DiscoveredCI(
+        "service",
+        "api",
+        "systemd",
+        relationships=(("runs_on", "ci-host-missing"),),
+    )
+
+    report = reconcile(mgr, [malformed], apply=True)
+
+    assert report.applied is False
+    assert report.validation_failures[0]["reason"] == "missing target: ci-host-missing"
+    assert mgr.list_cis() == []
+
+
+def test_legacy_seed_is_a_versioned_declared_discovery_bridge(tmp_path: Path) -> None:
+    registry = tmp_path / "registry"
+    registry.mkdir()
+    (registry / "api.json").write_text(json.dumps({"name": "api"}))
+
+    result = CMDBManager(tmp_path).seed_from_inventory()
+
+    assert result["schema"] == "skcoord.cmdb.compat-seed/v1"
+    assert result["deprecated"] is True
+    names = {ci.name for ci in CMDBManager(tmp_path).list_cis()}
+    assert names == {"api"}
 
 
 def test_reconcile_records_changed_attributes(tmp_path: Path) -> None:
@@ -903,6 +1094,15 @@ def test_docker_containers_are_observed_services() -> None:
 
 def test_docker_collector_is_empty_without_docker() -> None:
     assert collect_docker_containers(FakeRunner(answers={})) == []
+
+
+def test_container_runtime_inventory_is_a_fixed_non_secret_fallback() -> None:
+    runner = FakeRunner(answers={"python3": '{"docker": false, "podman": false}\n'})
+
+    assert collect_docker_containers(runner) == []
+    assert runner.calls[0][:2] == ["python3", "-c"]
+    assert "docker" in runner.calls[0][2]
+    assert "podman" in runner.calls[0][2]
 
 
 def test_drift_reports_stored_cis_no_collector_saw(tmp_path: Path) -> None:
