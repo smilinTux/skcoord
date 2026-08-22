@@ -1338,7 +1338,15 @@ def scan(
 
     ``runners`` is empty by default so a scan is never implicitly a scan of
     *this* box: the caller says which machines to ask.
+
+    The connects_to collectors (card 6e010c63) live in
+    ``discovery_connects.py`` because this module is at its file-size
+    budget (debt card 74ea00dd) and are imported here, inside the function:
+    that module imports this one's model and runner types, so a top-level
+    import would be circular.
     """
+    from .discovery_connects import CONNECTS_COLLECTORS
+
     found: list[DiscoveredCI] = []
     scan_id = uuid.uuid4().hex
     observed_at = _utc_now()
@@ -1356,7 +1364,7 @@ def scan(
             except Exception:  # noqa: BLE001 - one bad source must not blind the rest
                 logger.exception("declared collector failed: %s", collector.__name__)
     for runner in runners:
-        for observer in OBSERVED_COLLECTORS:
+        for observer in (*OBSERVED_COLLECTORS, *CONNECTS_COLLECTORS):
             try:
                 observations = observer(runner)
                 found.extend(
