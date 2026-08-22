@@ -17,6 +17,11 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
 
 ### Added
 
+- Added scheduled CMDB reconciliation policy helpers with validated,
+  versioned configuration, a nonblocking application lease, configurable
+  drift and collection-failure thresholds, deduplicated ITIL incident routing,
+  and bounded checksummed run-artifact retention.
+
 - Added secret-free CapAuth identity-estate discovery for actual and alternate
   user homes, canonical and compatibility roots, Syncthing folders, signer
   fingerprints and roles, material placement, verification age, and requested

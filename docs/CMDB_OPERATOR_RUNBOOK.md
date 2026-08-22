@@ -23,6 +23,57 @@ skcapstone cmdb drift --json
 the explicit plan/apply verbs so write intent is visible in logs and reviews.
 Never use the deprecated seed bridge for a fleet baseline.
 
+## Scheduled reconciliation policy
+
+`skcoord.cmdb_scheduler` supplies the policy boundary used by the fleet
+scheduler. The runtime configuration is versioned JSON and defaults to
+disabled when the file is absent. An enabled configuration must name one
+owner node, one agent, a bounded target set, and exactly one opaque
+`skvault://` reference per target. It also controls cadence, command timeout,
+global and per-host concurrency, retry count and backoff, artifact retention,
+stale grace, and alert thresholds.
+
+The scheduled callback must acquire `ReconcileLease` under the node-local
+scheduler state before scanning or applying. Partial scans may update safe
+positive observations, but they cannot advance absence lifecycle counters.
+High-severity drift opens an incident immediately. Other drift and collection
+failures must recur for their configured consecutive-run threshold. Incident
+records include the affected CI identifier and use the existing deterministic
+service-health identity to prevent duplicate open work.
+
+Checksummed run artifacts remain the dashboard read model. Retention removes
+only the oldest artifact and checksum pairs after a successful new record and
+writes a receipt at `cmdb/reconcile-retention-last.json`.
+
+Example configuration:
+
+```json
+{
+  "schema": "skcoord.cmdb.reconcile-job-config/v1",
+  "enabled": false,
+  "owner_node": "chiap04",
+  "agent": "jarvis",
+  "cadence_seconds": 900,
+  "targets": ["chiap04"],
+  "credential_refs": {"chiap04": "skvault://fleet/chiap04"},
+  "global_concurrency": 4,
+  "per_host_concurrency": 1,
+  "timeout_seconds": 180,
+  "failure_budget": 0,
+  "retry_count": 2,
+  "retry_backoff_seconds": 30,
+  "retention_runs": 96,
+  "stale_grace_runs": 3,
+  "drift_alert_runs": 2,
+  "failure_alert_runs": 3,
+  "apply_safe_observations": true
+}
+```
+
+To disable or roll back, set `enabled` to `false` or disable the owning
+scheduler job. This stops future scans and leaves CMDB events and retained run
+evidence unchanged. Do not delete or rewrite prior CMDB events during rollback.
+
 ## Evidence gate
 
 A timer or fleet object is not proof. Record the effective command, exit code,
