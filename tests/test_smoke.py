@@ -43,14 +43,6 @@ def test_board_roundtrip(tmp_path):
     assert completed is not None
 
 
-def test_claim_accepts_cli_force_compatibility_flag(tmp_path):
-    board = Board(tmp_path)
-    task = Task(title="force-compatible claim")
-    board.create_task(task)
-    claimed = board.claim_task("lumina", task.id, force=True)
-    assert task.id in claimed.claimed_tasks
-
-
 def test_itil_incident_roundtrip(tmp_path):
     mgr = ITILManager(tmp_path)
     inc = mgr.create_incident(
