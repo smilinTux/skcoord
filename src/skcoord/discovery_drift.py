@@ -7,6 +7,7 @@ from typing import Optional, Sequence
 
 from .cmdb import CIStatus, CIType, CMDBManager
 from .discovery_base import DISCOVERED_TAG, DiscoveredCI
+from .discovery_identity import identity_estate_drift
 from .discovery_scan import _matching_identity_ids
 from .discovery_systemd import ORIGIN_DISTRO, ORIGIN_UNKNOWN
 
@@ -40,6 +41,7 @@ def drift(
       collector saw this pass. Usually a decommission nobody recorded.
     """
     findings: list[DriftFinding] = []
+    findings.extend(DriftFinding(*finding) for finding in identity_estate_drift(list(discovered)))
     services = [d for d in discovered if d.ci_type == CIType.SERVICE.value]
 
     # Flags cover the merged case (one CI both declared and observed); the key

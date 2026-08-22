@@ -35,6 +35,11 @@ from .discovery_declared import (
     device_from_fingerprint,
 )
 from .discovery_drift import DriftFinding, _service_key, drift
+from .discovery_identity import (
+    IDENTITY_EVIDENCE_MAX_AGE,
+    collect_identity_estate,
+    identity_estate_drift,
+)
 from .discovery_reconcile import (
     ReconcileReport,
     _observed_status,
@@ -90,6 +95,7 @@ __all__ = [
     "AUTHORITY_OBSERVED",
     "DECLARED_COLLECTORS",
     "DISCOVERED_TAG",
+    "IDENTITY_EVIDENCE_MAX_AGE",
     "OBSERVATION_SCHEMA_VERSION",
     "OBSERVED_COLLECTORS",
     "ORIGIN_DISTRO",
@@ -109,6 +115,7 @@ __all__ = [
     "collect_docker_containers",
     "collect_fleet_objects",
     "collect_host_facts",
+    "collect_identity_estate",
     "collect_listening_ports",
     "collect_model_endpoints",
     "collect_network_interfaces",
@@ -117,6 +124,7 @@ __all__ = [
     "collect_systemd_units",
     "device_from_fingerprint",
     "drift",
+    "identity_estate_drift",
     "merge",
     "observation_state",
     "reconcile",

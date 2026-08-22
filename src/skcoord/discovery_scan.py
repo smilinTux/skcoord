@@ -23,6 +23,7 @@ from .discovery_base import (
     _utc_now,
 )
 from .discovery_declared import collect_agents, collect_fleet_objects, collect_registry
+from .discovery_identity import collect_identity_estate
 from .discovery_runtime import (
     collect_cron_jobs,
     collect_host_facts,
@@ -53,6 +54,7 @@ OBSERVED_COLLECTORS: tuple[Callable[[CommandRunner], list[DiscoveredCI]], ...] =
     collect_datastores,
     collect_observed_agents,
     collect_model_endpoints,
+    collect_identity_estate,
 )
 
 
