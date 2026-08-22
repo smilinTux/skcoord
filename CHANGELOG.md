@@ -10,6 +10,11 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
 ## [Unreleased]
 
 ### Added
+- Added a fail-closed CMDB write guard that rejects secret-looking attribute
+  keys, including nested mappings, before a write-once core or append-only event
+  can be created. Matching is case-insensitive and substring-based; the shared
+  matcher also drives reconciliation-artifact redaction.
+
 - **Kanban lifecycle and agent projection reconciliation.** The authoritative
   event-sourced card can reach Review or Done while an interrupted caller leaves
   `agents/<name>.json` reporting the card as current work. `audit_lifecycle()`

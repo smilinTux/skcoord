@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
 from .atomic_io import atomic_write_text
-from .cmdb import CIStatus, CMDBManager
+from .cmdb import CIStatus, CMDBManager, is_secret_attribute_key
 from .discovery import (
     DECLARED_COLLECTORS,
     OBSERVED_COLLECTORS,
@@ -42,18 +42,6 @@ from .discovery import (
 )
 
 _SCHEMA = "skcoord.cmdb.reconcile-run/v1"
-_SECRET_KEYS = (
-    "secret",
-    "password",
-    "passphrase",
-    "token",
-    "credential",
-    "private_key",
-    "api_key",
-    "authorization",
-)
-
-
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -483,7 +471,7 @@ def _sanitize_with_findings(
             if key == "secret_redaction_findings":
                 clean[key], nested = _sanitize_with_findings(child, child_path)
                 findings.extend(nested)
-            elif any(secret in key.lower() for secret in _SECRET_KEYS):
+            elif is_secret_attribute_key(key):
                 clean[key] = "[redacted]"
                 findings.append({"path": child_path})
             else:

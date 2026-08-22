@@ -35,7 +35,14 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional, Protocol, Sequence
 
-from .cmdb import ALLOWED_RELATIONSHIPS, CIStatus, CIType, CMDBManager, make_ci_id
+from .cmdb import (
+    ALLOWED_RELATIONSHIPS,
+    CIStatus,
+    CIType,
+    CMDBManager,
+    is_secret_attribute_key,
+    make_ci_id,
+)
 
 logger = logging.getLogger("skcoord.discovery")
 
@@ -1408,19 +1415,6 @@ class ReconcileReport:
         }
 
 
-_SECRET_ATTRIBUTE_KEYS = frozenset(
-    {
-        "api_key",
-        "authorization",
-        "password",
-        "passphrase",
-        "private_key",
-        "secret",
-        "token",
-    }
-)
-
-
 def _redact_attributes(
     value: Any, *, ci_id: str, path: str = "attributes"
 ) -> tuple[Any, list[dict[str, str]]]:
@@ -1431,9 +1425,7 @@ def _redact_attributes(
         for raw_key, child in value.items():
             key = str(raw_key)
             child_path = f"{path}.{key}"
-            normalized = key.casefold().replace("-", "_")
-            if normalized in _SECRET_ATTRIBUTE_KEYS:
-                clean[key] = "[redacted]"
+            if is_secret_attribute_key(key):
                 findings.append({"ci_id": ci_id, "path": child_path})
             else:
                 clean[key], nested = _redact_attributes(child, ci_id=ci_id, path=child_path)

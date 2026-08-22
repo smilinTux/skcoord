@@ -36,7 +36,12 @@ these modules, so every skcapstone process executes skcoord code.
 - **ITIL service management.** Incident, problem, change, CAB, KEDB
   (`src/skcoord/itil.py`).
 - **The CMDB.** Event-sourced configuration items and relationships
-  (`src/skcoord/cmdb.py`).
+  (`src/skcoord/cmdb.py`). CMDB writes fail closed before touching disk when an
+  attribute key at any nesting depth contains `secret`, `password`,
+  `passphrase`, `token`, `credential`, `private_key`, `api_key`, or
+  `authorization` (case-insensitive). The policy intentionally rejects
+  ambiguous names such as `csrf_token_name`; store only non-secret metadata
+  under a name that does not imply credential material.
 - **The agent identity vCard.** The shareable sovereign card for the mesh
   (`src/skcoord/agent_card.py`).
 - **Crash-safe writes.** `atomic_write_text` (temp file, fsync, `os.replace`) is
