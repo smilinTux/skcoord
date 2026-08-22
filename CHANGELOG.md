@@ -16,6 +16,12 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
   `skcoord.discovery` as the compatibility import surface.
 
 ### Added
+
+- Added secret-free CapAuth identity-estate discovery for actual and alternate
+  user homes, canonical and compatibility roots, Syncthing folders, signer
+  fingerprints and roles, material placement, verification age, and requested
+  identity drift findings.
+
 - Added a fail-closed CMDB write guard that rejects secret-looking attribute
   keys, including nested mappings, before a write-once core or append-only event
   can be created. Matching is case-insensitive and substring-based; the shared
