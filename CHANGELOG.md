@@ -9,6 +9,12 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
 
 ## [Unreleased]
 
+### Changed
+
+- Split the CMDB discovery implementation into focused collector,
+  reconciliation, scan, drift, and shared-model modules while preserving
+  `skcoord.discovery` as the compatibility import surface.
+
 ### Added
 - Added a fail-closed CMDB write guard that rejects secret-looking attribute
   keys, including nested mappings, before a write-once core or append-only event
