@@ -26,6 +26,8 @@ surface.
   refuse active ownership conflicts and append per-writer JSONL receipts.
 - **`itil`**: incident / problem / change / CAB / KEDB service management.
 - **`cmdb`**: event-sourced configuration items + relationships.
+- **`cmdb_scheduler`**: fail-closed scheduled-reconcile configuration, overlap
+  lease, drift escalation, and evidence-retention helpers.
 - **`agent_card`**: the shareable sovereign identity vCard for the mesh.
 - **`atomic_io`**: atomic file-write helper shared by the above.
 
