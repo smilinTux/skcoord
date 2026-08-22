@@ -1,4 +1,4 @@
-# ADR 0002: CHI node census and CMDB discovery contract
+# ADR 0003: CHI node census and CMDB discovery contract
 
 Status: accepted
 

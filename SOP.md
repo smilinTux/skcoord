@@ -205,7 +205,7 @@ contracts; substituting one for the other is a release blocker.
 
 The authoritative target set is the reviewed fleet Node object set under
 `~/.skcapstone/fleet/objects/node/`; see
-[`docs/adr/0002-chi-node-census-and-ci-contract.md`](docs/adr/0002-chi-node-census-and-ci-contract.md).
+[`docs/adr/0003-chi-node-census-and-ci-contract.md`](docs/adr/0003-chi-node-census-and-ci-contract.md).
 Target resolution is deliberately independent of scan output:
 
 ```bash
@@ -511,5 +511,5 @@ checks:
   - name: auto-tagged releases publish in the same workflow run
     run: sed -n '/^  pypi-publish:/,$p' .github/workflows/publish.yml | grep -q "needs.build.result == 'success'" && ! sed -n '/^  pypi-publish:/,$p' .github/workflows/publish.yml | grep -q "startsWith(github.ref, 'refs/tags/')"
   - name: CHI census contract names the authoritative store and fail-closed lifecycle
-    run: grep -q '~/.skcapstone/fleet/objects/node' docs/adr/0002-chi-node-census-and-ci-contract.md && grep -q 'three complete, checksum-valid passes' docs/adr/0002-chi-node-census-and-ci-contract.md && grep -q 'secret values and private paths are prohibited' docs/adr/0002-chi-node-census-and-ci-contract.md
+    run: grep -q '~/.skcapstone/fleet/objects/node' docs/adr/0003-chi-node-census-and-ci-contract.md && grep -q 'three complete, checksum-valid passes' docs/adr/0003-chi-node-census-and-ci-contract.md && grep -q 'secret values and private paths are prohibited' docs/adr/0003-chi-node-census-and-ci-contract.md
 -->
