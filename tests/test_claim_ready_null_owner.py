@@ -48,15 +48,19 @@ def test_move_ready_then_claim_succeeds(tmp_path) -> None:
     assert _view(board, task.id).claimed_by == "jarvis"
 
 
-def test_move_doing_by_other_blocks_claim(tmp_path) -> None:
-    """A card in doing (even ownerless) must still refuse a different claimant."""
+def test_move_doing_ownerless_is_claimable(tmp_path) -> None:
+    """47e8d509 reversed this: an ownerless doing card is unclaimed, so it is
+    claimable (while still SHOWING as doing). Owned doing coverage lives in
+    test_owned_claim_still_blocks_other_agent below and in
+    test_claim_doing_review_null_owner.py."""
     board = Board(tmp_path)
     task = _task(board, "doing001")
     transition_task(tmp_path, task_id=task.id, column="doing", actor="opus")
 
     assert _view(board, task.id).status == TaskStatus.IN_PROGRESS
-    with pytest.raises(ValueError, match="already in_progress"):
-        board.claim_task("jarvis", task.id)
+    assert _view(board, task.id).claimed_by is None
+    board.claim_task("jarvis", task.id)
+    assert _view(board, task.id).claimed_by == "jarvis"
 
 
 def test_owned_claim_still_blocks_other_agent(tmp_path) -> None:

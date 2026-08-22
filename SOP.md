@@ -371,7 +371,7 @@ nodes read the same files and must tolerate a field they have never heard of.
 | `skcoord.__version__` does not match `pip show skcoord` | `__version__` in `src/skcoord/__init__.py` is a **static literal** and does not track the git tag. The authoritative version is the installed distribution metadata: `python -c "import importlib.metadata as m; print(m.version('skcoord'))"`. See §9. |
 | A build produces a `.devN` or `+g<sha>` version | The checkout has no tags. Every `actions/checkout` here sets `fetch-depth: 0` and `fetch-tags: true`; a local clone needs `git fetch --tags`. |
 | A tag was cut but nothing appeared on PyPI | Check whether `pypi-publish` was **skipped** rather than failed. A skip propagates through the job graph, which is why both downstream jobs carry `always() && !cancelled()`. Verify on PyPI, not on the green run. |
-| `Task ... already claimed` on claim | `claim_task` refuses a task already in `DONE`, `CLAIMED`, or `IN_PROGRESS` (`coordination.py:821-825`). Read the board before writing. |
+| `Task ... already claimed` on claim | `claim_task` refuses a task in `DONE`, or one OWNED by a different agent in `CLAIMED`, `IN_PROGRESS`, or `REVIEW` (`coordination.py`, `claim_task`). Ownerless cards in those non-done states (e.g. after a kanban-native move with no owner) are unclaimed and claimable — see board cards cbca4c17 and 47e8d509. Read the board before writing. |
 
 ---
 
