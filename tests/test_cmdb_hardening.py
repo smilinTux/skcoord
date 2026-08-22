@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from skcoord.cmdb import CMDBManager
+from skcoord.cmdb import CMDBManager, SecretAttributeKeyError
 from skcoord.cmdb_projection import build_snapshot, project
 
 
@@ -25,6 +25,43 @@ def test_concurrent_writer_events_are_locked_and_replayable(tmp_path: Path) -> N
     assert len(events) == 40
     assert sorted(event["seq"] for event in events) == list(range(40))
     assert mgr.get_ci(ci.id).attributes["sample"] in range(40)
+
+
+def test_normal_attributes_pass_write_time_secret_guard(tmp_path: Path) -> None:
+    mgr = CMDBManager(tmp_path)
+    ci = mgr.create_ci(
+        "api",
+        attributes={"endpoint": "https://example.invalid", "nested": {"port": 443}},
+    )
+    mgr.set_attribute(ci.id, "scanner", "health_status", "ok")
+
+    stored = mgr.get_ci(ci.id)
+    assert stored.attributes == {
+        "endpoint": "https://example.invalid",
+        "nested": {"port": 443},
+        "health_status": "ok",
+    }
+
+
+def test_substring_secret_key_policy_rejects_csrf_token_name(tmp_path: Path) -> None:
+    mgr = CMDBManager(tmp_path)
+
+    with pytest.raises(SecretAttributeKeyError, match="csrf_token_name"):
+        mgr.create_ci("api", attributes={"csrf_token_name": "header-name"})
+
+    assert not (tmp_path / "cmdb").exists()
+
+
+def test_secret_key_rejection_writes_neither_core_nor_event(tmp_path: Path) -> None:
+    mgr = CMDBManager(tmp_path)
+    ci = mgr.create_ci("api")
+
+    with pytest.raises(SecretAttributeKeyError, match="API_TOKEN"):
+        mgr.set_attribute(ci.id, "scanner", "runtime", {"API_TOKEN": "do-not-store"})
+
+    events_dir = tmp_path / "cmdb" / ci.id / "events"
+    assert not events_dir.exists()
+    assert mgr.get_ci(ci.id).attributes == {}
 
 
 def test_relationship_audit_and_transitive_impact_are_bounded(tmp_path: Path) -> None:

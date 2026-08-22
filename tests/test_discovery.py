@@ -606,7 +606,7 @@ def test_reconcile_is_idempotent(tmp_path: Path) -> None:
     assert second.unchanged == [make_ci_id("service", "skgateway")]
 
 
-def test_reconcile_reports_relationships_and_redacts_secret_attributes(tmp_path: Path) -> None:
+def test_reconcile_reports_relationships_and_drops_secret_attributes(tmp_path: Path) -> None:
     mgr = CMDBManager(tmp_path)
     host = DiscoveredCI("host", "chiap04", "fleet:node", tags=(DISCOVERED_TAG,))
     service = DiscoveredCI(
@@ -626,7 +626,7 @@ def test_reconcile_reports_relationships_and_redacts_secret_attributes(tmp_path:
     assert report.secret_redaction_findings == [
         {"ci_id": service.ci_id, "path": "attributes.password"}
     ]
-    assert mgr.get_ci(service.ci_id).attributes["password"] == "[redacted]"
+    assert "password" not in mgr.get_ci(service.ci_id).attributes
 
 
 def test_reconcile_malformed_evidence_fails_before_any_write(tmp_path: Path) -> None:

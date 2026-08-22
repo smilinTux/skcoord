@@ -33,6 +33,16 @@ logger = logging.getLogger("skcapstone.cmdb")
 _HOST = socket.gethostname()
 CMDB_CORE_SCHEMA_VERSION = 2
 CMDB_EVENT_SCHEMA_VERSION = 2
+SECRET_ATTRIBUTE_KEY_FRAGMENTS = (
+    "secret",
+    "password",
+    "passphrase",
+    "token",
+    "credential",
+    "private_key",
+    "api_key",
+    "authorization",
+)
 
 
 class CIType(str, Enum):
@@ -72,6 +82,54 @@ ALLOWED_RELATIONSHIPS: dict[str, set[str]] = {
 
 class FutureSchemaVersionError(ValueError):
     """The store contains data newer than this reader understands."""
+
+
+class SecretAttributeKeyError(ValueError):
+    """A CMDB write attempted to persist a secret-looking attribute key."""
+
+
+def is_secret_attribute_key(key: object) -> bool:
+    """Return whether *key* contains a denied secret-key fragment.
+
+    Matching is deliberately case-insensitive and substring-based. This errs on
+    the safe side for the append-only CMDB: names such as ``csrf_token_name``
+    are rejected along with ``API_TOKEN`` rather than relying on callers to
+    classify whether the associated value is itself sensitive.
+    """
+    lowered = str(key).lower()
+    return any(fragment in lowered for fragment in SECRET_ATTRIBUTE_KEY_FRAGMENTS)
+
+
+def _secret_attribute_paths(value: object, path: str = "attributes") -> list[str]:
+    """Return secret-looking mapping-key paths without inspecting string values."""
+    findings: list[str] = []
+    if isinstance(value, dict):
+        for raw_key, child in value.items():
+            key = str(raw_key)
+            child_path = f"{path}.{key}"
+            if is_secret_attribute_key(key):
+                findings.append(child_path)
+            findings.extend(_secret_attribute_paths(child, child_path))
+    elif isinstance(value, (list, tuple)):
+        for index, child in enumerate(value):
+            findings.extend(_secret_attribute_paths(child, f"{path}[{index}]"))
+    return findings
+
+
+def _validate_attribute_write(value: object, *, ci_id: str, agent: str) -> None:
+    """Reject secret-looking attribute keys before an immutable write occurs."""
+    findings = _secret_attribute_paths(value)
+    if not findings:
+        return
+    logger.warning(
+        "CMDB secret-looking attribute key rejected (ci_id=%s agent=%s paths=%s)",
+        ci_id,
+        agent,
+        ",".join(findings),
+    )
+    raise SecretAttributeKeyError(
+        "CMDB attributes contain forbidden secret-looking key(s): " + ", ".join(findings)
+    )
 
 
 def _schema_version(value: Any, *, supported: int, record: str) -> int:
@@ -148,8 +206,10 @@ class CMDBManager:
         ci_id: Optional[str] = None,
     ) -> ConfigItem:
         """Create (or return existing) a CI. Write-once core, idempotent by id."""
-        self.ensure_dirs()
         cid = ci_id or make_ci_id(ci_type, name)
+        clean_attributes = attributes or {}
+        _validate_attribute_write(clean_attributes, ci_id=cid, agent="create")
+        self.ensure_dirs()
         core = {
             "schema_version": CMDB_CORE_SCHEMA_VERSION,
             "id": cid,
@@ -158,7 +218,7 @@ class CMDBManager:
             "description": description,
             "owner": owner,
             "node": node,
-            "attributes": attributes or {},
+            "attributes": clean_attributes,
             "tags": tags or [],
             "created_at": _now_iso(),
         }
@@ -205,6 +265,7 @@ class CMDBManager:
         self._append(ci_id, agent, "status", status=status, note=note)
 
     def set_attribute(self, ci_id: str, agent: str, key: str, value: Any) -> None:
+        _validate_attribute_write({key: value}, ci_id=ci_id, agent=agent)
         self._append(ci_id, agent, "attribute", key=key, value=value)
 
     def add_relationship(
