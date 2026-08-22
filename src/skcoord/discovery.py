@@ -501,6 +501,42 @@ def _fragment_paths(runner: CommandRunner, scope: str, units: Sequence[str]) -> 
     return paths
 
 
+_DEP_PROPS = ("Requires", "Wants")
+
+
+def _unit_dependencies(
+    runner: CommandRunner, scope: str, units: Sequence[str]
+) -> dict[str, set[str]]:
+    """Bulk Id -> dependency unit names, chunked like :func:`_fragment_paths`.
+
+    Hard (``Requires``) and soft (``Wants``) dependencies both become
+    ``depends_on`` edges; ordering properties (``After``/``Before``) are not
+    dependencies and are ignored. A failed lookup yields no edges, never a
+    scan failure: missing dependency data must not cost us the units.
+    """
+    deps: dict[str, set[str]] = {}
+    for start in range(0, len(units), _SHOW_CHUNK):
+        chunk = list(units[start : start + _SHOW_CHUNK])
+        if not chunk:
+            continue
+        argv = ["systemctl", scope, "show", *chunk, "-p", "Id"]
+        for prop in _DEP_PROPS:
+            argv += ["-p", prop]
+        argv.append("--no-pager")
+        stdout = runner.run(argv)
+        if not stdout:
+            continue
+        unit_id = ""
+        for line in stdout.splitlines():
+            if line.startswith("Id="):
+                unit_id = line[3:].strip()
+            elif unit_id:
+                prop, _, value = line.partition("=")
+                if prop in _DEP_PROPS and value.split():
+                    deps.setdefault(unit_id, set()).update(value.split())
+    return deps
+
+
 def collect_systemd_units(
     runner: CommandRunner,
     scopes: Sequence[str] = ("--user", "--system"),
@@ -515,6 +551,12 @@ def collect_systemd_units(
     Timers matter as much as services: a fleet cronjob runs as a ``.timer``, so
     a collector that only reads ``.service`` units reports every scheduled job
     as missing.
+
+    Each unit also carries ``depends_on`` edges to the other loaded units it
+    ``Requires``/``Wants`` in the same scope, so the CMDB dependency graph
+    reflects what systemd would actually cascade a failure through. Edges to
+    units that are not loaded here (targets, dangling references) are dropped:
+    a relationship to a CI that does not exist is noise, not topology.
     """
     out: list[DiscoveredCI] = []
     for scope in scopes:
@@ -554,10 +596,21 @@ def collect_systemd_units(
                     )
                 )
 
-        paths = _fragment_paths(runner, scope, [f"{unit}.{kind}" for unit, kind, *_ in rows])
+        unit_ids = [f"{unit}.{kind}" for unit, kind, *_ in rows]
+        paths = _fragment_paths(runner, scope, unit_ids)
+        deps = _unit_dependencies(runner, scope, unit_ids)
+        observed_ids = set(unit_ids)
 
         for unit, kind, load, active, sub in rows:
-            fragment = paths.get(f"{unit}.{kind}", "")
+            unit_id = f"{unit}.{kind}"
+            fragment = paths.get(unit_id, "")
+            relationships = [("runs_on", make_ci_id(CIType.HOST.value, runner.host))]
+            for dep in sorted(deps.get(unit_id, set()) - {unit_id}):
+                if dep not in observed_ids:
+                    continue
+                relationships.append(
+                    ("depends_on", make_ci_id(CIType.SERVICE.value, dep.rsplit(".", 1)[0]))
+                )
             out.append(
                 DiscoveredCI(
                     ci_type=CIType.SERVICE.value,
@@ -575,7 +628,7 @@ def collect_systemd_units(
                         "origin": _classify_origin(fragment),
                     },
                     tags=("systemd", kind, DISCOVERED_TAG),
-                    relationships=(("runs_on", make_ci_id(CIType.HOST.value, runner.host)),),
+                    relationships=tuple(relationships),
                 )
             )
     return out
