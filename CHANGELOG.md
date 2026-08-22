@@ -23,6 +23,17 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
 
 ### Fixed
 
+- Preserved the terminal change lifecycle across the CAB provenance upgrade
+  (docs/adr/0002). Votes recorded before authenticated
+  `subject_role`/`subject_fingerprint`/`authorization_id` fields existed
+  demoted already-closed historical changes (chg-a76c0aee, chg-1dc7aa09) back
+  to `reviewing` at fold time. An unprovenanced approval vote decided before
+  the fixed past cutoff `_LEGACY_CAB_PROVENANCE_CUTOFF` is now honored as a
+  historical human approval — a schema-derived, fold-time-only rule that
+  rewrites no history and fabricates no vote. The raw-status CAB bypass guard
+  stays fail-closed: no vote written after the cutoff can satisfy the legacy
+  clause, and new changes still require authenticated provenance.
+
 - Publish the auto-tagged release to PyPI in the same GitHub Actions run. Tags
   pushed by the workflow's `GITHUB_TOKEN` do not trigger a second workflow, so
   the former tag-only publish guard produced green builds and tags through
