@@ -233,4 +233,3 @@ def _exec(argv: list[str], timeout: int) -> Optional[str]:
 # ---------------------------------------------------------------------------
 # Declared-state collectors (read specs, no machine access)
 # ---------------------------------------------------------------------------
-

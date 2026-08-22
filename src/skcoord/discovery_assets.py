@@ -125,7 +125,6 @@ def collect_observed_agents(runner: CommandRunner) -> list[DiscoveredCI]:
         if str(name).strip() and not str(name).endswith("-template")
     ]
 
-
 def collect_model_endpoints(runner: CommandRunner) -> list[DiscoveredCI]:
     """Observed Ollama endpoint, version and bounded installed-model inventory."""
     models = runner.run(["ollama", "list"])
@@ -172,4 +171,3 @@ def collect_model_endpoints(runner: CommandRunner) -> list[DiscoveredCI]:
             relationships=(("runs_on", make_ci_id(CIType.HOST.value, runner.host)),),
         )
     ]
-
