@@ -7,6 +7,7 @@ import time, and round-trips the board + ITIL against a temp home.
 """
 from __future__ import annotations
 
+import subprocess
 import sys
 
 from skcoord.card import KanbanBoard, render_html
@@ -16,8 +17,17 @@ from skcoord.itil import ITILManager
 
 def test_imports_do_not_pull_skcapstone():
     # skcoord must be import-time independent of skcapstone (one-way dependency).
-    mods = [m for m in sys.modules if m == "skcapstone" or m.startswith("skcapstone.")]
-    assert mods == [], f"skcoord import leaked skcapstone modules: {mods}"
+    # Run in a clean interpreter: in-process sys.modules is legitimately polluted
+    # by any earlier test that completes a task, because completing a task takes
+    # the optional lazy edge `from skcapstone.skjoule import JouleEngine`
+    # (coordination.py, silently skipped when skcapstone is absent).
+    code = (
+        "import sys\n"
+        "import skcoord.card, skcoord.coordination, skcoord.itil\n"
+        "mods = [m for m in sys.modules if m == 'skcapstone' or m.startswith('skcapstone.')]\n"
+        "assert mods == [], f'skcoord import leaked skcapstone modules: {mods}'\n"
+    )
+    subprocess.run([sys.executable, "-c", code], check=True)
 
 
 def test_board_roundtrip(tmp_path):
