@@ -289,9 +289,61 @@ class CABDecision(BaseModel):
     decided_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 
+# ── CAB provenance compatibility (terminal-lifecycle preservation) ─────────
+#
+# Votes recorded before the authenticated-provenance upgrade (commit 63a18b2,
+# "bind CAB approval to authenticated human roles", 2026-08-20) carry no
+# subject_role/subject_fingerprint/authorization_id. Changes approved under
+# that pre-upgrade regime completed their lifecycle (deployed -> verified ->
+# closed) through votes and status events that were valid at write time; the
+# upgrade then demoted those already-terminal records back to `reviewing` at
+# fold time (chg-a76c0aee, chg-1dc7aa09). The cutoff below is the
+# compatibility boundary: an unprovenanced approval vote decided BEFORE it is
+# honored as a historical human approval; anything at or after it must carry
+# authenticated provenance. The cutoff is a fixed past timestamp, so a vote
+# written through submit_cab_vote() - whose decided_at is always the
+# wall-clock now - can never qualify, and the raw `status -> approved` bypass
+# guard is untouched (it stays fail-closed for every live event). Backdating
+# decided_at requires direct write access to the cab-decisions tree, the same
+# accepted threat level as forging node="migrated" on a replayed event.
+_LEGACY_CAB_PROVENANCE_CUTOFF = "2026-08-21T00:00:00+00:00"
+
+
+def _is_legacy_unprovenanced_approval(vote: CABDecision) -> bool:
+    """Return whether *vote* is a pre-provenance historical approval.
+
+    Schema-derived compatibility rule: all three authenticated provenance
+    fields must be empty (the pre-upgrade record shape) and ``decided_at``
+    must be a timezone-aware timestamp strictly before
+    ``_LEGACY_CAB_PROVENANCE_CUTOFF``. Unparseable or naive timestamps fail
+    closed. See the constant's comment above for the full rationale and
+    threat analysis.
+    """
+    if vote.subject_role or vote.subject_fingerprint or vote.authorization_id:
+        return False
+    try:
+        decided = datetime.fromisoformat(vote.decided_at)
+    except (TypeError, ValueError):
+        return False
+    if decided.tzinfo is None:
+        return False
+    return decided < datetime.fromisoformat(_LEGACY_CAB_PROVENANCE_CUTOFF)
+
+
 def _is_human_approval(vote: CABDecision) -> bool:
-    """Return whether a vote carries a qualifying human approval role."""
-    return vote.agent == "human" or vote.subject_role in {"owner", "approver"}
+    """Return whether a vote carries a qualifying human approval role.
+
+    Qualifying is an authenticated human identity (``agent == "human"``), an
+    authenticated human role (``owner``/``approver``), or - under the
+    pre-provenance compatibility rule - a historical unprovenanced approval
+    decided before ``_LEGACY_CAB_PROVENANCE_CUTOFF``. The legacy clause only
+    re-honors votes that already exist in historical records; no vote written
+    after the cutoff can satisfy it, so new changes still require
+    authenticated provenance.
+    """
+    if vote.agent == "human" or vote.subject_role in {"owner", "approver"}:
+        return True
+    return _is_legacy_unprovenanced_approval(vote)
 
 
 # ---------------------------------------------------------------------------

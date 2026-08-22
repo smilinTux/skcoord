@@ -1,0 +1,30 @@
+{
+  "id": "chg-a76c0aee",
+  "type": "change",
+  "title": "Estate-wide SK* package and service refresh with chiwk12 WSL canary",
+  "label": "estate-wide-sk--package-and-service-refr",
+  "change_type": "normal",
+  "risk": "high",
+  "rollback_plan": "Before each host, capture hostname, OS/WSL status, SK agent/profile, authoritative Jarvis fingerprint, repository URL/branch/HEAD/dirty state, Python package versions, installed editable paths, user-systemd unit definitions and active states, MCP config hashes, and configuration/database backup references. Never overwrite a dirty or divergent worktree; stop and route it for reconciliation. Roll back only the affected host by restoring each repository to its recorded commit or reinstalling the recorded package version/wheel, restoring only configuration changed by this CO, running daemon-reload when unit files changed, and restarting the same dependency-ordered units. Stop the rollout and roll back the current wave if the Jarvis fingerprint changes, SKMemory ritual/health regresses, any of skcapstone/skmemory/skcomms/skchat MCP fails initialization or read-only probes, Syncthing reports conflicts, or duplicate writers appear. Do not copy authentication/session databases, secrets, CapAuth private material, or live memory stores between hosts.",
+  "test_plan": "Use the governed CMDB/fleet inventory to enumerate every in-scope CHI Linux, WSL2, and service node and record unreachable nodes as deferred, not passed. Run read-only preflight and backups first. Canary on chiwk12 WSL2: update the checked-out SK* repositories and editable packages using their documented supported path, include SKSkills/Codex user-skill registration compatibility, then restart only services whose package/unit/dependency changed in dependency order. Validate active agent jarvis and fingerprint C8D406A46F2DF4894E4FB41580A638570C9D41C4, SKCapstone status/doctor, SKMemory ritual and health, CapAuth profile without generating/replacing identity, Syncthing state, Codex skill discovery, codex mcp list, and JSON-RPC initialize/tools-list/read-only probes for skcapstone, skmemory, skcomms, and skchat. Reopen the Windows client only at the human gate, select WSL agent and Codex mode, and verify Jarvis identity plus all four MCPs. After canary acceptance, roll chiap04, then remaining hosts in bounded waves with the same checks, version ledger, restart receipt, and rollback gate. Final acceptance requires no identity drift, no duplicate writers, no unresolved sync conflict, all intended services healthy, and a complete per-host exception/deferred-host report.",
+  "managed_by": "jarvis",
+  "created_by": "jarvis",
+  "implementer": "jarvis",
+  "cab_required": true,
+  "related_problem_id": null,
+  "created_at": "2026-08-20T22:05:42.567328+00:00",
+  "tags": [
+    "estate",
+    "sk-stack",
+    "package-update",
+    "service-restart",
+    "chiwk12-canary",
+    "wsl2",
+    "codex",
+    "mcp",
+    "skskills",
+    "identity-safety",
+    "rollback-required",
+    "cab-required"
+  ]
+}
