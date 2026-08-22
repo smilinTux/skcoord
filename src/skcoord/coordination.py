@@ -964,8 +964,9 @@ class Board:
             Updated AgentFile.
 
         Raises:
-            ValueError: If task doesn't exist, is already claimed/done, or has
-                incomplete dependencies (unless ``force`` is set).
+            ValueError: If task doesn't exist, is owned by another agent in a
+                claimed/in_progress/review/done state, or has incomplete
+                dependencies (unless ``force`` is set).
         """
         views = self.get_task_views()
         target = None
@@ -976,17 +977,30 @@ class Board:
 
         if target is None:
             raise ValueError(f"Task {task_id} not found")
-        # A ready-column card folds to CLAIMED, but a kanban move-to-ready
-        # carries no owner. The lifecycle reconciler only projects claims for
-        # cards WITH an owner (lifecycle.py), so an ownerless claimed card is
-        # unclaimed and claimable. DONE and IN_PROGRESS keep refusing: an
-        # ownerless doing card still blocks a different claimant.
-        ownerless_claimed = (
-            target.status == TaskStatus.CLAIMED and target.claimed_by is None
+        # Kanban moves to ready/doing/review carry no owner, yet the card
+        # folds to CLAIMED/IN_PROGRESS/REVIEW with claimed_by None. The
+        # lifecycle reconciler only projects claims for cards WITH an owner
+        # (lifecycle.py), so an ownerless card in any of those states is
+        # unclaimed and claimable. cbca4c17 fixed this for ready; 47e8d509
+        # extends the same rule to doing/review (see also 257d6b9a on stale
+        # claim/kanban reconciliation). Only the claim gate relaxes: the card
+        # still SHOWS as doing/review on the board, so genuine WIP is not
+        # masked. OWNED cards in those states keep refusing a different
+        # claimant, and DONE refuses ownerless or not.
+        ownerless_active = (
+            target.claimed_by is None
+            and target.status
+            in (TaskStatus.CLAIMED, TaskStatus.IN_PROGRESS, TaskStatus.REVIEW)
         )
         if (
-            target.status in (TaskStatus.DONE, TaskStatus.CLAIMED, TaskStatus.IN_PROGRESS)
-            and not ownerless_claimed
+            target.status
+            in (
+                TaskStatus.DONE,
+                TaskStatus.CLAIMED,
+                TaskStatus.IN_PROGRESS,
+                TaskStatus.REVIEW,
+            )
+            and not ownerless_active
             and target.claimed_by != agent_name
         ):
             raise ValueError(
