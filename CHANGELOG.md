@@ -53,6 +53,12 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
 
 ### Fixed
 
+- Reverted the stale coordination rewrite in `c5731be`, restoring canonical
+  agent projection validation, transactional lifecycle repair, ownerless
+  ready/doing claims, and fail-closed dependency enforcement. The existing
+  claim API already accepted `force=True`, so no compatibility behavior was
+  lost.
+
 - Fold acceptance-criteria amendments into the authoritative CardStore
   projection and task views while keeping `core.json` birth facts immutable.
   The legacy kill switch now preserves criteria on projected cards, and
