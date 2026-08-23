@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any, Optional
 
@@ -237,34 +238,78 @@ def collect_host_facts(runner: CommandRunner) -> list[DiscoveredCI]:
     ]
 
 
-def _cron_rows(text: str, *, system: bool) -> list[tuple[str, str, str]]:
-    """Return schedule, principal and command-name triples without secret arguments."""
-    rows: list[tuple[str, str, str]] = []
+_ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+_CRON_RUN_WRAPPER = "sk-cron-run.sh"
+"""Fleet-managed cron jobs are dispatched through this wrapper as
+``sk-cron-run.sh <declared-job-name> <actual-command> [args...]``, prefixed by
+zero or more inline ``VAR=value`` assignments (see the ``skos schedule``
+managed block). The wrapper's first argument is the human-declared job name,
+the one thing ``fleet/objects/cronjob/*.json`` actually calls the job -- so it
+is captured as an alias rather than only feeding the opaque fingerprint.
+"""
+
+
+def _cron_rows(text: str, *, system: bool) -> list[tuple[str, str, str, Optional[str]]]:
+    """Return schedule, principal, command-name and (if wrapped) declared job
+    name quadruples, without secret arguments.
+
+    Leading ``VAR=value`` assignments before the command (either a whole bare
+    line such as ``SHELL=/bin/bash``, or inline before the executable on a
+    scheduled line, as the ``skos schedule`` managed block does) are skipped
+    rather than mistaken for the command itself.
+    """
+    rows: list[tuple[str, str, str, Optional[str]]] = []
     for raw in text.splitlines():
         line = raw.strip()
-        if not line or line.startswith("#") or ("=" in line and not line.startswith("@")):
+        if not line or line.startswith("#"):
             continue
         parts = line.split()
+        if not parts:
+            continue
+        if not line.startswith("@") and _ENV_ASSIGNMENT_RE.match(parts[0]):
+            # A bare crontab environment declaration (SHELL=..., MAILTO=...),
+            # not a scheduled job.
+            continue
         if line.startswith("@"):
             minimum = 3 if system else 2
             if len(parts) < minimum:
                 continue
             schedule = parts[0]
-            principal = parts[1] if system else "current-user"
-            command = parts[2] if system else parts[1]
+            idx = 1
         else:
             minimum = 7 if system else 6
             if len(parts) < minimum:
                 continue
             schedule = " ".join(parts[:5])
-            principal = parts[5] if system else "current-user"
-            command = parts[6] if system else parts[5]
-        rows.append((schedule, principal, Path(command).name[:120]))
+            idx = 5
+        if system:
+            principal = parts[idx]
+            idx += 1
+        else:
+            principal = "current-user"
+        while idx < len(parts) and _ENV_ASSIGNMENT_RE.match(parts[idx]):
+            idx += 1
+        if idx >= len(parts):
+            continue
+        command = parts[idx]
+        command_name = Path(command).name[:120]
+        cron_run_name: Optional[str] = None
+        if command_name == _CRON_RUN_WRAPPER and idx + 1 < len(parts):
+            cron_run_name = parts[idx + 1][:120]
+        rows.append((schedule, principal, command_name, cron_run_name))
     return rows
 
 
 def collect_cron_jobs(runner: CommandRunner) -> list[DiscoveredCI]:
-    """Observed user and system crontab entries with command arguments redacted."""
+    """Observed user and system crontab entries with command arguments redacted.
+
+    The fingerprinted ``name`` stays the CI's stable identity (the CMDB is
+    append-only, and renaming would orphan every previously-scanned entry).
+    When the job runs through the ``sk-cron-run.sh`` wrapper, its declared
+    name is added as an alias, so a fleet cronjob spec can actually be matched
+    against the box that runs it instead of never matching by construction.
+    """
     sources = (
         ("user", runner.run(["crontab", "-l"]), False),
         ("system", runner.run(["cat", "/etc/crontab"]), True),
@@ -273,10 +318,21 @@ def collect_cron_jobs(runner: CommandRunner) -> list[DiscoveredCI]:
     for scope, text, system in sources:
         if not text:
             continue
-        for schedule, principal, command_name in _cron_rows(text, system=system):
-            fingerprint = hashlib.sha256(
-                f"{scope}\0{schedule}\0{principal}\0{command_name}".encode()
-            ).hexdigest()[:16]
+        for schedule, principal, command_name, cron_run_name in _cron_rows(text, system=system):
+            fingerprint_parts = [scope, schedule, principal, command_name]
+            if cron_run_name:
+                fingerprint_parts.append(cron_run_name)
+            fingerprint = hashlib.sha256("\0".join(fingerprint_parts).encode()).hexdigest()[:16]
+            attributes: dict[str, Any] = {
+                "schedule": schedule,
+                "principal": principal,
+                "command_name": command_name,
+                "command_arguments_redacted": True,
+            }
+            aliases: tuple[str, ...] = ()
+            if cron_run_name:
+                attributes["cron_run_name"] = cron_run_name
+                aliases = (cron_run_name,)
             out.append(
                 DiscoveredCI(
                     ci_type=CIType.SERVICE.value,
@@ -284,13 +340,9 @@ def collect_cron_jobs(runner: CommandRunner) -> list[DiscoveredCI]:
                     source=f"cron:{scope}",
                     observed=True,
                     node=runner.host,
-                    attributes={
-                        "schedule": schedule,
-                        "principal": principal,
-                        "command_name": command_name,
-                        "command_arguments_redacted": True,
-                    },
+                    attributes=attributes,
                     tags=("cronjob", "scheduler", DISCOVERED_TAG),
+                    aliases=aliases,
                     relationships=(("runs_on", make_ci_id(CIType.HOST.value, runner.host)),),
                 )
             )

@@ -11,6 +11,12 @@ from .discovery_identity import identity_estate_drift
 from .discovery_scan import _matching_identity_ids
 from .discovery_systemd import ORIGIN_DISTRO, ORIGIN_UNKNOWN
 
+OPERATORAPP_KIND = "Operatorapp"
+"""``fleet/objects/operatorapp/*.json``'s ``kind`` -- a CLI-invoked tool
+(``spec.cli``), not a daemon. It is folded into CIType.SERVICE like everything
+else in ``collect_fleet_objects``, so this is how drift() tells it apart from
+a Service that is genuinely expected to have a running unit."""
+
 
 @dataclass
 class DriftFinding:
@@ -31,6 +37,8 @@ def drift(
 
     * ``declared_not_observed`` -- a spec says this service exists and no
       machine is running it. The fleet is not what the manifest claims.
+      Operatorapp-kind CIs (a CLI tool, not a daemon) are exempt: they have
+      no running unit by design, and that is not a gap.
     * ``observed_not_declared`` -- something is running that no spec mentions.
       Undocumented, and possibly unwanted. Distro-authored systemd units are
       excluded: ``ModemManager.service`` is not an asset anyone forgot to
@@ -46,14 +54,28 @@ def drift(
 
     # Flags cover the merged case (one CI both declared and observed); the key
     # sets cover records that never merged because their names differ, e.g. a
-    # spec saying "skgateway" against a unit called "skgateway.service".
-    observed_names = {_service_key(d.name) for d in services if d.observed}
-    declared_names = {_service_key(d.name) for d in services if d.declared}
+    # spec saying "skgateway" against a unit called "skgateway.service". Every
+    # identity alias is a candidate key, not just ``.name``: a cronjob observed
+    # under a fingerprinted name but wrapped by sk-cron-run, or a fleet object
+    # whose ``spec.unit``/registry ``pid_file`` names the real running unit,
+    # would otherwise be structurally unmatchable no matter what is running.
+    observed_keys: set[str] = set()
+    declared_keys: set[str] = set()
+    for d in services:
+        keys = _service_keys(d)
+        if d.observed:
+            observed_keys |= keys
+        if d.declared:
+            declared_keys |= keys
 
     for item in services:
         if item.observed or not item.declared:
             continue
-        if _service_key(item.name) not in observed_names:
+        if item.attributes.get("fleet_kind") == OPERATORAPP_KIND:
+            # A CLI-invoked tool (spec.cli), not a daemon. It has no running
+            # unit, timer or container by design -- that is not a gap.
+            continue
+        if not (_service_keys(item) & observed_keys):
             findings.append(
                 DriftFinding(
                     item.ci_id,
@@ -67,7 +89,7 @@ def drift(
             continue
         if item.attributes.get("origin") == ORIGIN_DISTRO:
             continue
-        if _service_key(item.name) not in declared_names:
+        if not (_service_keys(item) & declared_keys):
             findings.append(
                 DriftFinding(
                     item.ci_id,
@@ -99,3 +121,14 @@ def _service_key(name: str) -> str:
         if key.endswith(suffix):
             key = key[: -len(suffix)]
     return key.replace("_", "-")
+
+
+def _service_keys(item: DiscoveredCI) -> set[str]:
+    """All normalised keys a service CI can be recognised by.
+
+    ``identity_aliases`` already folds in ``name``, ``canonical_name`` and any
+    declared aliases (sk-cron-run job names, ``spec.unit``, registry
+    ``pid_file`` stems); this just applies the same ``.service``/``.timer``
+    and case/underscore normalisation ``_service_key`` gives the bare name.
+    """
+    return {_service_key(alias) for alias in item.identity_aliases}
