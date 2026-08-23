@@ -9,6 +9,15 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
 
 ## [Unreleased]
 
+### Fixed
+
+- A `.timer` no longer emits a `depends_on` edge to its own same-named
+  `.service`. Both fold to one `ci-service-<base>` CI, so systemd's ordinary
+  timer-to-service dependency produced a self edge; a self edge fails
+  validation, and `reconcile --apply` refuses to run while any validation
+  failure is present, which silently blocked every apply on nodes running such
+  a timer (card 0bc46220).
+
 ### Changed
 
 - Split the CMDB discovery implementation into focused collector,
