@@ -170,13 +170,23 @@ def collect_systemd_units(
         for unit, kind, load, active, sub in rows:
             unit_id = f"{unit}.{kind}"
             fragment = paths.get(unit_id, "")
+            self_ci_id = make_ci_id(CIType.SERVICE.value, unit)
             relationships = [("runs_on", make_ci_id(CIType.HOST.value, runner.host))]
             for dep in sorted(deps.get(unit_id, set()) - {unit_id}):
                 if dep not in observed_ids:
                     continue
-                relationships.append(
-                    ("depends_on", make_ci_id(CIType.SERVICE.value, dep.rsplit(".", 1)[0]))
-                )
+                dep_ci_id = make_ci_id(CIType.SERVICE.value, dep.rsplit(".", 1)[0])
+                # A unit and its same-named sibling of another kind fold to ONE
+                # CI here (``foo.timer`` and ``foo.service`` are both
+                # ``ci-service-foo``), so systemd's ordinary timer->service
+                # dependency would emit a depends_on pointing at this very CI.
+                # Subtracting ``unit_id`` above only drops the identical unit,
+                # not the sibling. A self edge fails validation, and
+                # ``reconcile --apply`` refuses to run while any validation
+                # failure is present -- so this silently blocked every apply.
+                if dep_ci_id == self_ci_id:
+                    continue
+                relationships.append(("depends_on", dep_ci_id))
             out.append(
                 DiscoveredCI(
                     ci_type=CIType.SERVICE.value,

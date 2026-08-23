@@ -197,3 +197,56 @@ def test_dependency_lookup_names_units_explicitly_instead_of_globbing() -> None:
     assert dep_calls, "a dependency lookup must happen"
     assert "*.service" not in dep_calls[0]
     assert "skgateway.service" in dep_calls[0]
+
+
+# ── timer/service sibling folds to one CI (card 0bc46220) ─────────────────
+
+TIMER_UNITS_OUTPUT = """nextcloud-cbrd21-sync.timer  loaded active waiting Nextcloud sync
+"""
+SERVICE_UNITS_OUTPUT = """nextcloud-cbrd21-sync.service  loaded active running Nextcloud sync
+"""
+TIMER_DEPS_OUTPUT = """Id=nextcloud-cbrd21-sync.timer
+Requires=nextcloud-cbrd21-sync.service
+Wants=
+
+Id=nextcloud-cbrd21-sync.service
+Requires=
+Wants=
+"""
+
+
+def test_timer_does_not_depend_on_its_own_same_named_service() -> None:
+    """A ``.timer`` and its ``.service`` fold to ONE ci-service-<base>.
+
+    systemd's ordinary timer->service dependency therefore pointed the CI at
+    itself. A self edge fails validation, and ``reconcile --apply`` refuses to
+    run while any validation failure is present, so this silently blocked
+    every apply on a node with a timer whose service shares its name.
+    """
+    runner = FakeRunner(
+        answers={
+            "--type=timer": TIMER_UNITS_OUTPUT,
+            "--type=service": SERVICE_UNITS_OUTPUT,
+            "Requires": TIMER_DEPS_OUTPUT,
+        }
+    )
+    found = collect_systemd_units(runner, scopes=("--user",), kinds=("timer", "service"))
+
+    self_id = make_ci_id(CIType.SERVICE.value, "nextcloud-cbrd21-sync")
+    for ci in found:
+        assert self_id not in _depends_on(ci), f"{ci.name} emitted a self edge"
+
+
+def test_timer_service_pair_passes_validation(tmp_path: Path) -> None:
+    """The end-to-end symptom: reconcile reports zero validation failures."""
+    runner = FakeRunner(
+        answers={
+            "--type=timer": TIMER_UNITS_OUTPUT,
+            "--type=service": SERVICE_UNITS_OUTPUT,
+            "Requires": TIMER_DEPS_OUTPUT,
+        }
+    )
+    found = _collect(runner, scopes=("--user",), kinds=("timer", "service"))
+    report = reconcile(CMDBManager(tmp_path), found, apply=False)
+
+    assert report.validation_failures == [], report.validation_failures
