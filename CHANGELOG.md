@@ -26,6 +26,15 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
 
 ### Added
 
+- Added `Board.record_success`, the write half of cross-run success memory
+  (card 506782a4, S9). Sibling of `record_attempt`, writing distilled
+  terminal-PASS entries to `meta.autopilot.successes[]` -- a key
+  `clear_attempts` never touches, so a success recorded on the same pass
+  that triggers `clear_attempts` survives it instead of being wiped by the
+  event that created it. Mirrors `record_attempt`'s (run_id, outcome)
+  idempotency and 10-entry corruption cap; the reader side (skharness)
+  decides how much of it reaches a prompt.
+
 - Added scheduled CMDB reconciliation policy helpers with validated,
   versioned configuration, a nonblocking application lease, configurable
   drift and collection-failure thresholds, deduplicated ITIL incident routing,
