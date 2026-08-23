@@ -27,10 +27,21 @@ these modules, so every skcapstone process executes skcoord code.
   `~/.skcapstone/cards/<id>/` holding a write-once `core.json` plus append-only
   per-writer event logs; current state is folded on read, never stored
   (`src/skcoord/card_store.py:1-12`, `:190-199`).
+- **Lifecycle projection reconciliation.** `audit_lifecycle()` compares the
+  current CardStore fold to `agents/*.json` without writing. The explicit
+  `repair_lifecycle()` operation clears terminal or review cards from active
+  execution, retains accountable ownership and completion history, refuses
+  recent active conflicts, and appends a per-writer receipt under
+  `coordination/reconciliation/` (`src/skcoord/lifecycle.py`).
 - **ITIL service management.** Incident, problem, change, CAB, KEDB
   (`src/skcoord/itil.py`).
 - **The CMDB.** Event-sourced configuration items and relationships
-  (`src/skcoord/cmdb.py`).
+  (`src/skcoord/cmdb.py`). CMDB writes fail closed before touching disk when an
+  attribute key at any nesting depth contains `secret`, `password`,
+  `passphrase`, `token`, `credential`, `private_key`, `api_key`, or
+  `authorization` (case-insensitive). The policy intentionally rejects
+  ambiguous names such as `csrf_token_name`; store only non-secret metadata
+  under a name that does not imply credential material.
 - **The agent identity vCard.** The shareable sovereign card for the mesh
   (`src/skcoord/agent_card.py`).
 - **Crash-safe writes.** `atomic_write_text` (temp file, fsync, `os.replace`) is
@@ -147,7 +158,7 @@ dev version.
 ## 4. Test (the green-bar gate)
 
 ```bash
-~/.skenv/bin/python -m pytest tests/ -q     # 71 tests
+~/.skenv/bin/python -m pytest tests/ -q     # 231 tests
 ~/.skenv/bin/python -m ruff check src/ tests/
 ```
 
@@ -179,7 +190,86 @@ the `describe` event (`test_spe_describe_event.py`), and the staged lane
 
 ## 5. Release / Deploy
 
-This is a library. There is nothing to deploy, restart, or roll back on a host.
+### 2026-08-21 CMDB source validation
+
+Card `3799733b` revalidated the canonical CMDB, discovery, reconciliation, and
+projection modules against GitHub `main`. Release evidence is the full pytest/Ruff/
+build gate in section 4 plus the consumer integration suites in `skcapstone` and
+`skdashboard`. Fleet consumers update this library only from a tagged GitHub release
+(normally the matching PyPI artifact) and reinstall it into `~/.skenv`; the dashboard
+process must then be restarted because it imports `skcoord` in-process.
+
+CMDB library releases never mutate the live store or schedule by themselves.
+The governed network rollout, authenticated CAB evidence, three-shadow gate,
+timer cutover, and rollback sequence are maintained in
+[`docs/cmdb-reconcile-rollout.md`](docs/cmdb-reconcile-rollout.md). The legacy
+local apply unit and the ATLAS network apply unit are deliberately different
+contracts; substituting one for the other is a release blocker.
+
+### CHI census and discovery acceptance
+
+The authoritative target set is the reviewed fleet Node object set under
+`~/.skcapstone/fleet/objects/node/`; see
+[`docs/adr/0003-chi-node-census-and-ci-contract.md`](docs/adr/0003-chi-node-census-and-ci-contract.md).
+Target resolution is deliberately independent of scan output:
+
+```bash
+python - <<'PY'
+from pathlib import Path
+from skcoord.cmdb_reconcile import resolve_targets
+
+for target in resolve_targets(Path("~/.skcapstone").expanduser()):
+    print(target.host, ",".join(target.provenance))
+PY
+```
+
+Before a baseline, reconcile the fleet objects against the peer directory,
+DNS/Tailscale, live SSH hostnames, and service-health evidence. Record aliases
+and discrepancies in the Node spec; never let an observed host expand scope.
+The 2026-08-21 review resolves `chioc09` as an alias of canonical `chiap09`,
+includes `chipv05`, treats the Windows/WSL endpoints of `chiwk12` as one asset,
+and keeps `chiwk11` in discovery-only scope pending role qualification.
+
+Run `skcapstone cmdb scan` or a credentialed network reconcile without
+`--apply` first. An approved change (currently `chg-a76c0aee`) authorizes the
+window but does not waive explicit vault references, backup evidence, complete
+collector accounting, three checksum-valid shadows, relationship audit, or
+rollback readiness. Card `e5d0c8cb` owns the census contract and `e83b1f4f`
+owns collector coverage.
+
+The observed scanner contract contains nine collectors: host facts; systemd
+services/timers; Docker/Podman containers and Compose ownership; stable TCP
+listeners; user/system crontab entries; network interfaces; persistent mounts
+and database containers; remote agent homes; and the local Ollama model API.
+Cron arguments are never retained, and interface addresses are evidence rather
+than host aliases. Each target records per-collector command attempt, success,
+and unavailable counts plus a complete/partial/unavailable status; command text
+and output are not retained. Transport, deadline, or fully unavailable
+collector status makes the scan incomplete and blocks absence or lifecycle
+decisions; successful fallbacks retain explicit `partial` accounting.
+
+### CMDB import and reconciliation contract
+
+Card `e57ef91a` replaces the historical three-host/ITIL seed with the versioned
+discovery model. `CMDBManager.seed_from_inventory()` remains only as
+`skcoord.cmdb.compat-seed/v1` for older clients and now imports declared fleet,
+registry, and agent sources through `discovery.reconcile`; it does not invent
+hosts or derive CI health from incidents.
+
+Use the supported consumer verbs in order: `skcapstone cmdb plan`, review the
+creates/updates/relationship deltas, stale candidates, retirements, validation
+failures, and redaction findings, then use `skcapstone cmdb apply`. An apply
+validates and secret-redacts the complete evidence batch before appending any
+event. Missing targets, unsupported CI types or relationships, partial scans,
+and malformed evidence fail closed. Identical evidence is idempotent.
+
+Run artifacts are canonical JSON plus a sibling SHA-256 file. Status readers
+must use `read_verified_run_artifacts()` and ignore missing or mismatched
+checksums. Missing observations advance retirement only on complete,
+same-scope passes; three complete misses retire by status event, never delete.
+
+This is a library and has no standalone service. Deploying it means reinstalling the
+consumer environment and restarting only the long-running consumers that imported it.
 A release is a PyPI publish, and consumers pick it up on their next install.
 
 **Do not push a tag by hand.** `.github/workflows/publish.yml` cuts the tag
@@ -196,13 +286,15 @@ itself on a push to `main`:
    asserts the computed version is not a dev/local/`0.0.0` version before
    building, because PyPI would reject that with a 400 after the tag was already
    cut.
-3. `pypi-publish` uploads with Trusted Publishing (OIDC, environment `pypi`,
-   no token).
+3. `pypi-publish` uploads in that same workflow run with Trusted Publishing (OIDC,
+   environment `pypi`, no token). GitHub does not start a second workflow when the
+   preceding job pushes the tag with `GITHUB_TOKEN`; waiting for a tag-push run is the
+   failure that left tags `v0.1.9` through `v0.1.15` absent from PyPI.
 
 Both `build` and `pypi-publish` carry `always() && !cancelled()` guards. That is
 not decoration: a GitHub skip propagates through the job graph, so a bare
-`needs:` on a skipped upstream job silently skips the publish. That exact failure
-shipped a build that passed every guard and published nothing.
+`needs:` on a skipped upstream job silently skips the publish. The publish job is
+gated on the successful build, not on a second event that GitHub will not emit.
 
 Rollback for a library is **forward only**: yank or supersede on PyPI and cut a
 new patch. Consumers pin with `skcoord>=X.Y.Z`.
@@ -346,7 +438,7 @@ nodes read the same files and must tolerate a field they have never heard of.
 | `skcoord.__version__` does not match `pip show skcoord` | `__version__` in `src/skcoord/__init__.py` is a **static literal** and does not track the git tag. The authoritative version is the installed distribution metadata: `python -c "import importlib.metadata as m; print(m.version('skcoord'))"`. See §9. |
 | A build produces a `.devN` or `+g<sha>` version | The checkout has no tags. Every `actions/checkout` here sets `fetch-depth: 0` and `fetch-tags: true`; a local clone needs `git fetch --tags`. |
 | A tag was cut but nothing appeared on PyPI | Check whether `pypi-publish` was **skipped** rather than failed. A skip propagates through the job graph, which is why both downstream jobs carry `always() && !cancelled()`. Verify on PyPI, not on the green run. |
-| `Task ... already claimed` on claim | `claim_task` refuses a task already in `DONE`, `CLAIMED`, or `IN_PROGRESS` (`coordination.py:821-825`). Read the board before writing. |
+| `Task ... already claimed` on claim | `claim_task` refuses a task in `DONE`, or one OWNED by a different agent in `CLAIMED`, `IN_PROGRESS`, or `REVIEW` (`coordination.py`, `claim_task`). Ownerless cards in those non-done states (e.g. after a kanban-native move with no owner) are unclaimed and claimable — see board cards cbca4c17 and 47e8d509. Read the board before writing. |
 
 ---
 
@@ -360,7 +452,7 @@ nodes read the same files and must tolerate a field they have never heard of.
 | **T1 Agile** | N/A, no crypto surface to make agile. | |
 | **T2 Hybrid KEM** | N/A, no key exchange, no encryption at rest. Card `meta` replicates in cleartext by design, which is why a credential must never be placed on a card. | `SECURITY.md` threat model. |
 | **T3 Hybrid signature** | N/A, skcoord signs nothing. Provenance signing (SPE) is applied by the layer above. | |
-| **T4 Transport closed** | **N/A, no transport leg.** No socket is opened. Replication is Syncthing's, and Syncthing owns that transport's security properties. | Nothing imports `requests` / `urllib` / `httpx` / `aiohttp`; `socket` is used only for `gethostname()`. |
+| **T4 Transport closed** | **N/A, no transport leg.** No socket is opened. Replication is Syncthing's, and Syncthing owns that transport's security properties. | Nothing imports a network client; `urllib.parse.quote` only escapes injected Proxmox adapter paths, and `socket` is used only for `gethostname()`. |
 
 **Honest tier statement:** skcoord is a **non-crypto** library. It is the
 integrity boundary for task state, not a confidentiality boundary. It makes no
@@ -399,7 +491,7 @@ block below. No capability is asserted that this repo does not implement.
 ---
 
 <!-- docs-evidence
-verified: 2026-08-14
+verified: 2026-08-21
 checks:
   - name: board root layout matches section 6
     run: grep -q 'self.coord_dir = self.home / "coordination"' src/skcoord/coordination.py && grep -q 'self.tasks_dir = self.coord_dir / "tasks"' src/skcoord/coordination.py && grep -q 'self.agents_dir = self.coord_dir / "agents"' src/skcoord/coordination.py
@@ -412,7 +504,7 @@ checks:
   - name: pure library, no console script and no __main__
     run: test ! -e src/skcoord/__main__.py && ! grep -q 'project.scripts' pyproject.toml
   - name: no network surface (sockets are never opened)
-    run: ! grep -rqE '^\s*(import|from)\s+(requests|urllib|httpx|aiohttp|http\.client)' src/skcoord/ && ! grep -rq 'socket.socket' src/skcoord/
+    run: ! grep -rqE '^\s*(import|from)\s+(requests|httpx|aiohttp|http\.client)' src/skcoord/ && ! grep -rqE '^\s*from\s+urllib\.(request|error)' src/skcoord/ && ! grep -rq 'socket.socket' src/skcoord/
   - name: version stays setuptools-scm derived from a v-semver tag
     run: grep -q 'dynamic = \["version"\]' pyproject.toml && grep -q 'tag_regex' pyproject.toml && ! grep -qE '^version[[:space:]]*=' pyproject.toml
   - name: documented WIP limits match the code
@@ -421,4 +513,8 @@ checks:
     run: grep -qE 'run: python -m pytest tests/ -q[[:space:]]*$' .github/workflows/ci.yml && grep -qE 'run: ruff check src/ tests/[[:space:]]*$' .github/workflows/ci.yml && ! grep -q '|| true' .github/workflows/ci.yml
   - name: the one-way dependency guard test still exists
     run: grep -q 'def test_imports_do_not_pull_skcapstone' tests/test_smoke.py
+  - name: auto-tagged releases publish in the same workflow run
+    run: sed -n '/^  pypi-publish:/,$p' .github/workflows/publish.yml | grep -q "needs.build.result == 'success'" && ! sed -n '/^  pypi-publish:/,$p' .github/workflows/publish.yml | grep -q "startsWith(github.ref, 'refs/tags/')"
+  - name: CHI census contract names the authoritative store and fail-closed lifecycle
+    run: grep -q '~/.skcapstone/fleet/objects/node' docs/adr/0003-chi-node-census-and-ci-contract.md && grep -q 'three complete, checksum-valid passes' docs/adr/0003-chi-node-census-and-ci-contract.md && grep -q 'secret values and private paths are prohibited' docs/adr/0003-chi-node-census-and-ci-contract.md
 -->

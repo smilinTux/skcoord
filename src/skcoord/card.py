@@ -61,6 +61,7 @@ class Card(BaseModel):
     owner: str | None = None
     order: int = 0
     labels: list[str] = Field(default_factory=list)
+    acceptance_criteria: list[str] = Field(default_factory=list)
     dependencies: list[str] = Field(default_factory=list)
     links: dict = Field(default_factory=dict)
     meta: dict = Field(default_factory=dict)
@@ -241,6 +242,7 @@ def card_from_taskview(view: TaskView) -> Card:
         originator=t.created_by,
         owner=view.claimed_by,
         labels=list(t.tags),
+        acceptance_criteria=list(t.acceptance_criteria),
         dependencies=list(t.dependencies),
         meta=meta,
         created_at=t.created_at,

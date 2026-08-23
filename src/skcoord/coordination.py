@@ -23,7 +23,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Callable, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from .atomic_io import atomic_write_text
 
@@ -149,6 +149,16 @@ class AgentFile(BaseModel):
     itil_claims: list[str] = Field(default_factory=list)
     notes: str = ""
 
+    @field_validator("agent", mode="before")
+    @classmethod
+    def validate_agent_name(cls, value: object) -> str:
+        """Require one portable filename stem for an agent projection."""
+        if not isinstance(value, str) or not re.fullmatch(
+            r"[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,126}[A-Za-z0-9])?", value
+        ):
+            raise ValueError("agent name must be a canonical filename stem")
+        return value
+
 
 class TaskView(BaseModel):
     """A task enriched with derived status from agent claims."""
@@ -180,6 +190,22 @@ class Board:
         self.tasks_dir.mkdir(parents=True, exist_ok=True)
         self.agents_dir.mkdir(parents=True, exist_ok=True)
         self.archive_dir.mkdir(parents=True, exist_ok=True)
+
+    def agent_projection_path(self, name: str) -> Path:
+        """Resolve one canonical agent projection destination inside agents/."""
+        canonical = AgentFile.validate_agent_name(name)
+        if self.coord_dir.is_symlink() or self.agents_dir.is_symlink():
+            raise ValueError("agent projection directory must not be a symlink")
+        coordination = self.coord_dir.resolve(strict=True)
+        agents = self.agents_dir.resolve(strict=True)
+        try:
+            agents.relative_to(coordination)
+        except ValueError as exc:
+            raise ValueError("agent projection directory escapes coordination") from exc
+        path = agents / f"{canonical}.json"
+        if path.parent != agents:
+            raise ValueError("agent projection destination escapes the agents directory")
+        return path
 
     def archived_ids(self) -> set[str]:
         """Union of task ids archived by any writer.
@@ -256,10 +282,17 @@ class Board:
         agents: list[AgentFile] = []
         if not self.agents_dir.exists():
             return agents
+        if self.agents_dir.is_symlink() or not self.agents_dir.is_dir():
+            raise ValueError("agent projection directory must be a regular directory")
         for f in sorted(self.agents_dir.glob("*.json")):
             try:
+                if f.is_symlink() or not f.is_file():
+                    raise ValueError("agent projection must be a regular file")
                 data = json.loads(f.read_text(encoding="utf-8"))
-                agents.append(AgentFile.model_validate(data))
+                agent = AgentFile.model_validate(data)
+                if agent.agent != f.stem:
+                    raise ValueError("agent payload identity does not match its filename")
+                agents.append(agent)
             except Exception as exc:  # noqa: BLE001
                 # A dropped agent file loses that agent's claims/completions from
                 # the derived board status - surface it instead of swallowing.
@@ -276,11 +309,19 @@ class Board:
         Returns:
             AgentFile or None if not found.
         """
-        path = self.agents_dir / f"{name}.json"
+        canonical = AgentFile.validate_agent_name(name)
+        if not self.agents_dir.exists():
+            return None
+        path = self.agent_projection_path(canonical)
         if not path.exists():
             return None
+        if path.is_symlink() or not path.is_file():
+            raise ValueError("agent projection must be a regular file")
         data = json.loads(path.read_text(encoding="utf-8"))
-        return AgentFile.model_validate(data)
+        agent = AgentFile.model_validate(data)
+        if agent.agent != canonical:
+            raise ValueError("agent payload identity does not match its filename")
+        return agent
 
     def save_agent(self, agent: AgentFile) -> Path:
         """Write an agent's status file.
@@ -293,7 +334,9 @@ class Board:
         """
         self.ensure_dirs()
         agent.last_seen = datetime.now(timezone.utc).isoformat()
-        path = self.agents_dir / f"{agent.agent}.json"
+        path = self.agent_projection_path(agent.agent)
+        if path.is_symlink() or (path.exists() and not path.is_file()):
+            raise ValueError("agent projection destination must be a regular file")
         atomic_write_text(path, json.dumps(agent.model_dump(), indent=2) + "\n")
         return path
 
@@ -422,6 +465,8 @@ class Board:
         rubric_version: int = 1,
         confidence: float | None = None,
         pool: str = "private",
+        session_id: str | None = None,
+        node: str | None = None,
     ) -> Path:
         """Write a Joule Economy work grade onto a card (meta.grade).
 
@@ -480,7 +525,7 @@ class Board:
 
         def _mutate(d: dict) -> None:
             meta = d.setdefault("meta", {})
-            meta["grade"] = {
+            grade = {
                 "size": size,
                 "risk": risk,
                 "sensitivity": sensitivity,
@@ -494,6 +539,11 @@ class Board:
                 "pool": pool,
                 "graded_at": _now_iso(),
             }
+            if session_id is not None:
+                grade["session_id"] = session_id
+            if node is not None:
+                grade["node"] = node
+            meta["grade"] = grade
 
         return self._write_task_raw(task_id, _mutate)
 
@@ -962,18 +1012,22 @@ class Board:
                 self.archive_task(tid, by="age-backlog")
         return eligible
 
-    def claim_task(self, agent_name: str, task_id: str) -> AgentFile:
+    def claim_task(self, agent_name: str, task_id: str, force: bool = False) -> AgentFile:
         """Have an agent claim a task.
 
         Args:
             agent_name: The claiming agent's name.
             task_id: The task ID to claim.
+            force: When True, skip the dependency check (claim anyway).
+                The already-claimed/done gate is never overridden.
 
         Returns:
             Updated AgentFile.
 
         Raises:
-            ValueError: If task doesn't exist or is already claimed.
+            ValueError: If task doesn't exist, is owned by another agent in a
+                claimed/in_progress/review/done state, or has incomplete
+                dependencies (unless ``force`` is set).
         """
         views = self.get_task_views()
         target = None
@@ -984,10 +1038,53 @@ class Board:
 
         if target is None:
             raise ValueError(f"Task {task_id} not found")
-        if target.status in (TaskStatus.DONE, TaskStatus.CLAIMED, TaskStatus.IN_PROGRESS):
-            if target.claimed_by != agent_name:
+        # Kanban moves to ready/doing/review carry no owner, yet the card
+        # folds to CLAIMED/IN_PROGRESS/REVIEW with claimed_by None. The
+        # lifecycle reconciler only projects claims for cards WITH an owner
+        # (lifecycle.py), so an ownerless card in any of those states is
+        # unclaimed and claimable. cbca4c17 fixed this for ready; 47e8d509
+        # extends the same rule to doing/review (see also 257d6b9a on stale
+        # claim/kanban reconciliation). Only the claim gate relaxes: the card
+        # still SHOWS as doing/review on the board, so genuine WIP is not
+        # masked. OWNED cards in those states keep refusing a different
+        # claimant, and DONE refuses ownerless or not.
+        ownerless_active = (
+            target.claimed_by is None
+            and target.status
+            in (TaskStatus.CLAIMED, TaskStatus.IN_PROGRESS, TaskStatus.REVIEW)
+        )
+        if (
+            target.status
+            in (
+                TaskStatus.DONE,
+                TaskStatus.CLAIMED,
+                TaskStatus.IN_PROGRESS,
+                TaskStatus.REVIEW,
+            )
+            and not ownerless_active
+            and target.claimed_by != agent_name
+        ):
+            raise ValueError(
+                f"Task {task_id} already {target.status.value} by "
+                f"{target.claimed_by or 'unknown owner'}"
+            )
+        if target.task.dependencies and not force:
+            # Dependency statuses are looked up across archived tasks too, so a
+            # dependency that was completed and later archived still counts as
+            # done. An unknown dependency ID (no card anywhere) is treated as
+            # incomplete: fail closed, and let force=True be the escape hatch.
+            dep_views = {
+                v.task.id: v for v in self.get_task_views(include_archived=True)
+            }
+            incomplete = [
+                dep_id
+                for dep_id in target.task.dependencies
+                if dep_id not in dep_views or dep_views[dep_id].status != TaskStatus.DONE
+            ]
+            if incomplete:
                 raise ValueError(
-                    f"Task {task_id} already {target.status.value} by {target.claimed_by}"
+                    f"Task {task_id} has incomplete dependencies: "
+                    f"{', '.join(incomplete)} (use force to claim anyway)"
                 )
 
         agent = self.load_agent(agent_name) or AgentFile(agent=agent_name)

@@ -1,0 +1,7 @@
+{
+  "change_id": "chg-a76c0aee",
+  "agent": "jarvis",
+  "decision": "approved",
+  "conditions": "Authorized by the human owner in the active Codex session. Begin with chiwk12 WSL2 only. Do not touch dirty/divergent worktrees, regenerate CapAuth identity, copy secrets/state between hosts, or restart unaffected services. Preserve the current Jarvis fingerprint and memory state. Stop on any identity, memory, MCP, sync, or duplicate-writer regression; require successful canary and human Windows-client acceptance before chiap04 or broader estate waves.",
+  "decided_at": "2026-08-20T22:07:08.455062+00:00"
+}

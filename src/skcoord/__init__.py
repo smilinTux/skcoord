@@ -39,6 +39,15 @@ from .coordination import (
     get_briefing_json,
     get_briefing_text,
 )
+from .lifecycle import (
+    LifecycleAudit,
+    LifecycleConflictError,
+    LifecycleIssue,
+    LifecycleRepairReceipt,
+    audit_lifecycle,
+    repair_lifecycle,
+    transition_task,
+)
 
 __all__ = [
     "AgentCapability",
@@ -52,12 +61,19 @@ __all__ = [
     "Column",
     "KanbanBoard",
     "Kind",
+    "LifecycleAudit",
+    "LifecycleConflictError",
+    "LifecycleIssue",
+    "LifecycleRepairReceipt",
     "Task",
     "TaskPriority",
     "TaskStatus",
     "TaskView",
     "atomic_write_text",
+    "audit_lifecycle",
     "get_briefing_json",
     "get_briefing_text",
     "render_html",
+    "repair_lifecycle",
+    "transition_task",
 ]

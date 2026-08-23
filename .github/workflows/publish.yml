@@ -2,6 +2,7 @@ name: Publish to PyPI
 
 on:
   push:
+    branches: ["main"]
     tags: ["v*"]
   workflow_dispatch:
 
@@ -146,12 +147,10 @@ jobs:
 
   pypi-publish:
     needs: build
-    # Same `always()` guard the build job needs, and for the same reason one
-    # level further down. GitHub propagates a skip THROUGH a job: `tag` is
-    # skipped on the tag-push path, `build` survives it with always(), but a
-    # bare `needs: build` here still evaluates to skipped. Since PR #4 made the
-    # trigger tags-only, `tag` can never run, so this job could never run
-    # either: v0.1.4 built cleanly, passed every guard, and published nothing.
+    # Publish in the same run that cut the tag. GitHub deliberately does not
+    # start another workflow when a workflow pushes a tag with GITHUB_TOKEN,
+    # so waiting for a second tag-push run leaves a green build unpublished.
+    # A manually pushed tag follows the same build -> publish graph directly.
     if: >-
       always() && !cancelled() && needs.build.result == 'success'
     runs-on: ubuntu-latest

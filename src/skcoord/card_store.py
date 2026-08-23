@@ -318,6 +318,7 @@ class CardStore:
             priority=core.get("initial_priority", "medium"),
             originator=core.get("created_by", ""),
             labels=list(core.get("initial_labels", [])),
+            acceptance_criteria=list(core.get("acceptance_criteria", []) or []),
             dependencies=list(core.get("dependencies", [])),
             meta=dict(core.get("meta", {})),
             created_at=core.get("created_at", ""),
@@ -366,6 +367,8 @@ class CardStore:
                     card.title = e["title"]
                 if e.get("description") is not None:
                     card.description = e["description"]
+            elif action == "amend_criteria" and isinstance(e.get("criteria"), list):
+                card.acceptance_criteria = list(e["criteria"])
             elif action == "note" and e.get("text"):
                 card.meta.setdefault("comments", []).append(
                     {"ts": e.get("ts"), "writer": e.get("writer"), "text": e["text"]}
@@ -568,6 +571,7 @@ def task_views_from_store(home: Path, include_archived: bool = False) -> list:
             tags=list(c.labels),
             created_by=c.originator,
             created_at=c.created_at,
+            acceptance_criteria=list(c.acceptance_criteria),
             dependencies=list(c.dependencies),
             meta=dict(c.meta),
         )
@@ -699,6 +703,7 @@ def parity_check(home: Path, open_drift_threshold: int = OPEN_DRIFT_THRESHOLD) -
         }.get(status_value, status_value)
 
     mismatches: list[dict] = []
+    informational: list[dict] = []
     missing: list[str] = []
     matched = 0
     for cid, lc in legacy.items():
@@ -706,6 +711,9 @@ def parity_check(home: Path, open_drift_threshold: int = OPEN_DRIFT_THRESHOLD) -
         if sc is None:
             missing.append(cid)
             continue
+        # GATING diffs: state the mirror is supposed to keep in step, and that
+        # reconcile_from_legacy() can actually converge. A diff here means the
+        # mirror is genuinely broken.
         diff = {}
         if _bucket(lc.status.value) != _bucket(sc.status.value):
             diff["status"] = [lc.status.value, sc.status.value]
@@ -713,14 +721,31 @@ def parity_check(home: Path, open_drift_threshold: int = OPEN_DRIFT_THRESHOLD) -
             diff["owner"] = [lc.owner, sc.owner]
         if lc.archived != sc.archived:
             diff["archived"] = [lc.archived, sc.archived]
+
+        # INFORMATIONAL diffs: priority and swimlane are written STORE-ONLY by
+        # the dashboard, so legacy is the stale side by design and
+        # reconcile_from_legacy() deliberately refuses to touch them (see its
+        # docstring). Counting them as gate failures made the gate
+        # UNSATISFIABLE: it reported a drift class that no legitimate action
+        # could clear, so `parity --check` could sit red forever with nothing to
+        # do about it. A gate nobody can satisfy is a gate everybody learns to
+        # ignore, and then it is not a gate at all.
+        #
+        # They are still REPORTED, just not fatal. Removing a signal the tool
+        # knows is false is not the same as weakening the check; hiding it
+        # entirely would be.
+        info = {}
         if lc.priority != sc.priority:
-            diff["priority"] = [lc.priority, sc.priority]
+            info["priority"] = [lc.priority, sc.priority]
         if lc.swimlane != sc.swimlane:
-            diff["swimlane"] = [lc.swimlane, sc.swimlane]
+            info["swimlane"] = [lc.swimlane, sc.swimlane]
+
         if diff:
             mismatches.append({"id": cid, "diff": diff})
         else:
             matched += 1
+        if info:
+            informational.append({"id": cid, "diff": info})
     open_legacy = _open_count(legacy)
     open_store = _open_count(stored)
     open_drift = abs(open_legacy - open_store)
@@ -728,6 +753,7 @@ def parity_check(home: Path, open_drift_threshold: int = OPEN_DRIFT_THRESHOLD) -
         "checked": len(legacy),
         "matched": matched,
         "mismatches": mismatches,
+        "informational": informational,
         "missing": missing,
         "open_legacy": open_legacy,
         "open_store": open_store,
@@ -737,7 +763,22 @@ def parity_check(home: Path, open_drift_threshold: int = OPEN_DRIFT_THRESHOLD) -
     }
 
 
-def reconcile_from_legacy(home: Path, dry_run: bool = True) -> dict:
+def _would_uncomplete(diff: dict) -> bool:
+    """True when converging this diff onto legacy would move a card OUT of done.
+
+    ``diff`` maps field -> ``[legacy_value, store_value]``. Only status can
+    un-complete: the archived/reopen branch targets ``diff["status"][0]`` too,
+    so if status is absent the two sides already agree and nothing moves.
+    """
+    if "status" not in diff:
+        return False
+    legacy_status, store_status = diff["status"][0], diff["status"][1]
+    return store_status == Column.DONE.value and legacy_status != Column.DONE.value
+
+
+def reconcile_from_legacy(
+    home: Path, dry_run: bool = True, allow_uncomplete: bool = False
+) -> dict:
     """One-time repair: append corrective store events where the fold still
     diverges from the authoritative legacy board.
 
@@ -753,15 +794,34 @@ def reconcile_from_legacy(home: Path, dry_run: bool = True) -> dict:
 
     Additive and idempotent: pure appends, and a second run finds no diffs.
 
+    NEVER un-completes work. This routine converges the store ONTO legacy, a
+    premise that was safe before the Phase-4 read cutover and is not safe now:
+    the board is served FROM the store, so legacy is a projection that lags, and
+    a card completed in the store but not yet reflected in legacy looks
+    identical to real drift. Converging that card would move it out of ``done``
+    and the parity gate would go green BECAUSE the completion was destroyed.
+    Observed live on card b24c71b5 on 2026-08-17 (store had a real ``complete``
+    event; legacy still said ``ready``). So a card whose STORE state is ``done``
+    is skipped entirely, not partially converged, and reported for a human.
+    ``allow_uncomplete=True`` opts back in once a direction of authority is
+    decided (see card be8d5561).
+
     Returns:
-        dict: ``{"fixed": n}`` or ``{"would_fix": n}`` when dry_run.
+        dict: ``{"fixed": n}`` or ``{"would_fix": n}`` when dry_run, plus
+        ``{"skipped_uncomplete": [ids]}``.
     """
     par = parity_check(home)
     store = CardStore(home)
     count = 0
+    skipped: list[str] = []
     for m in par["mismatches"]:
         cid = m["id"]
         diff = m["diff"]
+        # Guard BEFORE building actions, so a done card is skipped whole rather
+        # than having its owner rewritten while its status is left alone.
+        if not allow_uncomplete and _would_uncomplete(diff):
+            skipped.append(cid)
+            continue
         actions: list[tuple[str, dict]] = []
         if "archived" in diff:
             legacy_archived = diff["archived"][0]
@@ -786,7 +846,8 @@ def reconcile_from_legacy(home: Path, dry_run: bool = True) -> dict:
             continue
         for action, payload in actions:
             store.append_event(cid, action, "reconcile", **payload)
-    return {"would_fix": count} if dry_run else {"fixed": count}
+    key = "would_fix" if dry_run else "fixed"
+    return {key: count, "skipped_uncomplete": skipped}
 
 
 # Column -> legacy coord status. Legacy has no 'review' state (its status is
@@ -821,7 +882,8 @@ def export_to_legacy(home: Path, dry_run: bool = False) -> dict:
       that have no legacy file yet (i.e. cards born after retirement). Existing
       task files are left untouched -- they are immutable and carry richer
       fields (``notes``) the store does not model. ``acceptance_criteria`` for a
-      synthesized file is recovered from the card's ``core.json``.
+      synthesized file comes from the current folded card projection, so a
+      rollback preserves the latest accepted amendment.
     * **Agent files** (the mutable status layer) are rebuilt: the coord
       task-status fields (``current_task``, ``claimed_tasks``,
       ``completed_tasks``) are recomputed from the store, while identity fields
@@ -869,7 +931,6 @@ def export_to_legacy(home: Path, dry_run: bool = False) -> dict:
             priority = TaskPriority(c.priority)
         except ValueError:
             priority = TaskPriority.MEDIUM
-        core = store._load_core(c.id) or {}
         task = Task(
             id=c.id,
             title=c.title,
@@ -878,7 +939,7 @@ def export_to_legacy(home: Path, dry_run: bool = False) -> dict:
             tags=list(c.labels),
             created_by=c.originator,
             created_at=c.created_at or _now_iso(),
-            acceptance_criteria=list(core.get("acceptance_criteria", []) or []),
+            acceptance_criteria=list(c.acceptance_criteria),
             dependencies=list(c.dependencies),
         )
         tasks_written += 1

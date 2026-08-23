@@ -18,7 +18,9 @@ import json
 import logging
 import os
 import re
+import shutil
 import socket
+import tempfile
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
@@ -29,6 +31,18 @@ from pydantic import BaseModel, Field
 logger = logging.getLogger("skcapstone.cmdb")
 
 _HOST = socket.gethostname()
+CMDB_CORE_SCHEMA_VERSION = 2
+CMDB_EVENT_SCHEMA_VERSION = 2
+SECRET_ATTRIBUTE_KEY_FRAGMENTS = (
+    "secret",
+    "password",
+    "passphrase",
+    "token",
+    "credential",
+    "private_key",
+    "api_key",
+    "authorization",
+)
 
 
 class CIType(str, Enum):
@@ -39,6 +53,7 @@ class CIType(str, Enum):
     PORT = "port"
     DATASTORE = "datastore"
     NETWORK = "network"
+    DEVICE = "device"
 
 
 class CIStatus(str, Enum):
@@ -51,6 +66,85 @@ class CIStatus(str, Enum):
 class Relationship(BaseModel):
     rel_type: str = "depends_on"  # depends_on | runs_on | hosts | connects_to
     target: str  # target CI id
+    authority: str = ""
+
+
+ALLOWED_RELATIONSHIPS: dict[str, set[str]] = {
+    "depends_on": {item.value for item in CIType},
+    "runs_on": {CIType.HOST.value},
+    "hosts": {item.value for item in CIType},
+    "connects_to": {item.value for item in CIType},
+    # Identity reconciliation preserves an old record as an alias instead of
+    # rewriting its write-once core.
+    "alias_of": {CIType.HOST.value, CIType.DEVICE.value},
+}
+
+
+class FutureSchemaVersionError(ValueError):
+    """The store contains data newer than this reader understands."""
+
+
+class SecretAttributeKeyError(ValueError):
+    """A CMDB write attempted to persist a secret-looking attribute key."""
+
+
+def is_secret_attribute_key(key: object) -> bool:
+    """Return whether *key* contains a denied secret-key fragment.
+
+    Matching is deliberately case-insensitive and substring-based. This errs on
+    the safe side for the append-only CMDB: names such as ``csrf_token_name``
+    are rejected along with ``API_TOKEN`` rather than relying on callers to
+    classify whether the associated value is itself sensitive.
+    """
+    lowered = str(key).lower()
+    return any(fragment in lowered for fragment in SECRET_ATTRIBUTE_KEY_FRAGMENTS)
+
+
+def _secret_attribute_paths(value: object, path: str = "attributes") -> list[str]:
+    """Return secret-looking mapping-key paths without inspecting string values."""
+    findings: list[str] = []
+    if isinstance(value, dict):
+        for raw_key, child in value.items():
+            key = str(raw_key)
+            child_path = f"{path}.{key}"
+            if is_secret_attribute_key(key):
+                findings.append(child_path)
+            findings.extend(_secret_attribute_paths(child, child_path))
+    elif isinstance(value, (list, tuple)):
+        for index, child in enumerate(value):
+            findings.extend(_secret_attribute_paths(child, f"{path}[{index}]"))
+    return findings
+
+
+def _validate_attribute_write(value: object, *, ci_id: str, agent: str) -> None:
+    """Reject secret-looking attribute keys before an immutable write occurs."""
+    findings = _secret_attribute_paths(value)
+    if not findings:
+        return
+    logger.warning(
+        "CMDB secret-looking attribute key rejected (ci_id=%s agent=%s paths=%s)",
+        ci_id,
+        agent,
+        ",".join(findings),
+    )
+    raise SecretAttributeKeyError(
+        "CMDB attributes contain forbidden secret-looking key(s): " + ", ".join(findings)
+    )
+
+
+def _schema_version(value: Any, *, supported: int, record: str) -> int:
+    """Parse a schema version and reject future data instead of mis-folding it."""
+    try:
+        version = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"invalid schema_version for {record}: {value!r}") from exc
+    if version < 1:
+        raise ValueError(f"invalid schema_version for {record}: {version}")
+    if version > supported:
+        raise FutureSchemaVersionError(
+            f"{record} schema v{version} is newer than supported v{supported}"
+        )
+    return version
 
 
 class ConfigItem(BaseModel):
@@ -66,6 +160,8 @@ class ConfigItem(BaseModel):
     tags: list[str] = Field(default_factory=list)
     created_at: str = ""
     updated_at: str = ""
+    schema_version: int = 1
+    tag_authorities: dict[str, str] = Field(default_factory=dict, exclude=True)
 
 
 def _now_iso() -> str:
@@ -110,16 +206,19 @@ class CMDBManager:
         ci_id: Optional[str] = None,
     ) -> ConfigItem:
         """Create (or return existing) a CI. Write-once core, idempotent by id."""
-        self.ensure_dirs()
         cid = ci_id or make_ci_id(ci_type, name)
+        clean_attributes = attributes or {}
+        _validate_attribute_write(clean_attributes, ci_id=cid, agent="create")
+        self.ensure_dirs()
         core = {
+            "schema_version": CMDB_CORE_SCHEMA_VERSION,
             "id": cid,
             "ci_type": ci_type,
             "name": name,
             "description": description,
             "owner": owner,
             "node": node,
-            "attributes": attributes or {},
+            "attributes": clean_attributes,
             "tags": tags or [],
             "created_at": _now_iso(),
         }
@@ -148,6 +247,7 @@ class CMDBManager:
                 fh.seek(0)
                 seq = sum(1 for _ in fh)
                 event = {
+                    "schema_version": CMDB_EVENT_SCHEMA_VERSION,
                     "ts": _now_iso(),
                     "writer": agent,
                     "node": _HOST,
@@ -165,13 +265,28 @@ class CMDBManager:
         self._append(ci_id, agent, "status", status=status, note=note)
 
     def set_attribute(self, ci_id: str, agent: str, key: str, value: Any) -> None:
+        _validate_attribute_write({key: value}, ci_id=ci_id, agent=agent)
         self._append(ci_id, agent, "attribute", key=key, value=value)
 
-    def add_relationship(self, ci_id: str, agent: str, rel_type: str, target: str) -> None:
-        self._append(ci_id, agent, "relate", rel_type=rel_type, target=target)
+    def add_relationship(
+        self, ci_id: str, agent: str, rel_type: str, target: str, authority: str = ""
+    ) -> None:
+        self._append(ci_id, agent, "relate", rel_type=rel_type, target=target, authority=authority)
 
     def remove_relationship(self, ci_id: str, agent: str, rel_type: str, target: str) -> None:
         self._append(ci_id, agent, "unrelate", rel_type=rel_type, target=target)
+
+    def set_metadata(self, ci_id: str, agent: str, key: str, value: str) -> None:
+        """Update a mutable display/placement field without rewriting core.json."""
+        if key not in {"name", "description", "owner", "node"}:
+            raise ValueError(f"unsupported mutable metadata field: {key}")
+        self._append(ci_id, agent, "metadata", key=key, value=value)
+
+    def add_tag(self, ci_id: str, agent: str, tag: str, authority: str = "") -> None:
+        self._append(ci_id, agent, "tag", tag=tag, authority=authority)
+
+    def remove_tag(self, ci_id: str, agent: str, tag: str, authority: str = "") -> None:
+        self._append(ci_id, agent, "untag", tag=tag, authority=authority)
 
     # ── reads ─────────────────────────────────────────────────────────────
 
@@ -185,9 +300,17 @@ class CMDBManager:
                 line = line.strip()
                 if line:
                     try:
-                        out.append(json.loads(line))
+                        event = json.loads(line)
                     except ValueError:
                         continue
+                    if not isinstance(event, dict):
+                        continue
+                    _schema_version(
+                        event.get("schema_version", 1),
+                        supported=CMDB_EVENT_SCHEMA_VERSION,
+                        record=f"event {f.name}",
+                    )
+                    out.append(event)
         out.sort(key=lambda e: (e.get("ts", ""), e.get("writer", ""), e.get("seq", 0)))
         return out
 
@@ -199,6 +322,11 @@ class CMDBManager:
             core = json.loads(core_path.read_text(encoding="utf-8"))
         except ValueError:
             return None
+        version = _schema_version(
+            core.get("schema_version", 1),
+            supported=CMDB_CORE_SCHEMA_VERSION,
+            record=f"CI {ci_id}",
+        )
         ci = ConfigItem(
             id=core["id"],
             ci_type=core.get("ci_type", "service"),
@@ -209,6 +337,9 @@ class CMDBManager:
             attributes=dict(core.get("attributes", {})),
             tags=list(core.get("tags", [])),
             created_at=core.get("created_at", ""),
+            # Version 1 is the deployed, unversioned format.  Missing is not
+            # corruption: it is the explicit backwards-compatible migration.
+            schema_version=version,
         )
         for e in self._read_events(ci_id):
             act = e.get("action")
@@ -218,9 +349,16 @@ class CMDBManager:
                 ci.attributes[e["key"]] = e.get("value")
             elif act == "relate":
                 rel = Relationship(
-                    rel_type=e.get("rel_type", "depends_on"), target=e.get("target", "")
+                    rel_type=e.get("rel_type", "depends_on"),
+                    target=e.get("target", ""),
+                    authority=e.get("authority", ""),
                 )
-                if rel.target and rel not in ci.relationships:
+                if rel.target:
+                    ci.relationships = [
+                        current
+                        for current in ci.relationships
+                        if not (current.rel_type == rel.rel_type and current.target == rel.target)
+                    ]
                     ci.relationships.append(rel)
             elif act == "unrelate":
                 ci.relationships = [
@@ -228,8 +366,211 @@ class CMDBManager:
                     for r in ci.relationships
                     if not (r.rel_type == e.get("rel_type") and r.target == e.get("target"))
                 ]
+            elif act == "metadata" and e.get("key") in {
+                "name",
+                "description",
+                "owner",
+                "node",
+            }:
+                setattr(ci, e["key"], str(e.get("value", "")))
+            elif act == "tag" and e.get("tag"):
+                tag = str(e["tag"])
+                if tag not in ci.tags:
+                    ci.tags.append(tag)
+                if e.get("authority"):
+                    ci.tag_authorities[tag] = str(e["authority"])
+            elif act == "untag" and e.get("tag"):
+                tag = str(e["tag"])
+                if not e.get("authority") or ci.tag_authorities.get(tag) == e.get("authority"):
+                    ci.tags = [item for item in ci.tags if item != tag]
+                    ci.tag_authorities.pop(tag, None)
             ci.updated_at = e.get("ts", ci.updated_at)
         return ci
+
+    def migration_preview(self, ci_id: str) -> dict[str, Any]:
+        """Return a detached v2 representation without modifying the store.
+
+        This is the safe primitive for a v1-to-v2 migration command: callers
+        can validate and write the returned copy to a separate destination
+        before any cutover. Future-version records fail closed.
+        """
+        core_path = self.cmdb_dir / ci_id / "core.json"
+        if not core_path.exists():
+            raise KeyError(ci_id)
+        core = json.loads(core_path.read_text(encoding="utf-8"))
+        if not isinstance(core, dict):
+            raise ValueError(f"invalid core for CI {ci_id}")
+        source_version = _schema_version(
+            core.get("schema_version", 1),
+            supported=CMDB_CORE_SCHEMA_VERSION,
+            record=f"CI {ci_id}",
+        )
+        migrated_core = dict(core)
+        migrated_core["schema_version"] = CMDB_CORE_SCHEMA_VERSION
+        events = []
+        for event in self._read_events(ci_id):
+            migrated = dict(event)
+            migrated["schema_version"] = CMDB_EVENT_SCHEMA_VERSION
+            events.append(migrated)
+        return {
+            "ci_id": ci_id,
+            "source_schema_version": source_version,
+            "target_schema_version": CMDB_CORE_SCHEMA_VERSION,
+            "core": migrated_core,
+            "events": events,
+        }
+
+    def migrate_schema(
+        self,
+        *,
+        apply: bool = False,
+        backup_path: Optional[Path] = None,
+    ) -> dict[str, Any]:
+        """Safely migrate the physical CMDB store from schema v1 to v2.
+
+        Dry-run is the default and performs no filesystem writes.  Applying a
+        migration copies the complete store to a same-filesystem staging
+        directory, rewrites and validates the staged copy, then atomically
+        renames the original to a retained backup and the staging directory
+        into place.  A failure during cutover restores the original path.
+
+        Records already at v2 are left byte-for-byte alone, making repeated
+        calls idempotent.  Unknown future versions and malformed records abort
+        before the live store is renamed.
+        """
+        plan = self._schema_migration_plan()
+        result: dict[str, Any] = {
+            "applied": False,
+            "source": str(self.cmdb_dir),
+            "target_schema_version": CMDB_CORE_SCHEMA_VERSION,
+            **plan,
+        }
+        if not apply or plan["records_to_migrate"] == 0:
+            return result
+
+        parent = self.cmdb_dir.parent
+        parent.mkdir(parents=True, exist_ok=True)
+        backup = Path(backup_path).expanduser() if backup_path else parent / (
+            f"cmdb.backup-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ')}"
+        )
+        if backup.parent != parent:
+            raise ValueError("backup_path must share the CMDB parent filesystem")
+        if backup.exists():
+            raise FileExistsError(f"backup path already exists: {backup}")
+
+        lock_path = parent / ".cmdb-schema-migration.lock"
+        with open(lock_path, "a+", encoding="utf-8") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            # Re-plan under the lock so a concurrent writer cannot invalidate
+            # the dry-run result used to decide whether migration is needed.
+            plan = self._schema_migration_plan()
+            result.update(plan)
+            if plan["records_to_migrate"] == 0:
+                return result
+            staging = Path(tempfile.mkdtemp(prefix=".cmdb-migrate-", dir=parent))
+            shutil.rmtree(staging)
+            moved_original = False
+            try:
+                shutil.copytree(self.cmdb_dir, staging, symlinks=True)
+                staged = CMDBManager(parent)
+                staged.cmdb_dir = staging
+                staged._rewrite_schema_v2()
+                staged_plan = staged._schema_migration_plan()
+                if staged_plan["records_to_migrate"]:
+                    raise RuntimeError("staged CMDB did not converge to schema v2")
+                # Folding every CI validates both core and event records.
+                staged.list_cis()
+                os.rename(self.cmdb_dir, backup)
+                moved_original = True
+                try:
+                    os.rename(staging, self.cmdb_dir)
+                except BaseException:
+                    os.rename(backup, self.cmdb_dir)
+                    moved_original = False
+                    raise
+                result.update(applied=True, backup=str(backup))
+                return result
+            finally:
+                if staging.exists():
+                    shutil.rmtree(staging)
+                if moved_original and not self.cmdb_dir.exists() and backup.exists():
+                    os.rename(backup, self.cmdb_dir)
+
+    def _schema_migration_plan(self) -> dict[str, Any]:
+        """Validate all physical records and report the v1 work required."""
+        records = cores = events = 0
+        if not self.cmdb_dir.exists():
+            return {"records": 0, "records_to_migrate": 0, "cores": 0, "events": 0}
+        for record in sorted(self.cmdb_dir.iterdir()):
+            core_path = record / "core.json"
+            if not record.is_dir() or not core_path.exists():
+                continue
+            if record.is_symlink() or core_path.is_symlink():
+                raise ValueError(f"refusing symlinked CMDB record: {record}")
+            core = json.loads(core_path.read_text(encoding="utf-8"))
+            if not isinstance(core, dict):
+                raise ValueError(f"invalid core for CI {record.name}")
+            version = _schema_version(
+                core.get("schema_version", 1),
+                supported=CMDB_CORE_SCHEMA_VERSION,
+                record=f"CI {record.name}",
+            )
+            records += 1
+            if version < CMDB_CORE_SCHEMA_VERSION:
+                cores += 1
+            event_dir = record / "events"
+            if event_dir.exists():
+                for path in sorted(event_dir.glob("*.jsonl")):
+                    if path.is_symlink():
+                        raise ValueError(f"refusing symlinked CMDB event: {path}")
+                    for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                        if not line.strip():
+                            continue
+                        event = json.loads(line)
+                        if not isinstance(event, dict):
+                            raise ValueError(f"invalid event {path}:{number}")
+                        version = _schema_version(
+                            event.get("schema_version", 1),
+                            supported=CMDB_EVENT_SCHEMA_VERSION,
+                            record=f"event {path.name}:{number}",
+                        )
+                        if version < CMDB_EVENT_SCHEMA_VERSION:
+                            events += 1
+        return {
+            "records": records,
+            "records_to_migrate": cores + events,
+            "cores": cores,
+            "events": events,
+        }
+
+    def _rewrite_schema_v2(self) -> None:
+        """Rewrite v1 records in a staging tree; never call on the live tree."""
+        for record in sorted(self.cmdb_dir.iterdir()):
+            core_path = record / "core.json"
+            if not record.is_dir() or not core_path.exists():
+                continue
+            core = json.loads(core_path.read_text(encoding="utf-8"))
+            if int(core.get("schema_version", 1)) < CMDB_CORE_SCHEMA_VERSION:
+                core["schema_version"] = CMDB_CORE_SCHEMA_VERSION
+                core_path.write_text(json.dumps(core, indent=2, default=str) + "\n", encoding="utf-8")
+            event_dir = record / "events"
+            if not event_dir.exists():
+                continue
+            for path in sorted(event_dir.glob("*.jsonl")):
+                output = []
+                changed = False
+                for line in path.read_text(encoding="utf-8").splitlines():
+                    if not line.strip():
+                        output.append(line)
+                        continue
+                    event = json.loads(line)
+                    if int(event.get("schema_version", 1)) < CMDB_EVENT_SCHEMA_VERSION:
+                        event["schema_version"] = CMDB_EVENT_SCHEMA_VERSION
+                        line = json.dumps(event, default=str)
+                        changed = True
+                    output.append(line)
+                if changed:
+                    path.write_text("\n".join(output) + "\n", encoding="utf-8")
 
     def list_cis(self, ci_type: Optional[str] = None) -> list[ConfigItem]:
         if not self.cmdb_dir.exists():
@@ -248,75 +589,27 @@ class CMDBManager:
         return self.get_ci(cid)
 
     def seed_from_inventory(self, agent: str = "cmdb-seed") -> dict:
-        """Auto-populate CIs from the fleet + ITIL data (idempotent).
+        """Compatibility bridge to the versioned discovery reconciler.
 
-        Creates host CIs for the known nodes, agent CIs, and a service CI for
-        every service referenced by an ITIL incident, wiring services to run on
-        their host and reflecting current incident status as CI health.
+        This method remains only for older dashboard clients that still call
+        ``POST /api/cmdb/seed``. It imports declared fleet, registry, and agent
+        sources through the same schema-driven reconciler as the supported CLI;
+        it never invents hosts or derives asset health from ITIL incidents.
         """
-        hosts = {
-            "noroc2027": {"desc": ".158 primary / dev source-of-truth", "ip": "192.168.0.158"},
-            "cbrd21-laptop12thgenintelcore": {
-                "desc": ".41 heavy-build mirror",
-                "ip": "192.168.0.41",
-            },
-            "comfyui": {
-                "desc": ".100 GPU (RTX 5060 Ti) / LLM + embeddings",
-                "ip": "192.168.0.100",
-            },
-        }
-        created = 0
-        for name, meta in hosts.items():
-            self.create_ci(
-                name,
-                CIType.HOST.value,
-                description=meta["desc"],
-                attributes={"ip": meta["ip"]},
-                tags=["fleet"],
-            )
-            created += 1
-        for a in ("lumina", "opus", "jarvis"):
-            self.create_ci(
-                a,
-                CIType.AGENT.value,
-                description=f"{a} sovereign agent",
-                node="noroc2027",
-                tags=["agent"],
-            )
-            created += 1
+        from .discovery import reconcile, scan
 
-        # Service CIs from ITIL incident affected_services; health from open incidents.
-        services: dict[str, str] = {}  # service -> worst open severity
-        try:
-            from .itil import ITILManager
-
-            mgr = ITILManager(self.home)
-            rank = {"sev1": 0, "sev2": 1, "sev3": 2, "sev4": 3}
-            for inc in mgr.list_incidents():
-                open_ = inc.status.value not in ("resolved", "closed")
-                for svc in inc.affected_services or []:
-                    if open_:
-                        cur = services.get(svc)
-                        if cur is None or rank.get(inc.severity.value, 9) < rank.get(cur, 9):
-                            services[svc] = inc.severity.value
-                    else:
-                        services.setdefault(svc, None)
-        except Exception:  # noqa: BLE001
-            pass
-        for svc, worst in services.items():
-            ci = self.create_ci(svc, CIType.SERVICE.value, node="noroc2027", tags=["service"])
-            status = (
-                CIStatus.DOWN.value
-                if worst in ("sev1", "sev2")
-                else CIStatus.DEGRADED.value if worst == "sev3" else CIStatus.OPERATIONAL.value
-            )
-            if ci and ci.status != status:
-                self.set_status(ci.id, agent, status, note="from incident health")
-            self.add_relationship(
-                ci.id, agent, "runs_on", make_ci_id(CIType.HOST.value, "noroc2027")
-            )
-            created += 1
-        return {"cis": len(self.list_cis()), "touched": created}
+        discovered = scan(self.home, runners=(), include_declared=True)
+        report = reconcile(self, discovered, agent=agent, apply=True, scan_complete=False)
+        result = report.as_dict()
+        result.update(
+            {
+                "schema": "skcoord.cmdb.compat-seed/v1",
+                "deprecated": True,
+                "cis": len(self.list_cis()),
+                "touched": len(report.created) + len(report.updated),
+            }
+        )
+        return result
 
     def impact_analysis(self, ci_id: str) -> dict:
         """What depends on this CI (cascade) + which open incidents affect it."""
@@ -357,3 +650,79 @@ class CMDBManager:
         except Exception:  # noqa: BLE001
             pass
         return {"ci": ci.model_dump(), "dependents": dependents, "open_incidents": incidents}
+
+    def audit_relationships(self) -> list[dict[str, Any]]:
+        """Return deterministic relationship-integrity findings without writing."""
+        cis = {ci.id: ci for ci in self.list_cis()}
+        findings: list[dict[str, Any]] = []
+        for source_id in sorted(cis):
+            source = cis[source_id]
+            for rel in sorted(source.relationships, key=lambda r: (r.rel_type, r.target)):
+                target = cis.get(rel.target)
+                base = {"source": source_id, "relationship": rel.rel_type, "target": rel.target}
+                if target is None:
+                    findings.append({"kind": "dangling_target", **base})
+                    continue
+                if source_id == rel.target:
+                    findings.append({"kind": "self_edge", **base})
+                allowed = ALLOWED_RELATIONSHIPS.get(rel.rel_type)
+                if allowed is None:
+                    findings.append({"kind": "unknown_relationship", **base})
+                elif target.ci_type not in allowed:
+                    findings.append(
+                        {"kind": "invalid_target_type", **base, "target_type": target.ci_type}
+                    )
+        return findings
+
+    def impact_graph(self, ci_id: str, max_depth: int = 8, max_nodes: int = 1000) -> dict:
+        """Return transitive dependents with cycle and fan-out protection."""
+        if max_depth < 0 or max_nodes < 1:
+            raise ValueError("max_depth must be >= 0 and max_nodes must be >= 1")
+        cis = {ci.id: ci for ci in self.list_cis()}
+        if ci_id not in cis:
+            return {"error": "CI not found", "id": ci_id}
+        reverse: dict[str, list[tuple[str, str]]] = {}
+        for source in cis.values():
+            for rel in source.relationships:
+                if rel.rel_type in ("depends_on", "runs_on"):
+                    reverse.setdefault(rel.target, []).append((source.id, rel.rel_type))
+        queue: list[tuple[str, int, tuple[str, ...]]] = [(ci_id, 0, (ci_id,))]
+        seen = {ci_id}
+        nodes: list[dict[str, Any]] = []
+        cycles: list[list[str]] = []
+        truncated = False
+        while queue:
+            target, depth, path = queue.pop(0)
+            if depth >= max_depth:
+                truncated = truncated or bool(reverse.get(target))
+                continue
+            for source_id, rel_type in sorted(reverse.get(target, [])):
+                if source_id in path:
+                    cycles.append([*path, source_id])
+                    continue
+                if source_id in seen:
+                    continue
+                if len(nodes) >= max_nodes:
+                    truncated = True
+                    queue.clear()
+                    break
+                seen.add(source_id)
+                source = cis[source_id]
+                nodes.append(
+                    {
+                        "id": source_id,
+                        "name": source.name,
+                        "ci_type": source.ci_type,
+                        "rel": rel_type,
+                        "depth": depth + 1,
+                    }
+                )
+                queue.append((source_id, depth + 1, (*path, source_id)))
+        return {
+            "id": ci_id,
+            "dependents": nodes,
+            "cycles": cycles,
+            "truncated": truncated,
+            "max_depth": max_depth,
+            "max_nodes": max_nodes,
+        }
