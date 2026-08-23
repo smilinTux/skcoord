@@ -91,9 +91,16 @@ def collect_fleet_objects(home: Path) -> list[DiscoveredCI]:
                     # expected to have a running unit, timer or container.
                     "fleet_kind": obj.get("kind"),
                     "cli": spec.get("cli"),
+                    "unit": spec.get("unit"),
                 }.items()
                 if v is not None
             }
+            # spec.unit names the systemd unit this Service actually runs as
+            # (e.g. skgateway-claude-wrapper -> claude-code-api.service). It
+            # was recorded but never read by anything that builds the alias
+            # set drift() matches against -- dead data that let a spec and its
+            # own declared running unit look like two unrelated things.
+            aliases = tuple(str(v) for v in (spec.get("unit"),) if v)
             out.append(
                 DiscoveredCI(
                     ci_type=CIType.SERVICE.value,
@@ -102,6 +109,7 @@ def collect_fleet_objects(home: Path) -> list[DiscoveredCI]:
                     description=(spec.get("note") or "")[:200],
                     attributes=attributes,
                     tags=("fleet", tag, DISCOVERED_TAG),
+                    aliases=aliases,
                 )
             )
     return out
@@ -122,16 +130,26 @@ def collect_registry(home: Path) -> list[DiscoveredCI]:
         if not obj:
             continue
         name = obj.get("name") or path.stem
+        pid_file = obj.get("pid_file")
         attributes = {
             k: v
             for k, v in {
                 "health_url": obj.get("health_url"),
                 "registered_at": obj.get("registered_at"),
                 "registered_by": obj.get("registered_by"),
-                "pid_file": obj.get("pid_file"),
+                "pid_file": pid_file,
             }.items()
             if v is not None
         }
+        # The pid file's stem is sometimes the only other name this service is
+        # known by (e.g. a systemd unit built around the same basename); when
+        # it differs from the registered name it is worth trying as an alias
+        # too, the same way spec.unit is for a fleet:service object.
+        aliases: tuple[str, ...] = ()
+        if pid_file:
+            stem = Path(str(pid_file)).stem
+            if stem and stem.lower() != name.lower():
+                aliases = (stem,)
         out.append(
             DiscoveredCI(
                 ci_type=CIType.SERVICE.value,
@@ -139,6 +157,7 @@ def collect_registry(home: Path) -> list[DiscoveredCI]:
                 source="registry",
                 attributes=attributes,
                 tags=("registry", DISCOVERED_TAG),
+                aliases=aliases,
             )
         )
     return out

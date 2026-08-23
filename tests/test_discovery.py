@@ -216,6 +216,59 @@ def test_registry_entries_stay_declared_with_their_timestamp(home: Path) -> None
     assert entry.attributes["registered_at"].startswith("2026-08-17")
 
 
+def test_fleet_service_spec_unit_becomes_an_alias(tmp_path: Path) -> None:
+    """The smoking gun: skgateway-claude-wrapper's spec.unit names
+    claude-code-api.service, that unit is active, and nothing read spec.unit
+    to build the alias set drift() matches against -- dead data."""
+    root = tmp_path / "fleet" / "objects" / "service"
+    root.mkdir(parents=True)
+    (root / "skgateway-claude-wrapper.json").write_text(
+        json.dumps(
+            {
+                "kind": "Service",
+                "name": "skgateway-claude-wrapper",
+                "spec": {"runtime": "systemd", "unit": "claude-code-api.service"},
+            }
+        )
+    )
+
+    found = collect_fleet_objects(tmp_path)
+
+    assert len(found) == 1
+    svc = found[0]
+    assert svc.aliases == ("claude-code-api.service",)
+    assert "claude-code-api.service" in svc.identity_aliases
+
+
+def test_registry_pid_file_stem_becomes_an_alias_when_it_differs(tmp_path: Path) -> None:
+    root = tmp_path / "registry"
+    root.mkdir()
+    (root / "skvoice.json").write_text(
+        json.dumps({"name": "skvoice", "pid_file": "/home/cbrd21/.skvoice/daemon.pid"})
+    )
+    (root / "skgateway.json").write_text(
+        json.dumps({"name": "skgateway", "pid_file": None})
+    )
+
+    found = {c.name: c for c in collect_registry(tmp_path)}
+
+    assert found["skvoice"].aliases == ("daemon",)
+    assert found["skgateway"].aliases == (), "no pid_file, nothing to alias"
+
+
+def test_drift_matches_a_declared_service_against_its_spec_unit_alias() -> None:
+    declared = DiscoveredCI(
+        "service",
+        "skgateway-claude-wrapper",
+        "fleet:service",
+        aliases=("claude-code-api.service",),
+    )
+    observed = DiscoveredCI(
+        "service", "claude-code-api", "systemd", observed=True, node="testnode"
+    )
+    assert drift([declared, observed]) == []
+
+
 def test_agents_are_collected_with_soul_facts(home: Path) -> None:
     found = collect_agents(home)
     assert [a.name for a in found] == ["lumina"]
