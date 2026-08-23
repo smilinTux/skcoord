@@ -1722,7 +1722,23 @@ class ITILManager:
 
         if new_status:
             self._append_event(self.changes_dir, rid, agent, "status", to=new_status, note=note)
-            if new_status == "approved":
+            # The outward-facing side effects fire from the FOLD RESULT, never
+            # from the requested status. `_fold_change` is where truth is
+            # decided - its CAB bypass guard can refuse this very event (a raw
+            # `status` event may not grant approval), and an invalid transition
+            # folds conflicted without moving the status at all. Keying the
+            # publish/GTD emission off `new_status` meant a REFUSED approval
+            # still announced `itil.change.approved` to every bus consumer and
+            # landed a high-priority "Implement" task on the operator's board:
+            # the record stayed `proposed` while everything downstream was told
+            # it was approved. Fold first, then emit only what actually
+            # happened. Both conditions are required - `new_status` because an
+            # already-approved change must not re-announce itself on an
+            # unrelated (even conflicted) update, and the folded status because
+            # that is the only authority on whether the transition took.
+            folded_now = self._fold_record(self.changes_dir, rid, Change)
+            effective_status = folded_now.status.value
+            if new_status == "approved" and effective_status == "approved":
                 self._publish_event(
                     "itil.change.approved",
                     {
@@ -1732,7 +1748,17 @@ class ITILManager:
                     },
                 )
                 implementer = core.get("implementer")
-                if implementer:
+                # One implement task per change, ever. A change approved by CAB
+                # vote already folds `approved` before this call, so re-issuing
+                # `new_status="approved"` (the CLI run twice, a retried MCP
+                # call) satisfies both conditions above while the fold moves
+                # nothing - and landed a SECOND high-priority "Implement" task
+                # on the operator's board. `gtd_item_ids` is the right thing to
+                # read here because it is written from `gtd_link` events, which
+                # are appended ONLY after an emission that actually happened: a
+                # REFUSED approval leaves it empty, so a bypass attempt cannot
+                # poison it and suppress the real approval's task later.
+                if implementer and not folded_now.gtd_item_ids:
                     gtd_id = self._gtd_emit(
                         f"[ITIL:{rid}] Implement: {core.get('title', '')}",
                         rid,
@@ -1741,7 +1767,7 @@ class ITILManager:
                     )
                     if gtd_id:
                         self._append_event(self.changes_dir, rid, agent, "gtd_link", id=gtd_id)
-            elif new_status == "deployed":
+            elif new_status == "deployed" and effective_status == "deployed":
                 self._publish_event(
                     "itil.change.deployed",
                     {"id": rid, "title": core.get("title", "")},
