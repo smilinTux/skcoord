@@ -46,14 +46,24 @@ def drift(
 
     # Flags cover the merged case (one CI both declared and observed); the key
     # sets cover records that never merged because their names differ, e.g. a
-    # spec saying "skgateway" against a unit called "skgateway.service".
-    observed_names = {_service_key(d.name) for d in services if d.observed}
-    declared_names = {_service_key(d.name) for d in services if d.declared}
+    # spec saying "skgateway" against a unit called "skgateway.service". Every
+    # identity alias is a candidate key, not just ``.name``: a cronjob observed
+    # under a fingerprinted name but wrapped by sk-cron-run, or a fleet object
+    # whose ``spec.unit``/registry ``pid_file`` names the real running unit,
+    # would otherwise be structurally unmatchable no matter what is running.
+    observed_keys: set[str] = set()
+    declared_keys: set[str] = set()
+    for d in services:
+        keys = _service_keys(d)
+        if d.observed:
+            observed_keys |= keys
+        if d.declared:
+            declared_keys |= keys
 
     for item in services:
         if item.observed or not item.declared:
             continue
-        if _service_key(item.name) not in observed_names:
+        if not (_service_keys(item) & observed_keys):
             findings.append(
                 DriftFinding(
                     item.ci_id,
@@ -67,7 +77,7 @@ def drift(
             continue
         if item.attributes.get("origin") == ORIGIN_DISTRO:
             continue
-        if _service_key(item.name) not in declared_names:
+        if not (_service_keys(item) & declared_keys):
             findings.append(
                 DriftFinding(
                     item.ci_id,
@@ -99,3 +109,14 @@ def _service_key(name: str) -> str:
         if key.endswith(suffix):
             key = key[: -len(suffix)]
     return key.replace("_", "-")
+
+
+def _service_keys(item: DiscoveredCI) -> set[str]:
+    """All normalised keys a service CI can be recognised by.
+
+    ``identity_aliases`` already folds in ``name``, ``canonical_name`` and any
+    declared aliases (sk-cron-run job names, ``spec.unit``, registry
+    ``pid_file`` stems); this just applies the same ``.service``/``.timer``
+    and case/underscore normalisation ``_service_key`` gives the bare name.
+    """
+    return {_service_key(alias) for alias in item.identity_aliases}

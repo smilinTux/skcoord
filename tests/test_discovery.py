@@ -336,6 +336,76 @@ def test_cron_jobs_are_observed_without_persisting_command_arguments() -> None:
     assert "nope" not in json.dumps([ci.attributes for ci in found])
 
 
+def test_cron_jobs_wrapped_by_sk_cron_run_carry_the_declared_job_name_as_an_alias() -> None:
+    """Fleet-managed cron entries are dispatched as
+    ``sk-cron-run.sh <job-name> <command> [args]``, prefixed by inline
+    ``VAR=value`` assignments. The fingerprinted name stays the CI's stable
+    identity (append-only CMDB, no renaming), but the declared job name must
+    surface as an alias or a fleet cronjob spec can never match it."""
+    runner = FakeRunner(
+        answers={
+            "/etc/crontab": "",
+            "crontab": (
+                "22 */3 * * * SKOS_SCHEDULE_ENV=/x/env.sh PATH=/a:/b "
+                "/home/cbrd21/clawd/skos/scripts/sk-cron-run.sh ingest-order "
+                "/home/cbrd21/.skenv/bin/skos ingest order --token secret-value "
+                ">> /home/cbrd21/.skcapstone/logs/sk-ingest.log 2>&1\n"
+            ),
+        }
+    )
+    found = collect_cron_jobs(runner)
+
+    assert len(found) == 1, "the inline VAR=value prefix must not make the whole line invisible"
+    job = found[0]
+    assert job.name.startswith("testnode:cron:user:"), "identity stays the fingerprint, not renamed"
+    assert job.aliases == ("ingest-order",)
+    assert "ingest-order" in job.identity_aliases
+    assert job.attributes["cron_run_name"] == "ingest-order"
+    assert "secret-value" not in json.dumps(job.attributes), "arguments stay redacted"
+
+
+def test_cron_jobs_without_the_wrapper_get_no_cron_run_alias() -> None:
+    runner = FakeRunner(answers={"crontab": "*/5 * * * * /usr/local/bin/reconcile\n"})
+    found = collect_cron_jobs(runner)
+
+    assert found[0].aliases == ()
+    assert "cron_run_name" not in found[0].attributes
+
+
+def test_bare_crontab_environment_lines_are_still_skipped() -> None:
+    """SHELL=/bin/bash and MAILTO=... are crontab environment declarations,
+    not scheduled jobs, and must not be mistaken for one."""
+    runner = FakeRunner(
+        answers={
+            "crontab": (
+                "SHELL=/bin/bash\nMAILTO=ops@example.com\n"
+                "*/5 * * * * /usr/local/bin/reconcile\n"
+            )
+        }
+    )
+    found = collect_cron_jobs(runner)
+    assert len(found) == 1
+    assert found[0].attributes["command_name"] == "reconcile"
+
+
+def test_drift_matches_a_declared_cronjob_against_its_sk_cron_run_alias() -> None:
+    """The false-positive this bug produced: a fleet cronjob spec named
+    'ingest-order' can never match an observed CI named
+    'testnode:cron:user:<hash>' by bare name -- it must match through the
+    sk-cron-run-declared alias instead."""
+    declared = DiscoveredCI("service", "ingest-order", "fleet:cronjob")
+    observed = DiscoveredCI(
+        "service",
+        "testnode:cron:user:deadbeefcafefeed",
+        "cron:user",
+        observed=True,
+        node="testnode",
+        aliases=("ingest-order",),
+    )
+    assert drift(merge([declared, observed])) == []
+    assert drift([declared, observed]) == [], "must match even before folding, via alias keys"
+
+
 def test_network_interfaces_are_first_class_cis() -> None:
     runner = FakeRunner(
         host="alpha",
