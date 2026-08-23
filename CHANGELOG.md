@@ -11,6 +11,20 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
 
 ### Fixed
 
+- `ITILManager.update_change` now fires the approval and deploy side effects
+  from the FOLD RESULT instead of the requested status (card a7e3ca15). The
+  CAB bypass guard added in 941570f correctly refuses a raw `status` event
+  that tries to grant approval, but the `itil.change.approved` publish and the
+  high-priority `[ITIL:<id>] Implement: <title>` GTD next-action were emitted
+  before the fold ran, keyed only on `new_status == "approved"`. A blocked
+  self-approval therefore left the record `proposed` while announcing an
+  approval to every bus consumer and landing an implement task on the
+  operator's board -- a reader of the bus or of the GTD board could not tell a
+  real approval from a refused one. The same reordering covers
+  `itil.change.deployed`. Legitimate approvals (a qualifying CAB vote, the
+  standard / auto-normal derivation) publish and emit exactly as before; the
+  fold guard itself is unchanged.
+
 - A `.timer` no longer emits a `depends_on` edge to its own same-named
   `.service`. Both fold to one `ci-service-<base>` CI, so systemd's ordinary
   timer-to-service dependency produced a self edge; a self edge fails

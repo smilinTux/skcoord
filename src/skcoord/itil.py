@@ -1722,7 +1722,22 @@ class ITILManager:
 
         if new_status:
             self._append_event(self.changes_dir, rid, agent, "status", to=new_status, note=note)
-            if new_status == "approved":
+            # The outward-facing side effects fire from the FOLD RESULT, never
+            # from the requested status. `_fold_change` is where truth is
+            # decided - its CAB bypass guard can refuse this very event (a raw
+            # `status` event may not grant approval), and an invalid transition
+            # folds conflicted without moving the status at all. Keying the
+            # publish/GTD emission off `new_status` meant a REFUSED approval
+            # still announced `itil.change.approved` to every bus consumer and
+            # landed a high-priority "Implement" task on the operator's board:
+            # the record stayed `proposed` while everything downstream was told
+            # it was approved. Fold first, then emit only what actually
+            # happened. Both conditions are required - `new_status` because an
+            # already-approved change must not re-announce itself on an
+            # unrelated (even conflicted) update, and the folded status because
+            # that is the only authority on whether the transition took.
+            effective_status = self._fold_record(self.changes_dir, rid, Change).status.value
+            if new_status == "approved" and effective_status == "approved":
                 self._publish_event(
                     "itil.change.approved",
                     {
@@ -1741,7 +1756,7 @@ class ITILManager:
                     )
                     if gtd_id:
                         self._append_event(self.changes_dir, rid, agent, "gtd_link", id=gtd_id)
-            elif new_status == "deployed":
+            elif new_status == "deployed" and effective_status == "deployed":
                 self._publish_event(
                     "itil.change.deployed",
                     {"id": rid, "title": core.get("title", "")},
