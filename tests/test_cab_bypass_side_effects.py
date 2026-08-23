@@ -112,3 +112,27 @@ def test_legitimate_deploy_still_publishes(mgr):
 
     assert folded.status.value == "deployed"
     assert "itil.change.deployed" in mgr.published
+
+
+def test_approval_refused_by_an_invalid_transition_stays_quiet_too(mgr):
+    """The other way the fold refuses: not the CAB guard, an illegal edge.
+
+    ``_fold_change`` also declines a ``status`` event whose edge is not in
+    ``_CHANGE_TRANSITIONS`` (recorded conflicted, no transition). That branch
+    reaches the same emission site, so it needs the same pin: a change already
+    ``deployed`` cannot be walked back to ``approved``, and nothing about that
+    refused request may reach the bus or the operator's board.
+    """
+    chg = mgr.propose_change(
+        title="already shipped", change_type="standard", created_by="lumina", implementer="lumina"
+    )
+    mgr.update_change(chg.id, agent="lumina", new_status="implementing")
+    mgr.update_change(chg.id, agent="lumina", new_status="deployed", note="shipped")
+    mgr.published.clear()
+    mgr.gtd_texts.clear()
+
+    folded = mgr.update_change(chg.id, agent="lumina", new_status="approved", note="re-approve?")
+
+    assert folded.status.value == "deployed", "precondition: the illegal edge did not take"
+    assert "itil.change.approved" not in mgr.published
+    assert mgr.gtd_texts == []
