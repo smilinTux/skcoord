@@ -85,6 +85,12 @@ def collect_fleet_objects(home: Path) -> list[DiscoveredCI]:
                     "failover": spec.get("failover"),
                     "tier": (obj.get("labels") or {}).get("tier"),
                     "generation": obj.get("generation"),
+                    # Preserved through the service/cronjob/operatorapp fold so
+                    # drift() can tell an Operatorapp (a CLI tool, invoked on
+                    # demand -- not a daemon) from a Service that is actually
+                    # expected to have a running unit, timer or container.
+                    "fleet_kind": obj.get("kind"),
+                    "cli": spec.get("cli"),
                 }.items()
                 if v is not None
             }

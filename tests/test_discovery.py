@@ -187,6 +187,27 @@ def test_fleet_objects_yield_host_and_service_cis(home: Path) -> None:
     assert all(not c.observed for c in found), "specs are declarations, never observations"
 
 
+def test_operatorapp_kind_is_preserved_through_the_fold(tmp_path: Path) -> None:
+    """A CLI-invoked tool (spec.cli) must carry a kind marker through the
+    service/cronjob/operatorapp fold, or drift() has no way to tell it apart
+    from a Service that is actually expected to have a running unit."""
+    root = tmp_path / "fleet" / "objects" / "operatorapp"
+    root.mkdir(parents=True)
+    (root / "cmdb.json").write_text(
+        json.dumps(
+            {"kind": "Operatorapp", "name": "cmdb", "spec": {"cli": "skcapstone cmdb operator"}}
+        )
+    )
+
+    found = collect_fleet_objects(tmp_path)
+
+    assert len(found) == 1
+    cmdb = found[0]
+    assert cmdb.ci_type == CIType.SERVICE.value
+    assert cmdb.attributes["fleet_kind"] == "Operatorapp"
+    assert cmdb.attributes["cli"] == "skcapstone cmdb operator"
+
+
 def test_registry_entries_stay_declared_with_their_timestamp(home: Path) -> None:
     found = collect_registry(home)
     assert len(found) == 1
@@ -1029,6 +1050,25 @@ def test_drift_flags_a_service_declared_but_not_running() -> None:
     ]
     kinds = {f.ci_id: f.kind for f in drift(merge(found))}
     assert kinds[make_ci_id("service", "skgateway")] == "declared_not_observed"
+
+
+def test_drift_does_not_demand_a_running_unit_for_an_operatorapp() -> None:
+    """cmdb is CLI-invoked by design (reconcile-timer + CLI, not a daemon).
+    No running unit is the correct steady state, not a gap."""
+    declared = DiscoveredCI(
+        "service",
+        "cmdb",
+        "fleet:operatorapp",
+        attributes={"fleet_kind": "Operatorapp", "cli": "skcapstone cmdb operator"},
+    )
+    assert drift([declared]) == []
+
+
+def test_drift_operatorapp_exemption_does_not_swallow_a_real_service_gap() -> None:
+    """The Operatorapp exemption must be narrow: a plain Service with no
+    fleet_kind marker still needs a running unit."""
+    declared = DiscoveredCI("service", "skgateway", "fleet:service")
+    assert [f.kind for f in drift([declared])] == ["declared_not_observed"]
 
 
 def test_drift_flags_a_service_running_that_nothing_declared() -> None:

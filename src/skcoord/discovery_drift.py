@@ -12,6 +12,13 @@ from .discovery_scan import _matching_identity_ids
 from .discovery_systemd import ORIGIN_DISTRO, ORIGIN_UNKNOWN
 
 
+OPERATORAPP_KIND = "Operatorapp"
+"""``fleet/objects/operatorapp/*.json``'s ``kind`` -- a CLI-invoked tool
+(``spec.cli``), not a daemon. It is folded into CIType.SERVICE like everything
+else in ``collect_fleet_objects``, so this is how drift() tells it apart from
+a Service that is genuinely expected to have a running unit."""
+
+
 @dataclass
 class DriftFinding:
     ci_id: str
@@ -31,6 +38,8 @@ def drift(
 
     * ``declared_not_observed`` -- a spec says this service exists and no
       machine is running it. The fleet is not what the manifest claims.
+      Operatorapp-kind CIs (a CLI tool, not a daemon) are exempt: they have
+      no running unit by design, and that is not a gap.
     * ``observed_not_declared`` -- something is running that no spec mentions.
       Undocumented, and possibly unwanted. Distro-authored systemd units are
       excluded: ``ModemManager.service`` is not an asset anyone forgot to
@@ -62,6 +71,10 @@ def drift(
 
     for item in services:
         if item.observed or not item.declared:
+            continue
+        if item.attributes.get("fleet_kind") == OPERATORAPP_KIND:
+            # A CLI-invoked tool (spec.cli), not a daemon. It has no running
+            # unit, timer or container by design -- that is not a gap.
             continue
         if not (_service_keys(item) & observed_keys):
             findings.append(
