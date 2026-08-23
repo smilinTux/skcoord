@@ -11,7 +11,6 @@ from .discovery_identity import identity_estate_drift
 from .discovery_scan import _matching_identity_ids
 from .discovery_systemd import ORIGIN_DISTRO, ORIGIN_UNKNOWN
 
-
 OPERATORAPP_KIND = "Operatorapp"
 """``fleet/objects/operatorapp/*.json``'s ``kind`` -- a CLI-invoked tool
 (``spec.cli``), not a daemon. It is folded into CIType.SERVICE like everything
