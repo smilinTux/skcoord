@@ -15,11 +15,15 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import hashlib
 import json
 import logging
 import os
 import socket
+import stat
+import time
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -29,6 +33,114 @@ from pydantic import BaseModel, Field
 from .card import Card, Column, Kind
 
 logger = logging.getLogger(__name__)
+
+
+def validate_card_lock_identifier(card_id: str) -> str:
+    """Return a portable card identifier before any lock path is opened."""
+    if (
+        not isinstance(card_id, str)
+        or not card_id
+        or card_id in {".", ".."}
+        or ".." in card_id
+        or "/" in card_id
+        or "\\" in card_id
+        or "\x00" in card_id
+        or any(ord(char) < 32 or ord(char) == 127 for char in card_id)
+        or len(card_id) > 128
+    ):
+        raise ValueError("card lock identifier must be a non-path identifier")
+    return card_id
+
+
+def _open_coordination_child_directory(home: Path, child: str) -> int:
+    """Open a coordination child directory without following symlinks.
+
+    The returned descriptor pins the validated directory while a caller opens
+    a lock, recovery log, or agent projection below it. Locks coordinate only
+    one local filesystem. Cross-host state converges through append-only event
+    ordering and mutation preconditions, never through ``flock``.
+    """
+    if child not in {"agents", "locks", "recovery"}:
+        raise ValueError("unsupported coordination child directory")
+    no_follow = getattr(os, "O_NOFOLLOW", None)
+    if no_follow is None:
+        raise RuntimeError("safe coordination paths require O_NOFOLLOW support")
+    root = Path(home).expanduser()
+    if root.is_symlink():
+        raise ValueError("coordination home must not be a symlink")
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | no_follow
+    try:
+        root_fd = os.open(root, directory_flags)
+    except OSError as exc:
+        raise ValueError("coordination home is unsafe") from exc
+
+    def open_child(parent_fd: int, name: str) -> int:
+        try:
+            existing = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            try:
+                os.mkdir(name, 0o700, dir_fd=parent_fd)
+            except FileExistsError:
+                pass
+        else:
+            if stat.S_ISLNK(existing.st_mode) or not stat.S_ISDIR(existing.st_mode):
+                raise ValueError("coordination lock directory must not be a symlink")
+        try:
+            descriptor = os.open(name, directory_flags, dir_fd=parent_fd)
+        except OSError as exc:
+            raise ValueError("coordination lock directory is unsafe") from exc
+        descriptor_stat = os.fstat(descriptor)
+        if not stat.S_ISDIR(descriptor_stat.st_mode):
+            os.close(descriptor)
+            raise ValueError("coordination lock directory is unsafe")
+        return descriptor
+
+    try:
+        root_stat = os.fstat(root_fd)
+        if not stat.S_ISDIR(root_stat.st_mode):
+            raise ValueError("coordination home is unsafe")
+        coordination_fd = open_child(root_fd, "coordination")
+        try:
+            return open_child(coordination_fd, child)
+        finally:
+            os.close(coordination_fd)
+    finally:
+        os.close(root_fd)
+
+
+def _open_lockfile(home: Path, filename: str, label: str):
+    """Open one regular, single-link advisory lock without symlink races."""
+    if not filename or "/" in filename or "\\" in filename or ".." in filename:
+        raise ValueError("lock filename must be a non-path identifier")
+    locks_fd = _open_coordination_child_directory(home, "locks")
+    no_follow = getattr(os, "O_NOFOLLOW", 0)
+    try:
+        try:
+            existing = os.stat(filename, dir_fd=locks_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            existing = None
+        if existing is not None and (
+            stat.S_ISLNK(existing.st_mode)
+            or not stat.S_ISREG(existing.st_mode)
+            or existing.st_nlink != 1
+        ):
+            raise ValueError(f"{label} lock path must be a regular single-link file")
+        try:
+            descriptor = os.open(
+                filename,
+                os.O_CREAT | os.O_RDWR | no_follow,
+                0o600,
+                dir_fd=locks_fd,
+            )
+        except OSError as exc:
+            raise ValueError(f"{label} lock path is unsafe") from exc
+    finally:
+        os.close(locks_fd)
+    lock_stat = os.fstat(descriptor)
+    if not stat.S_ISREG(lock_stat.st_mode) or lock_stat.st_nlink != 1:
+        os.close(descriptor)
+        raise ValueError(f"{label} lock path must be a regular single-link file")
+    return os.fdopen(descriptor, "a+", encoding="utf-8")
 
 
 @contextlib.contextmanager
@@ -196,7 +308,158 @@ class CardStore:
         self._legacy_cache: Optional[dict[str, list[dict]]] = None
 
     def ensure_dirs(self) -> None:
-        self.cards_dir.mkdir(parents=True, exist_ok=True)
+        descriptor = self._open_cards_directory()
+        os.close(descriptor)
+
+    @staticmethod
+    def _open_or_create_directory(parent_fd: int, name: str, label: str) -> int:
+        """Open one direct child safely, creating only a real directory."""
+        no_follow = getattr(os, "O_NOFOLLOW", None)
+        if no_follow is None:
+            raise RuntimeError("safe CardStore paths require O_NOFOLLOW support")
+        try:
+            existing = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            try:
+                os.mkdir(name, 0o700, dir_fd=parent_fd)
+            except FileExistsError:
+                pass
+        else:
+            if stat.S_ISLNK(existing.st_mode) or not stat.S_ISDIR(existing.st_mode):
+                raise ValueError(f"{label} must be a directory, not a symlink")
+        try:
+            descriptor = os.open(
+                name,
+                os.O_RDONLY | os.O_DIRECTORY | no_follow,
+                dir_fd=parent_fd,
+            )
+        except OSError as exc:
+            raise ValueError(f"{label} is unsafe") from exc
+        if not stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            os.close(descriptor)
+            raise ValueError(f"{label} is unsafe")
+        return descriptor
+
+    def _open_cards_directory(self) -> int:
+        """Open the CardStore root and cards directory without link traversal."""
+        no_follow = getattr(os, "O_NOFOLLOW", None)
+        if no_follow is None:
+            raise RuntimeError("safe CardStore paths require O_NOFOLLOW support")
+        self.home.mkdir(parents=True, exist_ok=True)
+        if self.home.is_symlink():
+            raise ValueError("CardStore home must not be a symlink")
+        try:
+            home_fd = os.open(
+                self.home,
+                os.O_RDONLY | os.O_DIRECTORY | no_follow,
+            )
+        except OSError as exc:
+            raise ValueError("CardStore home is unsafe") from exc
+        try:
+            return self._open_or_create_directory(home_fd, "cards", "CardStore cards directory")
+        finally:
+            os.close(home_fd)
+
+    def _open_card_directory(self, card_id: str) -> int:
+        """Open one validated card directory without following a raced symlink."""
+        validate_card_lock_identifier(card_id)
+        cards_fd = self._open_cards_directory()
+        try:
+            return self._open_or_create_directory(cards_fd, card_id, "CardStore card directory")
+        finally:
+            os.close(cards_fd)
+
+    @staticmethod
+    def _open_existing_directory(parent_fd: int, name: str, label: str) -> int | None:
+        """Open one existing direct child without link traversal or creation."""
+        no_follow = getattr(os, "O_NOFOLLOW", None)
+        if no_follow is None:
+            raise RuntimeError("safe CardStore paths require O_NOFOLLOW support")
+        try:
+            existing = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return None
+        if stat.S_ISLNK(existing.st_mode) or not stat.S_ISDIR(existing.st_mode):
+            raise ValueError(f"{label} is unsafe")
+        try:
+            descriptor = os.open(
+                name,
+                os.O_RDONLY | os.O_DIRECTORY | no_follow,
+                dir_fd=parent_fd,
+            )
+        except OSError as exc:
+            raise ValueError(f"{label} is unsafe") from exc
+        if not stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            os.close(descriptor)
+            raise ValueError(f"{label} is unsafe")
+        return descriptor
+
+    def _open_existing_cards_directory(self) -> int | None:
+        """Open the existing cards root without creating or following it."""
+        no_follow = getattr(os, "O_NOFOLLOW", None)
+        if no_follow is None:
+            raise RuntimeError("safe CardStore paths require O_NOFOLLOW support")
+        if self.home.is_symlink():
+            raise ValueError("CardStore home is unsafe")
+        try:
+            home_fd = os.open(
+                self.home,
+                os.O_RDONLY | os.O_DIRECTORY | no_follow,
+            )
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise ValueError("CardStore home is unsafe") from exc
+        try:
+            return self._open_existing_directory(home_fd, "cards", "CardStore cards directory")
+        finally:
+            os.close(home_fd)
+
+    def _open_existing_card_directory(self, card_id: str) -> int | None:
+        """Open one existing validated card directory without creation."""
+        validate_card_lock_identifier(card_id)
+        cards_fd = self._open_existing_cards_directory()
+        if cards_fd is None:
+            return None
+        try:
+            return self._open_existing_directory(cards_fd, card_id, "CardStore card directory")
+        finally:
+            os.close(cards_fd)
+
+    @staticmethod
+    def _read_regular_file_bytes(parent_fd: int, name: str, label: str) -> bytes | None:
+        """Read one existing regular single-link file through a pinned parent."""
+        no_follow = getattr(os, "O_NOFOLLOW", None)
+        if no_follow is None:
+            raise RuntimeError("safe CardStore paths require O_NOFOLLOW support")
+        if not name or "/" in name or "\\" in name or ".." in name:
+            raise ValueError(f"{label} is unsafe")
+        try:
+            existing = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return None
+        if (
+            stat.S_ISLNK(existing.st_mode)
+            or not stat.S_ISREG(existing.st_mode)
+            or existing.st_nlink != 1
+        ):
+            raise ValueError(f"{label} is unsafe")
+        try:
+            descriptor = os.open(name, os.O_RDONLY | no_follow, dir_fd=parent_fd)
+        except OSError as exc:
+            raise ValueError(f"{label} is unsafe") from exc
+        try:
+            opened = os.fstat(descriptor)
+            if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
+                raise ValueError(f"{label} is unsafe")
+            chunks: list[bytes] = []
+            while True:
+                chunk = os.read(descriptor, 65536)
+                if not chunk:
+                    return b"".join(chunks)
+                chunks.append(chunk)
+        finally:
+            os.close(descriptor)
 
     def _writer_id(self, agent: str) -> str:
         safe = (agent or "unknown").replace("/", "-").replace("@", "-")
@@ -210,73 +473,182 @@ class CardStore:
         Uses O_CREAT|O_EXCL so a concurrent create on the same id is safe (the
         loser sees the existing core).
         """
-        self.ensure_dirs()
-        rec_dir = self.cards_dir / core.id
-        rec_dir.mkdir(parents=True, exist_ok=True)
-        core_path = rec_dir / "core.json"
+        validate_card_lock_identifier(core.id)
+        rec_fd = self._open_card_directory(core.id)
         payload = (core.model_dump_json(indent=2) + "\n").encode("utf-8")
+        fd = -1
         try:
-            fd = os.open(str(core_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-        except FileExistsError:
-            return core.id
-        try:
-            os.write(fd, payload)
+            try:
+                existing = os.stat("core.json", dir_fd=rec_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                existing = None
+            if existing is not None:
+                if (
+                    stat.S_ISLNK(existing.st_mode)
+                    or not stat.S_ISREG(existing.st_mode)
+                    or existing.st_nlink != 1
+                ):
+                    raise ValueError("CardStore core destination is unsafe")
+                return core.id
+            try:
+                fd = os.open(
+                    "core.json",
+                    os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0),
+                    0o644,
+                    dir_fd=rec_fd,
+                )
+            except FileExistsError:
+                existing = os.stat("core.json", dir_fd=rec_fd, follow_symlinks=False)
+                if (
+                    stat.S_ISLNK(existing.st_mode)
+                    or not stat.S_ISREG(existing.st_mode)
+                    or existing.st_nlink != 1
+                ):
+                    raise ValueError("CardStore core destination is unsafe")
+                return core.id
+            offset = 0
+            while offset < len(payload):
+                offset += os.write(fd, payload[offset:])
+            os.fsync(fd)
         finally:
-            os.close(fd)
+            if fd >= 0:
+                os.close(fd)
+            os.fsync(rec_fd)
+            os.close(rec_fd)
         return core.id
 
-    def append_event(self, card_id: str, action: str, agent: str, **payload: Any) -> None:
-        """Append one event line to this writer's own log (flock-guarded)."""
-        rec_dir = self.cards_dir / card_id
-        events_dir = rec_dir / "events"
-        events_dir.mkdir(parents=True, exist_ok=True)
-        path = events_dir / f"{self._writer_id(agent)}.jsonl"
-        with open(path, "a+", encoding="utf-8") as fh:
-            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+    def append_event(self, card_id: str, action: str, agent: str, **payload: Any) -> dict:
+        """Append one event line to this writer's own log (flock-guarded).
+
+        ``transition_id`` is an optional deterministic caller token. Repeating
+        it returns the already-durable event instead of appending another line,
+        which lets a caller safely classify a write-then-error as success.
+        """
+        validate_card_lock_identifier(card_id)
+        writer_filename = f"{self._writer_id(agent)}.jsonl"
+        rec_fd = self._open_card_directory(card_id)
+        try:
+            events_fd = self._open_or_create_directory(
+                rec_fd, "events", "CardStore event directory"
+            )
+        finally:
+            os.close(rec_fd)
+        descriptor = -1
+        try:
             try:
-                fh.seek(0)
-                seq = sum(1 for _ in fh)
-                event = {
-                    "event_id": uuid.uuid4().hex,
-                    "ts": _now_iso(),
-                    "writer": agent,
-                    "node": _HOSTNAME,
-                    "seq": seq,
-                    "action": action,
-                }
-                event.update(payload)
-                fh.seek(0, os.SEEK_END)
-                fh.write(json.dumps(event, default=str) + "\n")
-                fh.flush()
-            finally:
-                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+                existing = os.stat(writer_filename, dir_fd=events_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                existing = None
+            if existing is not None and (
+                stat.S_ISLNK(existing.st_mode)
+                or not stat.S_ISREG(existing.st_mode)
+                or existing.st_nlink != 1
+            ):
+                raise ValueError("CardStore event destination is unsafe")
+            try:
+                descriptor = os.open(
+                    writer_filename,
+                    os.O_APPEND | os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0),
+                    0o600,
+                    dir_fd=events_fd,
+                )
+            except OSError as exc:
+                raise ValueError("CardStore event destination is unsafe") from exc
+            event_stat = os.fstat(descriptor)
+            if not stat.S_ISREG(event_stat.st_mode) or event_stat.st_nlink != 1:
+                raise ValueError("CardStore event destination is unsafe")
+            with os.fdopen(descriptor, "a+", encoding="utf-8") as fh:
+                descriptor = -1
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+                try:
+                    fh.seek(0)
+                    lines = list(fh)
+                    transition_id = payload.get("transition_id")
+                    if isinstance(transition_id, str) and transition_id:
+                        for line in lines:
+                            try:
+                                existing_event = json.loads(line)
+                            except json.JSONDecodeError:
+                                continue
+                            if existing_event.get("transition_id") == transition_id:
+                                return existing_event
+                    seq = len(lines)
+                    event = {
+                        "event_id": uuid.uuid4().hex,
+                        "ts": _now_iso(),
+                        "writer": agent,
+                        "node": _HOSTNAME,
+                        "seq": seq,
+                        "action": action,
+                    }
+                    event.update(payload)
+                    fh.seek(0, os.SEEK_END)
+                    fh.write(json.dumps(event, default=str) + "\n")
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                    return event
+                finally:
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+            os.close(events_fd)
+
+    def has_transition(self, card_id: str, transition_id: str) -> bool:
+        """Return whether an exact intended CardStore event is durable."""
+        return any(
+            event.get("transition_id") == transition_id for event in self._read_events(card_id)
+        )
 
     # ── reads ─────────────────────────────────────────────────────────────
 
     def _load_core(self, card_id: str) -> Optional[dict]:
-        core_path = self.cards_dir / card_id / "core.json"
-        if not core_path.exists():
+        card_fd = self._open_existing_card_directory(card_id)
+        if card_fd is None:
             return None
         try:
-            return json.loads(core_path.read_text(encoding="utf-8"))
+            raw = self._read_regular_file_bytes(card_fd, "core.json", "CardStore core")
+            if raw is None:
+                return None
+            return json.loads(raw.decode("utf-8"))
+        except ValueError:
+            raise
         except Exception as exc:  # noqa: BLE001
             logger.warning("Bad core.json for card %s: %s", card_id, exc)
             return None
+        finally:
+            os.close(card_fd)
 
     def _read_events(self, card_id: str) -> list[dict]:
-        events_dir = self.cards_dir / card_id / "events"
         out: list[dict] = []
-        if not events_dir.exists():
+        card_fd = self._open_existing_card_directory(card_id)
+        if card_fd is None:
             return out
-        for f in sorted(events_dir.glob("*.jsonl")):
-            for line in f.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if not line:
+        try:
+            events_fd = self._open_existing_directory(
+                card_fd, "events", "CardStore event directory"
+            )
+        finally:
+            os.close(card_fd)
+        if events_fd is None:
+            return out
+        try:
+            for name in sorted(os.listdir(events_fd)):
+                if not name.endswith(".jsonl"):
                     continue
-                try:
-                    out.append(json.loads(line))
-                except Exception:  # noqa: BLE001
+                raw = self._read_regular_file_bytes(events_fd, name, "CardStore event source")
+                if raw is None:
                     continue
+                for line in raw.decode("utf-8").splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        out.append(json.loads(line))
+                    except Exception:  # noqa: BLE001
+                        continue
+        finally:
+            os.close(events_fd)
         # Deterministic order: ts, then writer, then per-writer seq.
         out.sort(key=lambda e: (e.get("ts", ""), e.get("writer", ""), e.get("seq", 0)))
         return out
@@ -339,16 +711,70 @@ class CardStore:
                     card.order = e["order"]
             elif action == "assign":
                 card.owner = e.get("owner")
+                card.meta.pop("_claim_revision", None)
             elif action == "unassign":
                 card.owner = None
+                card.meta.pop("_claim_revision", None)
+            elif action == "release_claim":
+                released_owner = e.get("released_owner")
+                expected_revision = e.get("expected_claim_revision")
+                actual_revision = card.meta.get("_claim_revision")
+                if (
+                    not isinstance(released_owner, str)
+                    or not released_owner
+                    or not isinstance(expected_revision, str)
+                    or not expected_revision
+                    or card.owner != released_owner
+                    or actual_revision != expected_revision
+                ):
+                    card.meta.setdefault("release_conflicts", []).append(
+                        {
+                            "event_id": e.get("event_id"),
+                            "reason": "claim precondition did not match",
+                            "released_owner": released_owner,
+                            "expected_claim_revision": expected_revision,
+                            "actual_owner": card.owner,
+                            "actual_claim_revision": actual_revision,
+                        }
+                    )
+                else:
+                    card.owner = None
+                    card.status = Column.BACKLOG
+                    card.meta.pop("_claim_revision", None)
             elif action == "claim":
-                card.owner = e.get("owner")
-                card.status = _CLAIM_COLUMN
+                owner = e.get("owner")
+                was_unowned_backlog = card.owner is None and card.status == Column.BACKLOG
+                if (
+                    isinstance(owner, str)
+                    and owner
+                    and card.owner
+                    and card.owner != owner
+                    and card.status in {Column.READY, Column.DOING, Column.REVIEW}
+                ):
+                    card.meta.setdefault("claim_conflicts", []).append(
+                        {
+                            "event_id": e.get("event_id"),
+                            "owner": owner,
+                            "existing_owner": card.owner,
+                            "reason": "concurrent claim requires explicit release or completion",
+                        }
+                    )
+                else:
+                    card.owner = owner
+                    card.status = _CLAIM_COLUMN
+                    revision = e.get("claim_revision") or e.get("event_id")
+                    if isinstance(revision, str) and revision:
+                        card.meta["_claim_revision"] = revision
+                    else:
+                        card.meta.pop("_claim_revision", None)
+                    if was_unowned_backlog and owner:
+                        card.meta.pop("claim_conflicts", None)
             elif action == "complete":
                 card.status = _COMPLETE_COLUMN
                 # coord drops a completed task from claimed_tasks, so its derived
                 # claimed_by is None. Match that so parity holds on done cards.
                 card.owner = None
+                card.meta.pop("_claim_revision", None)
             elif action == "priority" and e.get("priority"):
                 card.priority = e["priority"]
             elif action == "swimlane" and e.get("swimlane"):
@@ -369,6 +795,14 @@ class CardStore:
                     card.description = e["description"]
             elif action == "amend_criteria" and isinstance(e.get("criteria"), list):
                 card.acceptance_criteria = list(e["criteria"])
+            elif action == "add_dependency" and isinstance(e.get("dependency"), str):
+                dependency = e["dependency"]
+                if dependency and dependency not in card.dependencies:
+                    card.dependencies.append(dependency)
+            elif action == "remove_dependency" and isinstance(e.get("dependency"), str):
+                dependency = e["dependency"]
+                if dependency in card.dependencies:
+                    card.dependencies.remove(dependency)
             elif action == "note" and e.get("text"):
                 card.meta.setdefault("comments", []).append(
                     {"ts": e.get("ts"), "writer": e.get("writer"), "text": e["text"]}
@@ -427,11 +861,35 @@ class CardStore:
         return card
 
     def list_card_ids(self) -> list[str]:
-        if not self.cards_dir.exists():
+        cards_fd = self._open_existing_cards_directory()
+        if cards_fd is None:
             return []
-        return sorted(
-            p.name for p in self.cards_dir.iterdir() if p.is_dir() and (p / "core.json").exists()
-        )
+        card_ids: list[str] = []
+        try:
+            for name in sorted(os.listdir(cards_fd)):
+                try:
+                    entry = os.stat(name, dir_fd=cards_fd, follow_symlinks=False)
+                except FileNotFoundError:
+                    continue
+                if stat.S_ISLNK(entry.st_mode):
+                    raise ValueError("CardStore card entry is unsafe")
+                if not stat.S_ISDIR(entry.st_mode):
+                    continue
+                validate_card_lock_identifier(name)
+                card_fd = self._open_existing_directory(cards_fd, name, "CardStore card directory")
+                if card_fd is None:
+                    continue
+                try:
+                    if (
+                        self._read_regular_file_bytes(card_fd, "core.json", "CardStore core")
+                        is not None
+                    ):
+                        card_ids.append(name)
+                finally:
+                    os.close(card_fd)
+        finally:
+            os.close(cards_fd)
+        return card_ids
 
     def list_cards(self, include_archived: bool = False) -> list[Card]:
         """Fold every card. Archived excluded unless requested."""
@@ -580,6 +1038,133 @@ def task_views_from_store(home: Path, include_archived: bool = False) -> list:
     return views
 
 
+def _card_exists(home: Path, card_id: str) -> bool:
+    """Return whether a card is known to either compatible board projection."""
+    store = CardStore(home)
+    if store._load_core(card_id) is not None:
+        return True
+    from .coordination import Board
+
+    return any(task.id == card_id for task in Board(home).load_tasks(include_archived=True))
+
+
+def current_dependencies(
+    home: Path, card_id: str, birth_dependencies: Optional[list[str]] = None
+) -> list[str]:
+    """Return dependencies after applying the append-only card-event fold.
+
+    Args:
+        home: Shared SKCapstone root.
+        card_id: Card whose effective dependencies are requested.
+        birth_dependencies: Immutable task-file dependencies used when a legacy
+            card has not yet been mirrored into the CardStore.
+
+    Returns:
+        The ordered, de-duplicated effective dependency identifiers.
+    """
+    card = CardStore(home).fold(card_id)
+    if card is not None:
+        return list(card.dependencies)
+    return list(dict.fromkeys(birth_dependencies or []))
+
+
+def amend_dependency(
+    home: Path,
+    card_id: str,
+    dependency_id: str,
+    action: str,
+    agent: str = "",
+    reason: str = "",
+) -> bool:
+    """Append one idempotent dependency amendment to a known card.
+
+    ``add_dependency`` and ``remove_dependency`` modify only the folded card
+    projection. The original task and ``core.json`` remain untouched. Repeating
+    an already-effective operation appends no event, making normal retries a
+    no-op while the retained event provides provenance and rollback context.
+
+    Args:
+        home: Shared SKCapstone root.
+        card_id: Existing downstream card to amend.
+        dependency_id: Existing gate card to add or remove.
+        action: ``add_dependency`` or ``remove_dependency``.
+        agent: Attributed writer.
+        reason: Non-empty governance reason retained in the event.
+
+    Returns:
+        ``True`` if an event was appended, otherwise ``False`` for an
+        idempotent no-op.
+
+    Raises:
+        ValueError: If identifiers are invalid, unknown, self-referential, or
+            the reason/action is invalid.
+    """
+    home = Path(home).expanduser()
+    if action not in {"add_dependency", "remove_dependency"}:
+        raise ValueError("action must be add_dependency or remove_dependency")
+    if not card_id or not dependency_id:
+        raise ValueError("card and dependency identifiers are required")
+    if card_id == dependency_id:
+        raise ValueError("a card cannot depend on itself")
+    if not reason.strip():
+        raise ValueError("a dependency amendment reason is required")
+    if not _card_exists(home, card_id):
+        raise ValueError(f"card {card_id} not found")
+    if not _card_exists(home, dependency_id):
+        raise ValueError(f"dependency {dependency_id} not found")
+
+    with card_mutation_lock(home, card_id):
+        dependencies = current_dependencies(home, card_id)
+        present = dependency_id in dependencies
+        if (action == "add_dependency" and present) or (
+            action == "remove_dependency" and not present
+        ):
+            return False
+        CardStore(home).append_event(
+            card_id,
+            action,
+            agent or "coord",
+            dependency=dependency_id,
+            reason=reason.strip(),
+        )
+        return True
+
+
+@contextmanager
+def card_mutation_lock(home: Path, card_id: str, timeout_seconds: float = 5.0):
+    """Acquire a bounded, path-safe per-card advisory lock."""
+    card_id = validate_card_lock_identifier(card_id)
+    filename = f"{hashlib.sha256(card_id.encode('utf-8')).hexdigest()}.lock"
+    deadline = time.monotonic() + timeout_seconds
+    with _open_lockfile(home, filename, "card") as handle:
+        while True:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(f"timed out acquiring card lock for {card_id}")
+                time.sleep(0.01)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def add_dependency(
+    home: Path, card_id: str, dependency_id: str, agent: str = "", reason: str = ""
+) -> bool:
+    """Append an idempotent dependency addition for a coordination card."""
+    return amend_dependency(home, card_id, dependency_id, "add_dependency", agent, reason)
+
+
+def remove_dependency(
+    home: Path, card_id: str, dependency_id: str, agent: str = "", reason: str = ""
+) -> bool:
+    """Append an idempotent dependency removal for a coordination card."""
+    return amend_dependency(home, card_id, dependency_id, "remove_dependency", agent, reason)
+
+
 def mirror_coord_create(home: Path, task) -> None:
     """Mirror a coord Task creation into the CardStore (best-effort)."""
     from .card import _swimlane_for_tags
@@ -604,21 +1189,89 @@ def mirror_coord_create(home: Path, task) -> None:
     )
 
 
-def mirror_coord_claim(home: Path, task_id: str, agent: str) -> None:
+def mirror_coord_claim(
+    home: Path,
+    task_id: str,
+    agent: str,
+    transition_id: str = "",
+    claim_revision: str = "",
+) -> str:
     """Mirror a coord claim into the CardStore."""
-    CardStore(home).append_event(task_id, "claim", agent, owner=agent)
+    revision = claim_revision or uuid.uuid4().hex
+    CardStore(home).append_event(
+        task_id,
+        "claim",
+        agent,
+        owner=agent,
+        claim_revision=revision,
+        transition_id=transition_id or uuid.uuid4().hex,
+    )
+    return revision
 
 
-def mirror_coord_complete(home: Path, task_id: str, agent: str) -> None:
+def mirror_coord_complete(home: Path, task_id: str, agent: str, transition_id: str = "") -> None:
     """Mirror a coord completion into the CardStore."""
-    CardStore(home).append_event(task_id, "complete", agent)
+    CardStore(home).append_event(
+        task_id, "complete", agent, transition_id=transition_id or uuid.uuid4().hex
+    )
+
+
+def current_claim_precondition(home: Path, task_id: str, owner: str) -> str | None:
+    """Return the exact claim revision, or a safe retry no-op marker."""
+    card = CardStore(home).fold(task_id)
+    if card is None:
+        raise ValueError(f"CardStore card {task_id} not found")
+    if card.owner == owner:
+        revision = card.meta.get("_claim_revision")
+        if isinstance(revision, str) and revision:
+            return revision
+        raise ValueError(f"CardStore claim on {task_id} has no revision")
+    if card.owner is None and card.status == Column.BACKLOG:
+        for event in reversed(CardStore(home)._read_events(task_id)):
+            if event.get("action") == "release_claim" and event.get("released_owner") == owner:
+                return None
+    raise ValueError(f"CardStore owner conflict for {task_id}: expected {owner}")
+
+
+def mirror_coord_release(
+    home: Path,
+    task_id: str,
+    owner: str,
+    actor: str,
+    expected_claim_revision: str | None,
+    transition_id: str = "",
+) -> bool:
+    """Mirror a release only when its owner and revision still match."""
+    if expected_claim_revision is None:
+        return False
+    CardStore(home).append_event(
+        task_id,
+        "release_claim",
+        actor,
+        released_owner=owner,
+        expected_claim_revision=expected_claim_revision,
+        transition_id=transition_id or uuid.uuid4().hex,
+    )
+    return True
 
 
 def mirror_coord_move(
-    home: Path, task_id: str, column: str, agent: str, order: Optional[int] = None
+    home: Path,
+    task_id: str,
+    column: str,
+    agent: str,
+    order: Optional[int] = None,
+    transition_id: str = "",
 ) -> None:
     """Mirror a kanban move into the CardStore."""
-    CardStore(home).append_event(task_id, "move", agent or "mcp", column=column, order=order)
+    CardStore(home).append_event(
+        task_id,
+        "move",
+        agent or "mcp",
+        column=column,
+        order=order,
+        transition_id=transition_id or uuid.uuid4().hex,
+    )
 
 
 def mirror_coord_describe(

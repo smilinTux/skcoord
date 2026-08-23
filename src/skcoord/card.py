@@ -8,9 +8,12 @@ card ``kind``. See docs/superpowers/specs/2026-07-16-unified-kanban-card-model.m
 
 from __future__ import annotations
 
+import fcntl
 import html
 import logging
+import os
 import socket
+import stat
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
@@ -113,29 +116,207 @@ class CardEventLog:
         self.home = Path(home).expanduser()
         self.dir = self.home / "coordination" / "card_events"
 
+    @staticmethod
+    def _open_or_create_directory(parent_fd: int, name: str) -> int:
+        """Open a direct child directory without following a raced symlink."""
+        no_follow = getattr(os, "O_NOFOLLOW", None)
+        if no_follow is None:
+            raise RuntimeError("safe card event paths require O_NOFOLLOW support")
+        try:
+            existing = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            try:
+                os.mkdir(name, 0o700, dir_fd=parent_fd)
+            except FileExistsError:
+                pass
+        else:
+            if stat.S_ISLNK(existing.st_mode) or not stat.S_ISDIR(existing.st_mode):
+                raise ValueError("card event directory must not be a symlink")
+        try:
+            descriptor = os.open(
+                name,
+                os.O_RDONLY | os.O_DIRECTORY | no_follow,
+                dir_fd=parent_fd,
+            )
+        except OSError as exc:
+            raise ValueError("card event directory is unsafe") from exc
+        if not stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            os.close(descriptor)
+            raise ValueError("card event directory is unsafe")
+        return descriptor
+
+    def _open_event_directory(self) -> int:
+        """Pin coordination/card_events while append holds its descriptor."""
+        no_follow = getattr(os, "O_NOFOLLOW", None)
+        if no_follow is None:
+            raise RuntimeError("safe card event paths require O_NOFOLLOW support")
+        self.home.mkdir(parents=True, exist_ok=True)
+        if self.home.is_symlink():
+            raise ValueError("card event home must not be a symlink")
+        try:
+            home_fd = os.open(
+                self.home,
+                os.O_RDONLY | os.O_DIRECTORY | no_follow,
+            )
+        except OSError as exc:
+            raise ValueError("card event home is unsafe") from exc
+        try:
+            coordination_fd = self._open_or_create_directory(home_fd, "coordination")
+            try:
+                return self._open_or_create_directory(coordination_fd, "card_events")
+            finally:
+                os.close(coordination_fd)
+        finally:
+            os.close(home_fd)
+
+    @staticmethod
+    def _open_existing_directory(parent_fd: int, name: str) -> int | None:
+        """Open an existing direct child directory without following links."""
+        no_follow = getattr(os, "O_NOFOLLOW", None)
+        if no_follow is None:
+            raise RuntimeError("safe card event paths require O_NOFOLLOW support")
+        try:
+            existing = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return None
+        if stat.S_ISLNK(existing.st_mode) or not stat.S_ISDIR(existing.st_mode):
+            raise ValueError("card event directory is unsafe")
+        try:
+            descriptor = os.open(
+                name,
+                os.O_RDONLY | os.O_DIRECTORY | no_follow,
+                dir_fd=parent_fd,
+            )
+        except OSError as exc:
+            raise ValueError("card event directory is unsafe") from exc
+        if not stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            os.close(descriptor)
+            raise ValueError("card event directory is unsafe")
+        return descriptor
+
+    def _open_existing_event_directory(self) -> int | None:
+        """Open existing coordination/card_events without creating it."""
+        no_follow = getattr(os, "O_NOFOLLOW", None)
+        if no_follow is None:
+            raise RuntimeError("safe card event paths require O_NOFOLLOW support")
+        if self.home.is_symlink():
+            raise ValueError("card event home is unsafe")
+        try:
+            home_fd = os.open(
+                self.home,
+                os.O_RDONLY | os.O_DIRECTORY | no_follow,
+            )
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise ValueError("card event home is unsafe") from exc
+        try:
+            coordination_fd = self._open_existing_directory(home_fd, "coordination")
+            if coordination_fd is None:
+                return None
+            try:
+                return self._open_existing_directory(coordination_fd, "card_events")
+            finally:
+                os.close(coordination_fd)
+        finally:
+            os.close(home_fd)
+
+    @staticmethod
+    def _read_regular_file_bytes(directory_fd: int, name: str) -> bytes | None:
+        """Read one regular single-link event file through its parent fd."""
+        no_follow = getattr(os, "O_NOFOLLOW", None)
+        if no_follow is None:
+            raise RuntimeError("safe card event paths require O_NOFOLLOW support")
+        if not name or "/" in name or "\\" in name or ".." in name:
+            raise ValueError("card event source is unsafe")
+        try:
+            existing = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return None
+        if (
+            stat.S_ISLNK(existing.st_mode)
+            or not stat.S_ISREG(existing.st_mode)
+            or existing.st_nlink != 1
+        ):
+            raise ValueError("card event source is unsafe")
+        try:
+            descriptor = os.open(name, os.O_RDONLY | no_follow, dir_fd=directory_fd)
+        except OSError as exc:
+            raise ValueError("card event source is unsafe") from exc
+        try:
+            opened = os.fstat(descriptor)
+            if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
+                raise ValueError("card event source is unsafe")
+            chunks: list[bytes] = []
+            while True:
+                chunk = os.read(descriptor, 65536)
+                if not chunk:
+                    return b"".join(chunks)
+                chunks.append(chunk)
+        finally:
+            os.close(descriptor)
+
     def append(self, event: CardEvent) -> None:
         """Append one overlay event to this host's log."""
-        self.dir.mkdir(parents=True, exist_ok=True)
         if not event.writer:
             event.writer = socket.gethostname()
-        path = self.dir / f"{socket.gethostname()}.jsonl"
-        with path.open("a", encoding="utf-8") as fh:
-            fh.write(event.model_dump_json() + "\n")
+        filename = f"{socket.gethostname()}.jsonl"
+        flags = os.O_APPEND | os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+        directory_fd = self._open_event_directory()
+        descriptor = -1
+        try:
+            try:
+                existing = os.stat(filename, dir_fd=directory_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                existing = None
+            if existing is not None and (
+                stat.S_ISLNK(existing.st_mode)
+                or not stat.S_ISREG(existing.st_mode)
+                or existing.st_nlink != 1
+            ):
+                raise ValueError("card event destination is unsafe")
+            descriptor = os.open(filename, flags, 0o600, dir_fd=directory_fd)
+            event_stat = os.fstat(descriptor)
+            if not stat.S_ISREG(event_stat.st_mode) or event_stat.st_nlink != 1:
+                raise ValueError("card event destination is unsafe")
+            with os.fdopen(descriptor, "a", encoding="utf-8") as fh:
+                descriptor = -1
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+                try:
+                    fh.write(event.model_dump_json() + "\n")
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                finally:
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            os.fsync(directory_fd)
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+            os.close(directory_fd)
 
     def read_all(self) -> list[CardEvent]:
         """Read every overlay event across all writers."""
         out: list[CardEvent] = []
-        if not self.dir.exists():
+        directory_fd = self._open_existing_event_directory()
+        if directory_fd is None:
             return out
-        for f in sorted(self.dir.glob("*.jsonl")):
-            for line in f.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if not line:
+        try:
+            for name in sorted(os.listdir(directory_fd)):
+                if not name.endswith(".jsonl"):
                     continue
-                try:
-                    out.append(CardEvent.model_validate_json(line))
-                except Exception:  # noqa: BLE001
+                raw = self._read_regular_file_bytes(directory_fd, name)
+                if raw is None:
                     continue
+                for line in raw.decode("utf-8").splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        out.append(CardEvent.model_validate_json(line))
+                    except Exception:  # noqa: BLE001
+                        continue
+        finally:
+            os.close(directory_fd)
         return out
 
 

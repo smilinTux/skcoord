@@ -23,8 +23,14 @@ from typing import Iterator
 
 from .atomic_io import atomic_write_text
 from .card import CardEvent, CardEventLog, Column, KanbanBoard
-from .card_store import card_store_write_enabled, mirror_coord_move
-from .coordination import AgentFile, AgentState, Board
+from .card_store import (
+    _open_lockfile,
+    card_mutation_lock,
+    card_store_write_enabled,
+    mirror_coord_move,
+    validate_card_lock_identifier,
+)
+from .coordination import AgentFile, AgentState, Board, _board_mutation_lock
 
 
 class LifecycleConflictError(RuntimeError):
@@ -110,11 +116,8 @@ def _is_active(agent: AgentFile, stale_after_seconds: int) -> bool:
 
 @contextmanager
 def _lifecycle_lock(home: Path, *, exclusive: bool) -> Iterator[None]:
-    """Serialize lifecycle transitions and repairs without restamping agents."""
-    directory = Path(home) / "coordination"
-    directory.mkdir(parents=True, exist_ok=True)
-    path = directory / ".lifecycle.lock"
-    with path.open("a+", encoding="utf-8") as handle:
+    """Serialize lifecycle-only work after the shared board lock when mutating."""
+    with _open_lockfile(home, "lifecycle.lock", "lifecycle") as handle:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
         try:
             yield
@@ -443,7 +446,7 @@ def repair_lifecycle(
     Missing-card completion history is deliberately preserved. A recent active
     orphan claim or multiple recent active claimants stops the entire repair.
     """
-    with _lifecycle_lock(home, exclusive=True):
+    with _board_mutation_lock(Path(home)), _lifecycle_lock(home, exclusive=True):
         return _repair_lifecycle_unlocked(
             home,
             actor=actor,
@@ -659,9 +662,14 @@ def transition_task(
     fails, compensating move events restore the prior folded card state before
     the error is returned.
     """
+    validate_card_lock_identifier(task_id)
     target = Column(column)
     root = Path(home)
-    with _lifecycle_lock(root, exclusive=True):
+    with (
+        _board_mutation_lock(root),
+        card_mutation_lock(root, task_id),
+        _lifecycle_lock(root, exclusive=True),
+    ):
         cards = {card.id: card for card in KanbanBoard(root).cards(include_archived=True)}
         current = cards.get(task_id)
         if current is None:

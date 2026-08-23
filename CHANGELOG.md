@@ -11,6 +11,11 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
 
 ### Fixed
 
+- `Board.claim_task(..., force=True)` no longer bypasses dependency gates.
+  The compatibility flag remains accepted, but incomplete, unknown, review,
+  and human dependencies now fail closed and list every blocking ID in every
+  supported CardStore mode (card 54cd56f2).
+
 - A change's `[ITIL:<id>] Implement: <title>` GTD next-action is now emitted at
   most once (card a7e3ca15, follow-on to the entry below). A change approved by
   CAB vote already folds `approved` before `update_change` runs, so re-issuing
