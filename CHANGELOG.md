@@ -70,6 +70,17 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
 
 ### Fixed
 
+- Fixed three CMDB drift-matcher false-positive classes responsible for 23 of
+  27 "high severity" findings in the 2026-08-23 audit: `collect_cron_jobs` now
+  parses `sk-cron-run.sh <name>` wrapper invocations (fixing an inline
+  `VAR=value` parsing bug that silently dropped those lines) and carries the
+  declared job name as an alias; Operatorapp-kind CIs (CLI tools, not
+  daemons) are now preserved with a `fleet_kind`/`cli` marker and exempted
+  from `drift()`'s declared-not-observed running-unit check; and
+  `collect_fleet_objects`/`collect_registry` now carry `spec.unit` and
+  registry `pid_file` stems as declared aliases. `drift()` now matches on the
+  full alias set (`_service_keys()`) instead of only `.name`.
+
 - Reverted the stale coordination rewrite in `c5731be`, restoring canonical
   agent projection validation, transactional lifecycle repair, ownerless
   ready/doing claims, and fail-closed dependency enforcement. The existing
