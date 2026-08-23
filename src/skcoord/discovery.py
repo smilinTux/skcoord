@@ -63,6 +63,7 @@ from .discovery_scan import (
     merge,
     scan,
 )
+from .discovery_syncthing import collect_syncthing_health, syncthing_ci_status
 from .discovery_systemd import (
     ORIGIN_DISTRO,
     ORIGIN_OPERATOR,
@@ -122,6 +123,7 @@ __all__ = [
     "collect_observed_agents",
     "collect_registry",
     "collect_systemd_units",
+    "collect_syncthing_health",
     "device_from_fingerprint",
     "drift",
     "identity_estate_drift",
@@ -129,4 +131,5 @@ __all__ = [
     "observation_state",
     "reconcile",
     "scan",
+    "syncthing_ci_status",
 ]

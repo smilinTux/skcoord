@@ -34,6 +34,9 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
   event that created it. Mirrors `record_attempt`'s (run_id, outcome)
   idempotency and 10-entry corruption cap; the reader side (skharness)
   decides how much of it reaches a prompt.
+- Added secret-free Syncthing discovery for each scanned node, including
+  service health, version and schema, folder state, pending work, connected
+  devices, and governed service relationships.
 
 - Added scheduled CMDB reconciliation policy helpers with validated,
   versioned configuration, a nonblocking application lease, configurable
@@ -98,6 +101,9 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
   `collect_fleet_objects`/`collect_registry` now carry `spec.unit` and
   registry `pid_file` stems as declared aliases. `drift()` now matches on the
   full alias set (`_service_keys()`) instead of only `.name`.
+- Limited automatic CMDB incident routing to CIs carrying the explicit
+  `alert-on-drift` tag, preventing generic inventory drift from creating
+  unreviewed incident floods.
 
 - Reverted the stale coordination rewrite in `c5731be`, restoring canonical
   agent projection validation, transactional lifecycle repair, ownerless

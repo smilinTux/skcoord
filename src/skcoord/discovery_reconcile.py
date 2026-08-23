@@ -69,13 +69,17 @@ def _redact_attributes(
             if is_secret_attribute_key(key):
                 findings.append({"ci_id": ci_id, "path": child_path})
             else:
-                clean[key], nested = _redact_attributes(child, ci_id=ci_id, path=child_path)
+                clean[key], nested = _redact_attributes(
+                    child, ci_id=ci_id, path=child_path
+                )
                 findings.extend(nested)
         return clean, findings
     if isinstance(value, (list, tuple)):
         clean_items = []
         for index, child in enumerate(value):
-            clean, nested = _redact_attributes(child, ci_id=ci_id, path=f"{path}[{index}]")
+            clean, nested = _redact_attributes(
+                child, ci_id=ci_id, path=f"{path}[{index}]"
+            )
             clean_items.append(clean)
             findings.extend(nested)
         return clean_items, findings
@@ -95,7 +99,9 @@ def _validated_discovery(
     for item in normalized:
         ci_id = item.ci_id
         if item.ci_type not in allowed_types:
-            failures.append({"ci_id": ci_id, "field": "ci_type", "reason": "unsupported"})
+            failures.append(
+                {"ci_id": ci_id, "field": "ci_type", "reason": "unsupported"}
+            )
         if not (item.canonical_name or item.name).strip():
             failures.append({"ci_id": ci_id, "field": "name", "reason": "empty"})
         if not isinstance(item.attributes, dict):
@@ -145,6 +151,11 @@ def _observed_status(item: DiscoveredCI) -> Optional[str]:
     """
     if not item.observed or item.ci_type != CIType.SERVICE.value:
         return None
+    from .discovery_syncthing import syncthing_ci_status
+
+    sync_status = syncthing_ci_status(item)
+    if sync_status is not None:
+        return sync_status
     state = item.attributes.get("active_state")
     if state == "active":
         return CIStatus.OPERATIONAL.value
@@ -200,7 +211,9 @@ def reconcile(
                 if target is not None:
                     ci_id = target.id
                 migrations.extend(
-                    (duplicate.id, ci_id) for duplicate in matching if duplicate.id != ci_id
+                    (duplicate.id, ci_id)
+                    for duplicate in matching
+                    if duplicate.id != ci_id
                 )
         by_id[ci_id] = item
 
@@ -243,12 +256,21 @@ def reconcile(
                     for tag in item.tags:
                         mgr.add_tag(ci_id, agent, tag, authority=item.authority)
                 if derived_status and derived_status != CIStatus.OPERATIONAL.value:
-                    mgr.set_status(ci_id, agent, derived_status, note="from observed active_state")
+                    mgr.set_status(
+                        ci_id, agent, derived_status, note="from observed active_state"
+                    )
                 for rel_type, target in item.relationships:
                     report.relationships.append(
-                        {"ci_id": ci_id, "action": "add", "rel_type": rel_type, "target": target}
+                        {
+                            "ci_id": ci_id,
+                            "action": "add",
+                            "rel_type": rel_type,
+                            "target": target,
+                        }
                     )
-                    mgr.add_relationship(ci_id, agent, rel_type, target, authority=item.authority)
+                    mgr.add_relationship(
+                        ci_id, agent, rel_type, target, authority=item.authority
+                    )
             else:
                 report.relationships.extend(
                     {
@@ -324,7 +346,14 @@ def reconcile(
         )
         if (
             not any(
-                (changed, missing_rels, stale_rels, metadata_changes, missing_tags, stale_tags)
+                (
+                    changed,
+                    missing_rels,
+                    stale_rels,
+                    metadata_changes,
+                    missing_tags,
+                    stale_tags,
+                )
             )
             and not status_changes
         ):
@@ -336,7 +365,9 @@ def reconcile(
             report_changes = ["status"] + report_changes
         report.updated[ci_id] = report_changes + [f"{r}->{t}" for r, t in missing_rels]
         report.updated[ci_id].extend(f"remove:{r}->{t}" for r, t in stale_rels)
-        report.updated[ci_id].extend(f"metadata:{key}" for key in sorted(metadata_changes))
+        report.updated[ci_id].extend(
+            f"metadata:{key}" for key in sorted(metadata_changes)
+        )
         report.updated[ci_id].extend(f"tag:+{tag}" for tag in missing_tags)
         report.updated[ci_id].extend(f"tag:-{tag}" for tag in stale_tags)
         report.relationships.extend(
@@ -351,9 +382,13 @@ def reconcile(
             for key in changed:
                 mgr.set_attribute(ci_id, agent, key, desired_attributes[key])
             if status_changes:
-                mgr.set_status(ci_id, agent, derived_status, note="from observed active_state")
+                mgr.set_status(
+                    ci_id, agent, derived_status, note="from observed active_state"
+                )
             for rel_type, target in missing_rels:
-                mgr.add_relationship(ci_id, agent, rel_type, target, authority=item.authority)
+                mgr.add_relationship(
+                    ci_id, agent, rel_type, target, authority=item.authority
+                )
             for rel_type, target in stale_rels:
                 mgr.remove_relationship(ci_id, agent, rel_type, target)
             for key, value in metadata_changes.items():
