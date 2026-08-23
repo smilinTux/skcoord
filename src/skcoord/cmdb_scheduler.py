@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Mapping, Sequence
 
 from .atomic_io import atomic_write_text
-from .cmdb import CIType, make_ci_id
+from .cmdb import CIType, CMDBManager, make_ci_id
 from .itil import ITILManager
 
 _SCHEMA = "skcoord.cmdb.reconcile-job-config/v1"
@@ -45,7 +45,9 @@ class ScheduledReconcileConfig:
     def __post_init__(self) -> None:
         if not self.owner_node.strip() or not self.agent.strip():
             raise ValueError("owner_node and agent are required")
-        if not _NAME_RE.fullmatch(self.owner_node) or not _NAME_RE.fullmatch(self.agent):
+        if not _NAME_RE.fullmatch(self.owner_node) or not _NAME_RE.fullmatch(
+            self.agent
+        ):
             raise ValueError("owner_node and agent must be safe names")
         positive = (
             self.cadence_seconds,
@@ -57,12 +59,22 @@ class ScheduledReconcileConfig:
             self.failure_alert_runs,
         )
         if min(positive) < 1 or self.timeout_seconds <= 0:
-            raise ValueError("cadence, limits, retention, grace, and thresholds must be positive")
-        if self.failure_budget < 0 or self.retry_count < 0 or self.retry_backoff_seconds < 0:
-            raise ValueError("failure budget, retries, and backoff must be non-negative")
+            raise ValueError(
+                "cadence, limits, retention, grace, and thresholds must be positive"
+            )
+        if (
+            self.failure_budget < 0
+            or self.retry_count < 0
+            or self.retry_backoff_seconds < 0
+        ):
+            raise ValueError(
+                "failure budget, retries, and backoff must be non-negative"
+            )
         if len(set(self.targets)) != len(self.targets):
             raise ValueError("targets must be unique")
-        if self.enabled and (not self.targets or set(self.credential_refs) != set(self.targets)):
+        if self.enabled and (
+            not self.targets or set(self.credential_refs) != set(self.targets)
+        ):
             raise ValueError("enabled jobs require one credential reference per target")
         for host, reference in self.credential_refs.items():
             if not host.strip() or not str(reference).startswith("skvault://"):
@@ -93,7 +105,9 @@ class ScheduledReconcileConfig:
             "drift_alert_runs",
             "failure_alert_runs",
         ):
-            if key in data and (not isinstance(data[key], int) or isinstance(data[key], bool)):
+            if key in data and (
+                not isinstance(data[key], int) or isinstance(data[key], bool)
+            ):
                 raise ValueError(f"{key} must be an integer")
         for key in ("timeout_seconds", "retry_backoff_seconds"):
             if key in data and (
@@ -118,9 +132,11 @@ class ScheduledReconcileConfig:
         return {
             "schema": _SCHEMA,
             **{
-                key: list(value) if key == "targets" else dict(value)
-                if key == "credential_refs"
-                else value
+                key: (
+                    list(value)
+                    if key == "targets"
+                    else dict(value) if key == "credential_refs" else value
+                )
                 for key, value in self.__dict__.items()
             },
         }
@@ -148,7 +164,9 @@ class ReconcileLease(AbstractContextManager["ReconcileLease"]):
     """Nonblocking node-local lease that prevents overlapping application."""
 
     def __init__(self, root: Path, owner_node: str, agent: str) -> None:
-        self.path = Path(root) / "scheduler" / owner_node / "locks" / "cmdb-reconcile.lock"
+        self.path = (
+            Path(root) / "scheduler" / owner_node / "locks" / "cmdb-reconcile.lock"
+        )
         self.agent = agent
         self.acquired = False
         self._file = None
@@ -200,7 +218,9 @@ def consecutive_event_count(
     artifacts: Sequence[Mapping[str, object]], event_group: str, dedup_key: str
 ) -> int:
     """Count newest consecutive artifacts containing one normalized event."""
-    ordered = sorted(artifacts, key=lambda item: str(item.get("ended_at", "")), reverse=True)
+    ordered = sorted(
+        artifacts, key=lambda item: str(item.get("ended_at", "")), reverse=True
+    )
     count = 0
     for artifact in ordered:
         if dedup_key not in _event_keys(artifact, event_group):
@@ -221,7 +241,9 @@ def route_reconcile_incidents(
     events = latest.get("events", {})
     if not isinstance(events, Mapping):
         return []
-    mgr = ITILManager(Path(home))
+    home = Path(home)
+    mgr = ITILManager(home)
+    cmdb = CMDBManager(home)
     incident_ids: list[str] = []
     groups = (
         ("drift", config.drift_alert_runs),
@@ -236,10 +258,16 @@ def route_reconcile_incidents(
                 continue
             material = group == "drift" and record.get("severity") == "high"
             threshold = 1 if material else default_threshold
-            if consecutive_event_count(artifacts, group, str(record["dedup_key"])) < threshold:
+            if (
+                consecutive_event_count(artifacts, group, str(record["dedup_key"]))
+                < threshold
+            ):
                 continue
             if group == "drift":
                 affected_ci = str(record.get("ci_id", "cmdb"))
+                ci = cmdb.get_ci(affected_ci)
+                if ci is None or "alert-on-drift" not in (ci.tags or []):
+                    continue
                 failure_class = f"cmdb-drift-{record.get('kind', 'unknown')}"
                 title = f"CMDB drift: {record.get('kind', 'unknown')} on {affected_ci}"
                 impact = str(record.get("detail", ""))[:500]
@@ -273,7 +301,9 @@ def prune_run_artifacts(home: Path, retention_runs: int) -> list[Path]:
     if retention_runs < 1:
         raise ValueError("retention_runs must be positive")
     directory = Path(home).expanduser() / "cmdb" / "reconcile-runs"
-    paths = sorted(directory.glob("*.json"), key=lambda path: path.stat().st_mtime, reverse=True)
+    paths = sorted(
+        directory.glob("*.json"), key=lambda path: path.stat().st_mtime, reverse=True
+    )
     removed: list[Path] = []
     for path in paths[retention_runs:]:
         checksum = path.with_suffix(".sha256")
@@ -285,7 +315,10 @@ def prune_run_artifacts(home: Path, retention_runs: int) -> list[Path]:
         atomic_write_text(
             receipt,
             json.dumps(
-                {"retention_runs": retention_runs, "removed": [path.name for path in removed]},
+                {
+                    "retention_runs": retention_runs,
+                    "removed": [path.name for path in removed],
+                },
                 sort_keys=True,
             )
             + "\n",

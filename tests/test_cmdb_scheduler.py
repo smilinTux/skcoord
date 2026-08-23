@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from skcoord.cmdb import CMDBManager
 from skcoord.cmdb_reconcile import write_run_artifact
 from skcoord.cmdb_scheduler import (
     ReconcileLease,
@@ -23,7 +24,7 @@ def _config(**overrides) -> ScheduledReconcileConfig:
     values = {
         "enabled": True,
         "targets": ("chiap04",),
-        "credential_refs": {"chiap04": "skvault://fleet/chiap04"},
+        "credential_refs": {"chiap04": "skvault://ssh/cmdb-chiap04"},
     }
     values.update(overrides)
     return ScheduledReconcileConfig(**values)
@@ -91,6 +92,8 @@ def test_consecutive_event_count_stops_at_clear_run() -> None:
 def test_material_drift_and_repeated_failure_create_deduplicated_incidents(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    CMDBManager(tmp_path).create_ci("api", "service", tags=["alert-on-drift"])
+
     class FakeITIL:
         incidents: dict[str, SimpleNamespace] = {}
 
@@ -136,6 +139,39 @@ def test_material_drift_and_repeated_failure_create_deduplicated_incidents(
     assert first == ["inc-1", "inc-2"]
     assert second == first
     assert len(FakeITIL.incidents) == 2
+
+
+def test_inventory_drift_without_explicit_alert_policy_does_not_file_incident(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    created = []
+
+    class FakeITIL:
+        def __init__(self, _home: Path) -> None:
+            pass
+
+        def find_open_incident_for_service(self, _service: str):
+            return None
+
+        def create_incident(self, *args, **kwargs):
+            created.append((args, kwargs))
+
+    monkeypatch.setattr("skcoord.cmdb_scheduler.ITILManager", FakeITIL)
+    CMDBManager(tmp_path).create_ci("inventory-only", "service")
+    drift = {
+        "dedup_key": "inventory-drift",
+        "ci_id": "ci-service-inventory-only",
+        "kind": "declared_not_observed",
+        "severity": "high",
+        "detail": "missing",
+    }
+    artifact = {
+        "ended_at": "2026-08-22T03:00:00+00:00",
+        "events": {"drift": [drift], "scan_health": []},
+    }
+
+    assert route_reconcile_incidents(tmp_path, [artifact], _config()) == []
+    assert created == []
 
 
 def test_retention_removes_oldest_pairs_and_records_receipt(tmp_path: Path) -> None:

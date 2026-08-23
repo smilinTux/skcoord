@@ -30,6 +30,7 @@ from .discovery_runtime import (
     collect_listening_ports,
     collect_network_interfaces,
 )
+from .discovery_syncthing import collect_syncthing_health
 from .discovery_systemd import collect_docker_containers, collect_systemd_units
 
 logger = logging.getLogger("skcoord.discovery")
@@ -55,6 +56,7 @@ OBSERVED_COLLECTORS: tuple[Callable[[CommandRunner], list[DiscoveredCI]], ...] =
     collect_observed_agents,
     collect_model_endpoints,
     collect_identity_estate,
+    collect_syncthing_health,
 )
 
 
@@ -154,7 +156,9 @@ def scan(
                 )
             except Exception:  # noqa: BLE001
                 logger.exception(
-                    "observed collector failed: %s on %s", observer.__name__, runner.host
+                    "observed collector failed: %s on %s",
+                    observer.__name__,
+                    runner.host,
                 )
     return merge(found)
 
