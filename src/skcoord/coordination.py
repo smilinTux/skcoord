@@ -13,11 +13,16 @@ Directory layout:
 
 from __future__ import annotations
 
+import fcntl
 import json
 import logging
+import os
 import re
 import socket
+import stat
+import time
 import uuid
+from contextlib import ExitStack, contextmanager
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
@@ -28,6 +33,32 @@ from pydantic import BaseModel, Field, field_validator
 from .atomic_io import atomic_write_text
 
 logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def _board_mutation_lock(home: Path, timeout_seconds: float = 5.0):
+    """Lock agent projections before sorted per-card locks.
+
+    Lock order is always board, then card identifiers in lexical order, then
+    any lifecycle-only lock. ``flock`` is local-host coordination only. Remote
+    writers converge through ordered, preconditioned card events.
+    """
+    from .card_store import _open_lockfile
+
+    deadline = time.monotonic() + timeout_seconds
+    with _open_lockfile(home, "board-mutations.lock", "board mutation") as handle:
+        while True:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("timed out acquiring board mutation lock")
+                time.sleep(0.01)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def _now_iso() -> str:
@@ -337,8 +368,372 @@ class Board:
         path = self.agent_projection_path(agent.agent)
         if path.is_symlink() or (path.exists() and not path.is_file()):
             raise ValueError("agent projection destination must be a regular file")
-        atomic_write_text(path, json.dumps(agent.model_dump(), indent=2) + "\n")
+        self._replace_agent_projection_bytes(
+            agent.agent, (json.dumps(agent.model_dump(), indent=2) + "\n").encode("utf-8")
+        )
         return path
+
+    def _agent_projection_directory_fd(self) -> int:
+        """Open the validated agents directory and pin it for one operation."""
+        from .card_store import _open_coordination_child_directory
+
+        return _open_coordination_child_directory(self.home, "agents")
+
+    def _snapshot_agent_projection(self, name: str) -> tuple[Path, bytes | None]:
+        """Take a raw-byte snapshot without following a projection symlink."""
+        canonical = AgentFile.validate_agent_name(name)
+        self.ensure_dirs()
+        path = self.agent_projection_path(canonical)
+        directory_fd = self._agent_projection_directory_fd()
+        no_follow = getattr(os, "O_NOFOLLOW", None)
+        if no_follow is None:
+            os.close(directory_fd)
+            raise RuntimeError("safe agent projection reads require O_NOFOLLOW support")
+        flags = os.O_RDONLY | no_follow
+        try:
+            try:
+                descriptor = os.open(f"{canonical}.json", flags, dir_fd=directory_fd)
+            except FileNotFoundError:
+                return path, None
+            try:
+                file_stat = os.fstat(descriptor)
+                if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_nlink != 1:
+                    raise ValueError("agent projection must be a regular single-link file")
+                chunks: list[bytes] = []
+                while True:
+                    chunk = os.read(descriptor, 65536)
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                return path, b"".join(chunks)
+            finally:
+                os.close(descriptor)
+        finally:
+            os.close(directory_fd)
+
+    def _replace_agent_projection_bytes(self, name: str, payload: bytes) -> Path:
+        """Crash-atomically replace one projection with no-follow protection."""
+        canonical = AgentFile.validate_agent_name(name)
+        path = self.agent_projection_path(canonical)
+        directory_fd = self._agent_projection_directory_fd()
+        no_follow = getattr(os, "O_NOFOLLOW", None)
+        if no_follow is None:
+            os.close(directory_fd)
+            raise RuntimeError("safe agent projection writes require O_NOFOLLOW support")
+        temp_name = f".{canonical}.restore-{uuid.uuid4().hex}.tmp"
+        descriptor = -1
+        try:
+            try:
+                existing = os.stat(f"{canonical}.json", dir_fd=directory_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                existing = None
+            if existing is not None and (
+                stat.S_ISLNK(existing.st_mode)
+                or not stat.S_ISREG(existing.st_mode)
+                or existing.st_nlink != 1
+            ):
+                raise ValueError("agent projection destination must be a regular single-link file")
+            descriptor = os.open(
+                temp_name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | no_follow,
+                0o600,
+                dir_fd=directory_fd,
+            )
+            offset = 0
+            while offset < len(payload):
+                offset += os.write(descriptor, payload[offset:])
+            os.fsync(descriptor)
+            temporary = os.stat(temp_name, dir_fd=directory_fd, follow_symlinks=False)
+            opened = os.fstat(descriptor)
+            if (
+                stat.S_ISLNK(temporary.st_mode)
+                or not stat.S_ISREG(temporary.st_mode)
+                or temporary.st_nlink != 1
+                or (temporary.st_dev, temporary.st_ino) != (opened.st_dev, opened.st_ino)
+            ):
+                raise ValueError("agent projection temporary destination is unsafe")
+            try:
+                current = os.stat(f"{canonical}.json", dir_fd=directory_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                current = None
+            if current is not None and (
+                stat.S_ISLNK(current.st_mode)
+                or not stat.S_ISREG(current.st_mode)
+                or current.st_nlink != 1
+            ):
+                raise ValueError("agent projection destination must be a regular single-link file")
+            os.replace(
+                temp_name,
+                f"{canonical}.json",
+                src_dir_fd=directory_fd,
+                dst_dir_fd=directory_fd,
+            )
+            os.fsync(directory_fd)
+        except BaseException:
+            if descriptor >= 0:
+                os.close(descriptor)
+                descriptor = -1
+            try:
+                os.unlink(temp_name, dir_fd=directory_fd)
+            except FileNotFoundError:
+                pass
+            raise
+        finally:
+            os.close(directory_fd)
+        return path
+
+    def _restore_agent_projection(self, name: str, original: bytes | None) -> None:
+        """Restore an exact raw snapshot, including a safely absent file."""
+        canonical = AgentFile.validate_agent_name(name)
+        if original is not None:
+            self._replace_agent_projection_bytes(canonical, original)
+            return
+        directory_fd = self._agent_projection_directory_fd()
+        try:
+            try:
+                existing = os.stat(f"{canonical}.json", dir_fd=directory_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                return
+            if (
+                stat.S_ISLNK(existing.st_mode)
+                or not stat.S_ISREG(existing.st_mode)
+                or existing.st_nlink != 1
+            ):
+                raise ValueError("agent projection destination must be a regular single-link file")
+            os.unlink(f"{canonical}.json", dir_fd=directory_fd)
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+
+    def _append_release_recovery(self, payload: dict) -> Path:
+        """Durably append one no-follow recovery record for a failed mutation."""
+        from .card_store import _open_coordination_child_directory
+
+        directory_fd = _open_coordination_child_directory(self.home, "recovery")
+        filename = f"{socket.gethostname()}.jsonl"
+        descriptor = -1
+        no_follow = getattr(os, "O_NOFOLLOW", None)
+        if no_follow is None:
+            os.close(directory_fd)
+            raise RuntimeError("safe recovery records require O_NOFOLLOW support")
+        try:
+            try:
+                existing = os.stat(filename, dir_fd=directory_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                existing = None
+            if existing is not None and (
+                stat.S_ISLNK(existing.st_mode)
+                or not stat.S_ISREG(existing.st_mode)
+                or existing.st_nlink != 1
+            ):
+                raise ValueError("recovery record destination is unsafe")
+            descriptor = os.open(
+                filename,
+                os.O_APPEND | os.O_CREAT | os.O_WRONLY | no_follow,
+                0o600,
+                dir_fd=directory_fd,
+            )
+            encoded = (json.dumps(payload, sort_keys=True) + "\n").encode("utf-8")
+            offset = 0
+            while offset < len(encoded):
+                offset += os.write(descriptor, encoded[offset:])
+            os.fsync(descriptor)
+            os.close(descriptor)
+            descriptor = -1
+            os.fsync(directory_fd)
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+            os.close(directory_fd)
+        return self.coord_dir / "recovery" / filename
+
+    def _recover_store_failure(
+        self,
+        *,
+        operation: str,
+        task_id: str,
+        owner: str,
+        actor: str,
+        original: bytes | None,
+        error: Exception,
+        transition_ids: list[tuple[str, str]],
+    ) -> None:
+        """Persist an intent then restore the legacy projection fail-closed."""
+        record = {
+            "record_id": uuid.uuid4().hex,
+            "operation": operation,
+            "task_id": task_id,
+            "owner": owner,
+            "actor": actor,
+            "phase": "card_store_write_uncertain",
+            "error": str(error),
+            "legacy_snapshot_present": original is not None,
+            "transition_ids": [
+                {"task_id": transition_task_id, "transition_id": transition_id}
+                for transition_task_id, transition_id in transition_ids
+            ],
+            "recorded_at": _now_iso(),
+        }
+        try:
+            self._append_release_recovery(record)
+        except Exception as receipt_error:
+            try:
+                self._restore_agent_projection(owner, original)
+            except Exception as restore_error:
+                raise RuntimeError(
+                    "mutation recovery record and restore both failed"
+                ) from restore_error
+            raise RuntimeError(
+                "mutation recovery record could not be persisted"
+            ) from receipt_error
+        try:
+            self._restore_agent_projection(owner, original)
+        except Exception as restore_error:
+            record["phase"] = "legacy_restore_failed"
+            record["restore_error"] = str(restore_error)
+            self._append_release_recovery(record)
+            raise RuntimeError("recovery record written; board is fail-closed") from restore_error
+        record["phase"] = "legacy_restored_card_store_uncertain"
+        self._append_release_recovery(record)
+
+    def _store_transitions_are_durable(self, transitions: list[tuple[str, str]]) -> bool:
+        """Return whether every exact intended CardStore transition exists."""
+        from .card_store import CardStore
+
+        return all(
+            CardStore(self.home).has_transition(task_id, transition_id)
+            for task_id, transition_id in transitions
+        )
+
+    def _store_transitions_are_applied(
+        self,
+        transitions: list[tuple[str, str]],
+        expected_states: list[tuple[str, str | None, str]],
+    ) -> bool:
+        """Return whether durable events also folded to their intended state.
+
+        A write can fsync successfully and then raise in a wrapper. That is a
+        successful mutation only if the deterministic fold reflects the exact
+        intended result. A cross-host event may instead make a preconditioned
+        event conflict, so event presence alone must never bless a divergent
+        legacy projection.
+        """
+        from .card_store import CardStore
+
+        if not self._store_transitions_are_durable(transitions):
+            return False
+        store = CardStore(self.home)
+        for task_id, expected_owner, expected_status in expected_states:
+            card = store.fold(task_id)
+            if (
+                card is None
+                or card.owner != expected_owner
+                or card.status.value != expected_status
+            ):
+                return False
+        return True
+
+    def _card_matches_snapshot(self, task_id: str, snapshot) -> bool:
+        """Return whether a CardStore card has its captured owner and column."""
+        from .card_store import CardStore
+
+        current = CardStore(self.home).fold(task_id)
+        return (
+            current is not None
+            and current.owner == snapshot.owner
+            and current.status == snapshot.status
+            and current.order == snapshot.order
+        )
+
+    def _compensate_partial_claim(
+        self,
+        *,
+        task_id: str,
+        owner: str,
+        claim_revision: str,
+        claim_transition: str,
+        snapshot,
+    ) -> list[tuple[str, str]]:
+        """Undo a durable target claim when its paired bump cannot be mirrored.
+
+        Claiming a second current task consists of two CardStore transitions.
+        If the target claim became durable but the bumped-card demotion did not,
+        restore the target card to its exact captured owner, column, and order
+        before restoring the raw legacy agent projection.
+        """
+        from .card_store import CardStore
+
+        if snapshot is None or not self._store_transitions_are_durable(
+            [(task_id, claim_transition)]
+        ):
+            return []
+        current = CardStore(self.home).fold(task_id)
+        if current is None or current.owner != owner or current.status.value != "doing":
+            return []
+
+        transitions: list[tuple[str, str]] = []
+        release_transition = uuid.uuid4().hex
+        try:
+            self._mirror_card_store(
+                "release",
+                task_id=task_id,
+                owner=owner,
+                actor=owner,
+                expected_claim_revision=claim_revision,
+                transition_id=release_transition,
+            )
+        except Exception:
+            if not self._store_transitions_are_applied(
+                [(task_id, release_transition)], [(task_id, None, "backlog")]
+            ):
+                raise
+        transitions.append((task_id, release_transition))
+
+        if snapshot.owner is not None:
+            restore_claim_transition = uuid.uuid4().hex
+            self._mirror_card_store(
+                "claim",
+                task_id=task_id,
+                agent=snapshot.owner,
+                transition_id=restore_claim_transition,
+                claim_revision=uuid.uuid4().hex,
+            )
+            transitions.append((task_id, restore_claim_transition))
+
+        restored = CardStore(self.home).fold(task_id)
+        if restored is None:
+            raise RuntimeError("claim compensation could not fold the target card")
+        if restored.status != snapshot.status or restored.order != snapshot.order:
+            move_transition = uuid.uuid4().hex
+            self._mirror_card_store(
+                "move",
+                task_id=task_id,
+                agent=owner,
+                column=snapshot.status.value,
+                order=snapshot.order,
+                transition_id=move_transition,
+            )
+            transitions.append((task_id, move_transition))
+
+        if not self._card_matches_snapshot(task_id, snapshot):
+            raise RuntimeError("claim compensation did not restore the target card")
+        return transitions
+
+    def _assert_no_claim_conflict(self, task_id: str, owner: str) -> None:
+        """Block completion until a concurrent cross-host ownership conflict is resolved."""
+        from .card_store import CardStore
+
+        card = CardStore(self.home).fold(task_id)
+        if card is None:
+            return
+        conflicts = card.meta.get("claim_conflicts")
+        if conflicts:
+            raise ValueError(
+                f"Task {task_id} has unresolved concurrent claim conflicts; "
+                "explicit release or reconciliation is required"
+            )
+        if card.owner not in {None, owner}:
+            raise ValueError(f"Task {task_id} is owned by {card.owner}, not {owner}")
 
     def create_task(self, task: Task) -> Path:
         """Write a new task file.
@@ -361,8 +756,8 @@ class Board:
     def _mirror_card_store(self, op: str, **kw) -> None:
         """Flag-gated dual-write into the event-sourced CardStore (Phase 4).
 
-        A no-op unless ``SKCOORD_CARD_STORE`` is ``1``/``dual``. Best-effort: a
-        CardStore failure never breaks the authoritative coord write.
+        A no-op unless ``SKCOORD_CARD_STORE`` is ``1``/``dual``. Lifecycle
+        mutations fail closed so callers can restore their raw agent snapshot.
         """
         try:
             from . import card_store
@@ -372,15 +767,132 @@ class Board:
             if op == "create":
                 card_store.mirror_coord_create(self.home, kw["task"])
             elif op == "claim":
-                card_store.mirror_coord_claim(self.home, kw["task_id"], kw["agent"])
+                card_store.mirror_coord_claim(
+                    self.home,
+                    kw["task_id"],
+                    kw["agent"],
+                    transition_id=kw.get("transition_id", ""),
+                    claim_revision=kw.get("claim_revision", ""),
+                )
             elif op == "complete":
-                card_store.mirror_coord_complete(self.home, kw["task_id"], kw["agent"])
+                card_store.mirror_coord_complete(
+                    self.home,
+                    kw["task_id"],
+                    kw["agent"],
+                    transition_id=kw.get("transition_id", ""),
+                )
             elif op == "archive":
                 card_store.mirror_coord_archive(self.home, kw["task_id"], kw["agent"])
             elif op == "demote":
-                card_store.mirror_coord_move(self.home, kw["task_id"], "ready", kw["agent"])
+                card_store.mirror_coord_move(
+                    self.home,
+                    kw["task_id"],
+                    "ready",
+                    kw["agent"],
+                    transition_id=kw.get("transition_id", ""),
+                )
+            elif op == "move":
+                card_store.mirror_coord_move(
+                    self.home,
+                    kw["task_id"],
+                    kw["column"],
+                    kw["agent"],
+                    order=kw.get("order"),
+                    transition_id=kw.get("transition_id", ""),
+                )
+            elif op == "add_label":
+                card_store.CardStore(self.home).append_event(
+                    kw["task_id"],
+                    "add_label",
+                    kw["agent"],
+                    label=kw["label"],
+                    transition_id=kw.get("transition_id", ""),
+                )
+            elif op == "remove_label":
+                card_store.CardStore(self.home).append_event(
+                    kw["task_id"],
+                    "remove_label",
+                    kw["agent"],
+                    label=kw["label"],
+                    transition_id=kw.get("transition_id", ""),
+                )
+            elif op == "release":
+                card_store.mirror_coord_release(
+                    self.home,
+                    kw["task_id"],
+                    kw["owner"],
+                    kw["actor"],
+                    kw["expected_claim_revision"],
+                    transition_id=kw.get("transition_id", ""),
+                )
         except Exception as exc:  # noqa: BLE001
             logger.warning("CardStore mirror (%s) failed: %s", op, exc)
+            if op in {
+                "claim",
+                "complete",
+                "demote",
+                "move",
+                "release",
+                "add_label",
+                "remove_label",
+            }:
+                raise
+
+    def _task_raw_path(self, task_id: str) -> Path:
+        """Resolve one existing task JSON path without accepting traversal."""
+        from .card_store import validate_card_lock_identifier
+
+        validate_card_lock_identifier(task_id)
+        matches = sorted(self.tasks_dir.glob(f"{task_id}-*.json"))
+        if not matches:
+            exact = self.tasks_dir / f"{task_id}.json"
+            if exact.exists():
+                matches = [exact]
+        if not matches:
+            raise FileNotFoundError(f"No task file for id {task_id} in {self.tasks_dir}")
+        path = matches[0]
+        if path.is_symlink() or not path.is_file():
+            raise ValueError("task destination must be a regular file")
+        return path
+
+    @staticmethod
+    def _read_regular_file_bytes(path: Path) -> bytes:
+        """Read one task file through a pinned parent descriptor.
+
+        The pre-open ``Path`` checks are useful diagnostics only. The actual
+        mutation input must be opened with ``O_NOFOLLOW`` and verified after
+        open so a symlink replacement cannot redirect a task rewrite.
+        """
+        no_follow = getattr(os, "O_NOFOLLOW", None)
+        if no_follow is None or path.name in {"", ".", ".."}:
+            raise ValueError("task destination is unsafe")
+        try:
+            directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | no_follow)
+        except OSError as exc:
+            raise ValueError("task parent is unsafe") from exc
+        descriptor = -1
+        try:
+            existing = os.stat(path.name, dir_fd=directory_fd, follow_symlinks=False)
+            if (
+                stat.S_ISLNK(existing.st_mode)
+                or not stat.S_ISREG(existing.st_mode)
+                or existing.st_nlink != 1
+            ):
+                raise ValueError("task destination must be a regular single-link file")
+            descriptor = os.open(path.name, os.O_RDONLY | no_follow, dir_fd=directory_fd)
+            opened = os.fstat(descriptor)
+            if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
+                raise ValueError("task destination must be a regular single-link file")
+            chunks: list[bytes] = []
+            while True:
+                chunk = os.read(descriptor, 65536)
+                if not chunk:
+                    return b"".join(chunks)
+                chunks.append(chunk)
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+            os.close(directory_fd)
 
     def _write_task_raw(self, task_id: str, mutate: Callable[[dict], None]) -> Path:
         """Atomically mutate a task's raw JSON dict, preserving all keys.
@@ -398,15 +910,8 @@ class Board:
         Raises:
             FileNotFoundError: If no task file matches the id.
         """
-        matches = sorted(self.tasks_dir.glob(f"{task_id}-*.json"))
-        if not matches:
-            exact = self.tasks_dir / f"{task_id}.json"
-            if exact.exists():
-                matches = [exact]
-        if not matches:
-            raise FileNotFoundError(f"No task file for id {task_id} in {self.tasks_dir}")
-        path = matches[0]
-        data = json.loads(path.read_text(encoding="utf-8"))
+        path = self._task_raw_path(task_id)
+        data = json.loads(self._read_regular_file_bytes(path).decode("utf-8"))
         mutate(data)
         atomic_write_text(path, json.dumps(data, indent=2) + "\n")
         return path
@@ -594,14 +1099,13 @@ class Board:
                 "replacement_hint": replacement_hint,
             }
             for i, existing in enumerate(attempts):
-                if (existing.get("run_id") == run_id
-                        and existing.get("outcome") == outcome):
+                if existing.get("run_id") == run_id and existing.get("outcome") == outcome:
                     attempts[i] = entry
                     break
             else:
                 attempts.append(entry)
             if len(attempts) > self._MAX_ATTEMPTS:
-                attempts[:] = attempts[-self._MAX_ATTEMPTS:]
+                attempts[:] = attempts[-self._MAX_ATTEMPTS :]
 
         return self._write_task_raw(task_id, _mutate)
 
@@ -674,14 +1178,13 @@ class Board:
                 "approach_hint": approach_hint,
             }
             for i, existing in enumerate(successes):
-                if (existing.get("run_id") == run_id
-                        and existing.get("outcome") == outcome):
+                if existing.get("run_id") == run_id and existing.get("outcome") == outcome:
                     successes[i] = entry
                     break
             else:
                 successes.append(entry)
             if len(successes) > self._MAX_ATTEMPTS:
-                successes[:] = successes[-self._MAX_ATTEMPTS:]
+                successes[:] = successes[-self._MAX_ATTEMPTS :]
 
         return self._write_task_raw(task_id, _mutate)
 
@@ -701,6 +1204,8 @@ class Board:
         meta.autopilot.edits[] as {field, old, new, ts, run_id}. Goes through
         the atomic raw-dict helper.
         """
+
+        tag_events: list[tuple[str, str, str]] = []
 
         def _mutate(d: dict) -> None:
             ap = d.setdefault("meta", {}).setdefault("autopilot", {})
@@ -746,8 +1251,76 @@ class Board:
                         }
                     )
                     d["tags"] = merged
+                    tag_events.extend(
+                        ("add_label", tag, uuid.uuid4().hex)
+                        for tag in merged
+                        if tag not in existing
+                    )
+                    tag_events.extend(
+                        ("remove_label", tag, uuid.uuid4().hex)
+                        for tag in existing
+                        if tag not in merged
+                    )
 
-        return self._write_task_raw(task_id, _mutate)
+        original_path = self._task_raw_path(task_id)
+        original_bytes = self._read_regular_file_bytes(original_path)
+        path = self._write_task_raw(task_id, _mutate)
+        completed_events: list[tuple[str, str, str]] = []
+        try:
+            for action, tag, transition_id in tag_events:
+                try:
+                    self._mirror_card_store(
+                        action,
+                        task_id=task_id,
+                        agent=run_id or "coord",
+                        label=tag,
+                        transition_id=transition_id,
+                    )
+                except Exception:
+                    if not self._store_transitions_are_durable([(task_id, transition_id)]):
+                        raise
+                completed_events.append((action, tag, transition_id))
+        except Exception as mirror_error:
+            try:
+                for action, tag, _ in reversed(completed_events):
+                    inverse = "remove_label" if action == "add_label" else "add_label"
+                    self._mirror_card_store(
+                        inverse,
+                        task_id=task_id,
+                        agent=run_id or "coord",
+                        label=tag,
+                        transition_id=uuid.uuid4().hex,
+                    )
+                atomic_write_text(path, original_bytes.decode("utf-8"))
+                self._append_release_recovery(
+                    {
+                        "record_id": uuid.uuid4().hex,
+                        "operation": "label_mirror",
+                        "task_id": task_id,
+                        "actor": run_id or "coord",
+                        "phase": "legacy_task_restored",
+                        "error": str(mirror_error),
+                        "recorded_at": _now_iso(),
+                    }
+                )
+            except Exception as compensation_error:
+                self._append_release_recovery(
+                    {
+                        "record_id": uuid.uuid4().hex,
+                        "operation": "label_mirror",
+                        "task_id": task_id,
+                        "actor": run_id or "coord",
+                        "phase": "label_compensation_failed",
+                        "error": str(mirror_error),
+                        "compensation_error": str(compensation_error),
+                        "recorded_at": _now_iso(),
+                    }
+                )
+                raise RuntimeError(
+                    "label mirror compensation failed; board is fail-closed"
+                ) from compensation_error
+            raise
+        return path
 
     def close_task_obsolete(self, task_id: str, reason: str, run_id: str | None = None) -> Path:
         """Mark a task obsolete on the task file itself.
@@ -790,7 +1363,7 @@ class Board:
             notes = d.setdefault("notes", [])
             if isinstance(notes, list):
                 notes.append(
-                    f"[decomposed {ts}] into {len(children)} subtasks: " f"{', '.join(children)}"
+                    f"[decomposed {ts}] into {len(children)} subtasks: {', '.join(children)}"
                 )
 
         return self._write_task_raw(task_id, _mutate)
@@ -798,23 +1371,28 @@ class Board:
     def unblocked_task_ids(self) -> set[str]:
         """Task ids whose dependencies are all completed (Phase-0 compute).
 
-        A task is unblocked when its dependencies are a subset of the union of
-        every agent's completed_tasks. Tasks with no dependencies are trivially
-        unblocked.
+        A task is unblocked when every folded dependency is done. Tasks with no
+        dependencies are trivially unblocked. This must read the same folded
+        projection as ``claim_task`` so append-only dependency amendments cannot
+        be bypassed by an eligibility scan.
 
         Returns:
             set[str]: Task ids that are unblocked.
         """
-        completed: set[str] = set()
-        for ag in self.load_agents():
-            completed.update(ag.completed_tasks)
+        views = self._legacy_task_views(include_archived=True)
+        status_by_id = {view.task.id: view.status for view in views}
         # ``autopilot-staged`` children live in the "Proposed" lane: decomposed but
         # not yet released by a human. They must never be selected, assessed, or
         # built, so they are excluded from the unblocked set until
         # ``skos autopilot release <epic>`` strips the tag.
-        return {t.id for t in self.load_tasks()
-                if set(t.dependencies).issubset(completed)
-                and "autopilot-staged" not in (t.tags or [])}
+        return {
+            view.task.id
+            for view in self._legacy_task_views()
+            if all(
+                status_by_id.get(dep_id) == TaskStatus.DONE for dep_id in view.task.dependencies
+            )
+            and "autopilot-staged" not in (view.task.tags or [])
+        }
 
     def release_stale_claims(self, agent: str, older_than_seconds: int) -> list[str]:
         """Release an agent's uncompleted claims if it has gone stale.
@@ -826,26 +1404,38 @@ class Board:
         a released id. Returns the released ids (empty if the agent is unknown,
         fresh, or holds no claims).
         """
-        af = self.load_agent(agent)
-        if af is None:
-            return []
-        try:
-            last_seen = datetime.fromisoformat(af.last_seen)
-        except (ValueError, TypeError):
-            return []
-        if last_seen.tzinfo is None:
-            last_seen = last_seen.replace(tzinfo=timezone.utc)
-        age = (datetime.now(timezone.utc) - last_seen).total_seconds()
-        if age < older_than_seconds:
-            return []
-        released = list(af.claimed_tasks)
-        if not released:
-            return []
-        af.claimed_tasks = []
-        if af.current_task in released:
-            af.current_task = None
-        self.save_agent(af)
-        return released
+        from .card_store import card_mutation_lock, validate_card_lock_identifier
+
+        canonical = AgentFile.validate_agent_name(agent)
+        with _board_mutation_lock(self.home):
+            af = self.load_agent(canonical)
+            if af is None:
+                return []
+            try:
+                last_seen = datetime.fromisoformat(af.last_seen)
+            except (ValueError, TypeError):
+                return []
+            if last_seen.tzinfo is None:
+                last_seen = last_seen.replace(tzinfo=timezone.utc)
+            age = (datetime.now(timezone.utc) - last_seen).total_seconds()
+            if age < older_than_seconds:
+                return []
+            released = sorted(dict.fromkeys(af.claimed_tasks))
+            if not released:
+                return []
+            for task_id in released:
+                validate_card_lock_identifier(task_id)
+            changed: list[str] = []
+            for task_id in released:
+                with card_mutation_lock(self.home, task_id):
+                    if self._release_claim_locked(
+                        canonical,
+                        task_id,
+                        actor="stale-release",
+                        allow_missing_card_store=True,
+                    ):
+                        changed.append(task_id)
+            return changed
 
     def get_task_views(self, include_archived: bool = False) -> list[TaskView]:
         """Build enriched task views with derived status.
@@ -893,6 +1483,25 @@ class Board:
         legacy agent file must never be missed by a sweep.
         """
         tasks = self.load_tasks(include_archived=include_archived)
+        # Dependency amendments are governance state, not mutable task-file
+        # contents. Apply their append-only fold even when the CardStore read
+        # kill switch selects the legacy projection, so rollback cannot reopen a
+        # gate that the active projection still enforces.
+        try:
+            from .card_store import current_dependencies
+
+            tasks = [
+                task.model_copy(
+                    update={
+                        "dependencies": current_dependencies(
+                            self.home, task.id, birth_dependencies=task.dependencies
+                        )
+                    }
+                )
+                for task in tasks
+            ]
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Dependency amendment fold failed: %s", exc)
         agents = self.load_agents()
 
         claimed_map: dict[str, str] = {}
@@ -1012,14 +1621,16 @@ class Board:
                 self.archive_task(tid, by="age-backlog")
         return eligible
 
-    def claim_task(self, agent_name: str, task_id: str, force: bool = False) -> AgentFile:
+    def _claim_task(
+        self, agent_name: str, task_id: str, force: bool = False
+    ) -> tuple[AgentFile, str | None]:
         """Have an agent claim a task.
 
         Args:
             agent_name: The claiming agent's name.
             task_id: The task ID to claim.
-            force: When True, skip the dependency check (claim anyway).
-                The already-claimed/done gate is never overridden.
+            force: Compatibility flag retained for callers. It never bypasses
+                dependency, review, or human gates.
 
         Returns:
             Updated AgentFile.
@@ -1027,7 +1638,7 @@ class Board:
         Raises:
             ValueError: If task doesn't exist, is owned by another agent in a
                 claimed/in_progress/review/done state, or has incomplete
-                dependencies (unless ``force`` is set).
+                dependencies.
         """
         views = self.get_task_views()
         target = None
@@ -1048,10 +1659,10 @@ class Board:
         # still SHOWS as doing/review on the board, so genuine WIP is not
         # masked. OWNED cards in those states keep refusing a different
         # claimant, and DONE refuses ownerless or not.
-        ownerless_active = (
-            target.claimed_by is None
-            and target.status
-            in (TaskStatus.CLAIMED, TaskStatus.IN_PROGRESS, TaskStatus.REVIEW)
+        ownerless_active = target.claimed_by is None and target.status in (
+            TaskStatus.CLAIMED,
+            TaskStatus.IN_PROGRESS,
+            TaskStatus.REVIEW,
         )
         if (
             target.status
@@ -1068,14 +1679,13 @@ class Board:
                 f"Task {task_id} already {target.status.value} by "
                 f"{target.claimed_by or 'unknown owner'}"
             )
-        if target.task.dependencies and not force:
+        if target.task.dependencies:
             # Dependency statuses are looked up across archived tasks too, so a
             # dependency that was completed and later archived still counts as
             # done. An unknown dependency ID (no card anywhere) is treated as
-            # incomplete: fail closed, and let force=True be the escape hatch.
-            dep_views = {
-                v.task.id: v for v in self.get_task_views(include_archived=True)
-            }
+            # incomplete and fails closed. ``force`` is deliberately not an
+            # escape hatch for dependency gates.
+            dep_views = {v.task.id: v for v in self.get_task_views(include_archived=True)}
             incomplete = [
                 dep_id
                 for dep_id in target.task.dependencies
@@ -1083,8 +1693,7 @@ class Board:
             ]
             if incomplete:
                 raise ValueError(
-                    f"Task {task_id} has incomplete dependencies: "
-                    f"{', '.join(incomplete)} (use force to claim anyway)"
+                    f"Task {task_id} has incomplete dependencies: {', '.join(incomplete)}"
                 )
 
         agent = self.load_agent(agent_name) or AgentFile(agent=agent_name)
@@ -1097,12 +1706,172 @@ class Board:
         agent.current_task = task_id
         agent.state = AgentState.ACTIVE
         self.save_agent(agent)
-        self._mirror_card_store("claim", task_id=task_id, agent=agent_name)
-        if bumped is not None:
-            self._mirror_card_store("demote", task_id=bumped, agent=agent_name)
-        return agent
+        return agent, bumped
 
-    def complete_task(self, agent_name: str, task_id: str) -> AgentFile:
+    def claim_task(self, agent_name: str, task_id: str, force: bool = False) -> AgentFile:
+        """Claim under the board lock and every affected card lock.
+
+        A new current task demotes the old current task. Both IDs therefore
+        take sorted card locks after the shared board lock, preventing a second
+        card from escaping the mutation protocol.
+        """
+        from .card_store import (
+            CardStore,
+            card_mutation_lock,
+            card_store_write_enabled,
+            validate_card_lock_identifier,
+        )
+
+        canonical = AgentFile.validate_agent_name(agent_name)
+        validate_card_lock_identifier(task_id)
+        with _board_mutation_lock(self.home):
+            current = self.load_agent(canonical)
+            affected = {task_id}
+            if current is not None and current.current_task not in (None, task_id):
+                affected.add(validate_card_lock_identifier(current.current_task))
+            with ExitStack() as stack:
+                for card_id in sorted(affected):
+                    stack.enter_context(card_mutation_lock(self.home, card_id))
+                _, original = self._snapshot_agent_projection(canonical)
+                target_snapshot = (
+                    CardStore(self.home).fold(task_id) if card_store_write_enabled() else None
+                )
+                agent, bumped = self._claim_task(canonical, task_id, force)
+                transitions = [(task_id, uuid.uuid4().hex)]
+                target_claim_revision = uuid.uuid4().hex
+                if bumped is not None:
+                    transitions.append((bumped, uuid.uuid4().hex))
+                try:
+                    self._mirror_card_store(
+                        "claim",
+                        task_id=task_id,
+                        agent=canonical,
+                        transition_id=transitions[0][1],
+                        claim_revision=target_claim_revision,
+                    )
+                    if bumped is not None:
+                        self._mirror_card_store(
+                            "demote",
+                            task_id=bumped,
+                            agent=canonical,
+                            transition_id=transitions[1][1],
+                        )
+                except Exception as exc:
+                    expected_states = [(task_id, canonical, "doing")]
+                    if bumped is not None:
+                        expected_states.append((bumped, canonical, "ready"))
+                    if self._store_transitions_are_applied(transitions, expected_states):
+                        return agent
+                    compensation: list[tuple[str, str]] = []
+                    if bumped is not None:
+                        try:
+                            compensation = self._compensate_partial_claim(
+                                task_id=task_id,
+                                owner=canonical,
+                                claim_revision=target_claim_revision,
+                                claim_transition=transitions[0][1],
+                                snapshot=target_snapshot,
+                            )
+                        except Exception as compensation_error:
+                            self._recover_store_failure(
+                                operation="claim",
+                                task_id=task_id,
+                                owner=canonical,
+                                actor=canonical,
+                                original=original,
+                                error=compensation_error,
+                                transition_ids=transitions + compensation,
+                            )
+                            raise RuntimeError(
+                                "claim compensation failed; board is fail-closed"
+                            ) from compensation_error
+                    self._recover_store_failure(
+                        operation="claim",
+                        task_id=task_id,
+                        owner=canonical,
+                        actor=canonical,
+                        original=original,
+                        error=exc,
+                        transition_ids=transitions + compensation,
+                    )
+                    raise
+                return agent
+
+    def release_claim(self, owner: str, task_id: str, actor: str = "") -> bool:
+        """Release one exact active claim without completing the task."""
+        from .card_store import card_mutation_lock, validate_card_lock_identifier
+
+        canonical_owner = AgentFile.validate_agent_name(owner)
+        validate_card_lock_identifier(task_id)
+        audit_actor = AgentFile.validate_agent_name(actor or canonical_owner)
+        with _board_mutation_lock(self.home), card_mutation_lock(self.home, task_id):
+            return self._release_claim_locked(canonical_owner, task_id, actor=audit_actor)
+
+    def _release_claim_locked(
+        self,
+        owner: str,
+        task_id: str,
+        *,
+        actor: str,
+        allow_missing_card_store: bool = False,
+    ) -> bool:
+        """Release one exact claim while the board and card locks are held."""
+        from .card_store import (
+            CardStore,
+            card_store_write_enabled,
+            current_claim_precondition,
+        )
+
+        agent = self.load_agent(owner)
+        if agent is None:
+            raise ValueError(f"claim owner {owner} not found")
+        if task_id not in agent.claimed_tasks and agent.current_task != task_id:
+            return False
+        expected_claim_revision: str | None = None
+        should_mirror = card_store_write_enabled()
+        if should_mirror:
+            try:
+                expected_claim_revision = current_claim_precondition(self.home, task_id, owner)
+            except ValueError:
+                if (
+                    not allow_missing_card_store
+                    or CardStore(self.home)._load_core(task_id) is not None
+                ):
+                    raise
+                should_mirror = False
+        _, original = self._snapshot_agent_projection(owner)
+        agent.claimed_tasks = [claimed for claimed in agent.claimed_tasks if claimed != task_id]
+        if agent.current_task == task_id:
+            agent.current_task = None
+        self.save_agent(agent)
+        if not should_mirror:
+            return True
+        transitions = [(task_id, uuid.uuid4().hex)]
+        try:
+            self._mirror_card_store(
+                "release",
+                task_id=task_id,
+                owner=owner,
+                actor=actor,
+                expected_claim_revision=expected_claim_revision,
+                transition_id=transitions[0][1],
+            )
+        except Exception as exc:
+            if self._store_transitions_are_applied(transitions, [(task_id, None, "backlog")]):
+                return True
+            self._recover_store_failure(
+                operation="release_claim",
+                task_id=task_id,
+                owner=owner,
+                actor=actor,
+                original=original,
+                error=exc,
+                transition_ids=transitions,
+            )
+            raise
+        return True
+
+    def _complete_task(self, agent_name: str, task_id: str) -> AgentFile:
         """Mark a task as completed by an agent.
 
         Args:
@@ -1121,10 +1890,82 @@ class Board:
             agent.current_task = agent.claimed_tasks[0] if agent.claimed_tasks else None
         self.save_agent(agent)
 
-        # Mint Joules for completed task
-        _mint_joules_for_task(self, task_id, agent_name)
+        return agent
 
-        self._mirror_card_store("complete", task_id=task_id, agent=agent_name)
+    def _incomplete_completion_dependencies(self, task_id: str) -> list[str]:
+        """Return every folded dependency that prevents normal completion.
+
+        Reads archived cards as well as active cards so an archived completed
+        dependency remains satisfied. Unknown identifiers and every status
+        other than ``done`` remain blocking. The target's dependencies come
+        from ``get_task_views`` and therefore include append-only CardStore
+        amendments under either projection mode.
+
+        Args:
+            task_id: Card whose normal completion is being considered.
+
+        Returns:
+            Ordered dependency identifiers that are absent or not done.
+
+        Raises:
+            ValueError: If the target card is unknown to the folded board.
+        """
+        views = self.get_task_views(include_archived=True)
+        by_id = {view.task.id: view for view in views}
+        target = by_id.get(task_id)
+        if target is None:
+            raise ValueError(f"Task {task_id} not found")
+        return [
+            dependency_id
+            for dependency_id in target.task.dependencies
+            if dependency_id not in by_id or by_id[dependency_id].status != TaskStatus.DONE
+        ]
+
+    def complete_task(self, agent_name: str, task_id: str) -> AgentFile:
+        """Complete under locks, then mint Joules after those locks are released."""
+        from .card_store import card_mutation_lock, validate_card_lock_identifier
+
+        canonical = AgentFile.validate_agent_name(agent_name)
+        validate_card_lock_identifier(task_id)
+        should_mint = False
+        with _board_mutation_lock(self.home), card_mutation_lock(self.home, task_id):
+            self._assert_no_claim_conflict(task_id, canonical)
+            for existing in self.load_agents():
+                if task_id in existing.completed_tasks:
+                    return existing
+            incomplete = self._incomplete_completion_dependencies(task_id)
+            if incomplete:
+                raise ValueError(
+                    f"Task {task_id} has incomplete dependencies: {', '.join(incomplete)}"
+                )
+            _, original = self._snapshot_agent_projection(canonical)
+            agent = self._complete_task(canonical, task_id)
+            transitions = [(task_id, uuid.uuid4().hex)]
+            try:
+                self._mirror_card_store(
+                    "complete",
+                    task_id=task_id,
+                    agent=canonical,
+                    transition_id=transitions[0][1],
+                )
+            except Exception as exc:
+                if self._store_transitions_are_applied(transitions, [(task_id, None, "done")]):
+                    should_mint = True
+                else:
+                    self._recover_store_failure(
+                        operation="complete",
+                        task_id=task_id,
+                        owner=canonical,
+                        actor=canonical,
+                        original=original,
+                        error=exc,
+                        transition_ids=transitions,
+                    )
+                    raise
+            else:
+                should_mint = True
+        if should_mint:
+            _mint_joules_for_task(self, task_id, canonical)
         return agent
 
     def generate_board_md(self) -> str:
@@ -1162,7 +2003,7 @@ class Board:
                     t.priority.value, ""
                 )
                 tags_str = " ".join(f"`{tag}`" for tag in t.tags)
-                lines.append(f"- **[{t.id}]** {t.title}{assignee} " f"{priority_icon} {tags_str}")
+                lines.append(f"- **[{t.id}]** {t.title}{assignee} {priority_icon} {tags_str}")
                 if t.description:
                     lines.append(f"  > {t.description[:120]}")
             lines.append("")
