@@ -136,3 +136,49 @@ def test_approval_refused_by_an_invalid_transition_stays_quiet_too(mgr):
     assert folded.status.value == "deployed", "precondition: the illegal edge did not take"
     assert "itil.change.approved" not in mgr.published
     assert mgr.gtd_texts == []
+
+
+def test_reapproving_an_already_approved_change_emits_no_second_task(mgr):
+    """A no-op re-approve must not land a second implement task.
+
+    One step further into the same family: a change approved by CAB vote
+    already folds ``approved`` before ``update_change`` runs, so re-issuing
+    ``new_status="approved"`` (the CLI run twice, a retried MCP call) passes
+    the fold check while the fold moves nothing. That put a SECOND
+    high-priority ``[ITIL:<id>] Implement: <title>`` on the operator's board
+    for one approval.
+    """
+    chg = mgr.propose_change(title="legit", created_by="lumina", implementer="lumina")
+    mgr.submit_cab_vote(chg.id, agent="human", decision="approved")
+    mgr.update_change(chg.id, agent="human", new_status="approved", note="CAB ok")
+
+    assert mgr.gtd_texts == [f"[ITIL:{chg.id}] Implement: legit"], "precondition: the real one"
+
+    folded = mgr.update_change(chg.id, agent="human", new_status="approved", note="again")
+
+    assert folded.status.value == "approved"
+    assert mgr.gtd_texts == [f"[ITIL:{chg.id}] Implement: legit"], "no duplicate task"
+    assert folded.gtd_item_ids == ["gtd-1"]
+
+
+def test_refused_approval_does_not_block_a_later_real_approval(mgr):
+    """The dedup guard must not be poisonable by a bypass attempt.
+
+    ``gtd_item_ids`` is read from ``gtd_link`` events, which are only appended
+    after an emission that actually happened - so a refused approval leaves it
+    empty and the genuine approval that follows still emits. A guard keyed on
+    the raw event log instead would let an attacker permanently silence a
+    change's approval by firing one refused approve first.
+    """
+    chg = mgr.propose_change(title="contested", created_by="lumina", implementer="lumina")
+    mgr.update_change(chg.id, agent="attacker", new_status="approved", note="no vote cast")
+    assert mgr.gtd_texts == [], "precondition: the bypass attempt emitted nothing"
+
+    mgr.submit_cab_vote(chg.id, agent="human", decision="approved")
+    mgr.published.clear()
+
+    folded = mgr.update_change(chg.id, agent="human", new_status="approved", note="CAB ok")
+
+    assert folded.status.value == "approved"
+    assert "itil.change.approved" in mgr.published
+    assert mgr.gtd_texts == [f"[ITIL:{chg.id}] Implement: contested"]

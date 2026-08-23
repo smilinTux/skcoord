@@ -11,6 +11,16 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
 
 ### Fixed
 
+- A change's `[ITIL:<id>] Implement: <title>` GTD next-action is now emitted at
+  most once (card a7e3ca15, follow-on to the entry below). A change approved by
+  CAB vote already folds `approved` before `update_change` runs, so re-issuing
+  `new_status="approved"` (the CLI run twice, a retried MCP call) cleared the
+  fold check while the fold moved nothing, landing a SECOND high-priority
+  implement task on the operator's board for one approval. The guard reads
+  `gtd_item_ids`, which is folded from `gtd_link` events written only after an
+  emission that actually happened, so a REFUSED approval leaves it empty and
+  cannot be used to suppress the genuine approval's task later.
+
 - `ITILManager.update_change` now fires the approval and deploy side effects
   from the FOLD RESULT instead of the requested status (card a7e3ca15). The
   CAB bypass guard added in 941570f correctly refuses a raw `status` event

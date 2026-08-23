@@ -1736,7 +1736,8 @@ class ITILManager:
             # already-approved change must not re-announce itself on an
             # unrelated (even conflicted) update, and the folded status because
             # that is the only authority on whether the transition took.
-            effective_status = self._fold_record(self.changes_dir, rid, Change).status.value
+            folded_now = self._fold_record(self.changes_dir, rid, Change)
+            effective_status = folded_now.status.value
             if new_status == "approved" and effective_status == "approved":
                 self._publish_event(
                     "itil.change.approved",
@@ -1747,7 +1748,17 @@ class ITILManager:
                     },
                 )
                 implementer = core.get("implementer")
-                if implementer:
+                # One implement task per change, ever. A change approved by CAB
+                # vote already folds `approved` before this call, so re-issuing
+                # `new_status="approved"` (the CLI run twice, a retried MCP
+                # call) satisfies both conditions above while the fold moves
+                # nothing - and landed a SECOND high-priority "Implement" task
+                # on the operator's board. `gtd_item_ids` is the right thing to
+                # read here because it is written from `gtd_link` events, which
+                # are appended ONLY after an emission that actually happened: a
+                # REFUSED approval leaves it empty, so a bypass attempt cannot
+                # poison it and suppress the real approval's task later.
+                if implementer and not folded_now.gtd_item_ids:
                     gtd_id = self._gtd_emit(
                         f"[ITIL:{rid}] Implement: {core.get('title', '')}",
                         rid,
