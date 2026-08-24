@@ -5,6 +5,7 @@ modules through the ``skcapstone.*`` alias shims); this file guards that skcoord
 stands up independently, imports cleanly with no back-reference into skcapstone at
 import time, and round-trips the board + ITIL against a temp home.
 """
+
 from __future__ import annotations
 
 import subprocess
@@ -56,6 +57,30 @@ def test_itil_incident_roundtrip(tmp_path):
     assert inc.id
     listed = mgr.list_incidents()
     assert any(i.id == inc.id for i in listed)
+
+
+def test_recurring_auto_incident_reopens_append_only(tmp_path):
+    mgr = ITILManager(tmp_path)
+    create = {
+        "title": "service down",
+        "source": "service_health",
+        "affected_services": ["service"],
+        "failure_class": "unreachable",
+    }
+    inc = mgr.create_incident(**create)
+    mgr.update_incident(
+        inc.id,
+        "health",
+        new_status="resolved",
+        resolution_summary="healthy probe",
+    )
+
+    reopened = mgr.create_incident(**create)
+
+    assert reopened.id == inc.id
+    assert reopened.status.value == "investigating"
+    assert reopened.resolution_summary is None
+    assert any(item["action"] == "status:resolved->investigating" for item in reopened.timeline)
 
 
 def test_kanban_render_html(tmp_path):

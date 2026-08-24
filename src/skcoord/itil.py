@@ -1387,6 +1387,7 @@ class ITILManager:
             record_id = f"inc-{uuid.uuid4().hex[:8]}"
             dedup_key = None
 
+        record_existed = self._record_exists(self.incidents_dir, record_id)
         detected_at = _now_iso()
         core = {
             "id": record_id,
@@ -1406,6 +1407,16 @@ class ITILManager:
             core["dedup_key"] = dedup_key
 
         self._write_core(self.incidents_dir, record_id, core)
+        if record_existed:
+            existing = self._fold_record(self.incidents_dir, record_id, Incident)
+            if existing is not None and existing.status.value == "resolved":
+                self._append_event(
+                    self.incidents_dir,
+                    record_id,
+                    agent,
+                    "reopen",
+                    note=f"Incident recurred: {title}",
+                )
         self._append_event(
             self.incidents_dir,
             record_id,
