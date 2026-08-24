@@ -61,6 +61,12 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
 
 ### Added
 
+- Added a pure bounded authorized CardStore snapshot reader that validates a
+  fully bound CapAuth and owner-policy decision before folding only the
+  policy-visible identifier set, emits only allowlisted record and graph
+  evidence, and returns one constant no-value result on every authorization
+  failure (card `a110cadc`).
+
 - Added immutable, persona-neutral Portfolio Steward contracts and a pure
   shadow-only readiness evaluator with deterministic ordering, explicit
   abstention, exact content bindings, and independent-review completion gates
