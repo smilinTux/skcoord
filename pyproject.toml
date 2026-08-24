@@ -26,6 +26,7 @@ classifiers = [
     "Topic :: Software Development :: Libraries",
 ]
 dependencies = [
+    "capauth>=0.3.8",
     "pydantic>=2.0,<3.0",
 ]
 

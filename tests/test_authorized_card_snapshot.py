@@ -64,7 +64,7 @@ def _request(
         "identity": IDENTITY,
         "scope": SCOPE,
         "resource_id": authorized_card_resource_id(
-            visible, field_mask, semantic_classes, visible_absent
+            visible, field_mask, semantic_classes, visible_absent, scope=SCOPE
         ),
         "capauth_decision_id": "capauth-decision-01",
         "owner_policy_revision": "owner-policy-r1",
@@ -89,7 +89,7 @@ def _decision(*, state="allow", visible=(), visible_absent=(), **changes):
         "node_id": IDENTITY.node_id,
         "capauth_identity_ref": IDENTITY.capauth_identity_ref,
         "resource_id": authorized_card_resource_id(
-            visible, FIELD_MASK, SEMANTIC_CLASSES, visible_absent
+            visible, FIELD_MASK, SEMANTIC_CLASSES, visible_absent, scope=SCOPE
         ),
         "scope": SCOPE,
         "issued_at": NOW - timedelta(minutes=1),
@@ -433,7 +433,7 @@ def test_field_mask_is_enforced_before_derived_evidence() -> None:
         visible=("source", "target"),
         field_mask=(),
         semantic_classes=(),
-        resource_id=authorized_card_resource_id(("source", "target"), (), ()),
+        resource_id=authorized_card_resource_id(("source", "target"), (), (), scope=SCOPE),
     )
     result, _store, _factory = _read([source, target], decision)
     assert result["dependency_edges"] == []

@@ -19,6 +19,13 @@ __version__ = "0.1.0"
 
 from .agent_card import AgentCapability, AgentCard
 from .atomic_io import atomic_write_text
+from .authorized_card_policy import (
+    AuthorizedCardPolicyBackend,
+    AuthorizedCardPolicyEntryV1,
+    AuthorizedCardPolicyProvider,
+    AuthorizedCardPolicySelectionV1,
+    StaticAuthorizedCardPolicyBackend,
+)
 from .card import (
     Card,
     CardEvent,
@@ -58,6 +65,10 @@ __all__ = [
     "Card",
     "CardEvent",
     "CardEventLog",
+    "AuthorizedCardPolicyBackend",
+    "AuthorizedCardPolicyEntryV1",
+    "AuthorizedCardPolicyProvider",
+    "AuthorizedCardPolicySelectionV1",
     "Column",
     "KanbanBoard",
     "Kind",
@@ -69,6 +80,7 @@ __all__ = [
     "TaskPriority",
     "TaskStatus",
     "TaskView",
+    "StaticAuthorizedCardPolicyBackend",
     "atomic_write_text",
     "audit_lifecycle",
     "get_briefing_json",

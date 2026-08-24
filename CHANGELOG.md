@@ -71,6 +71,11 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
 
 ### Added
 
+- Added a frozen SKCoord owner-policy index and provider that binds only an
+  exact policy-selected CardStore identifier set to the current attributable
+  CapAuth decision before the authorized snapshot reader can access records
+  (card `cf0e34cd`).
+
 - Added a pure bounded authorized CardStore snapshot reader that validates a
   fully bound CapAuth and owner-policy decision before folding only the
   policy-visible identifier set, emits only allowlisted record and graph
