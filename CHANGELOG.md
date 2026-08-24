@@ -11,6 +11,12 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
 
 ### Fixed
 
+- `atomic_write_text` closes its temporary descriptor before replacing the
+  target and closes both temporary and parent-directory descriptors on every
+  failure path. This prevents the append-only board's safe writes from leaking
+  one file descriptor per successful mutation in long-running workers (card
+  54cd56f2).
+
 - `Board.claim_task(..., force=True)` no longer bypasses dependency gates.
   The compatibility flag remains accepted, but incomplete, unknown, review,
   and human dependencies now fail closed and list every blocking ID in every

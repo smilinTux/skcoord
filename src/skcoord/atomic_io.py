@@ -45,26 +45,24 @@ def atomic_write_text(path: Path, text: str, encoding: str = "utf-8") -> None:
         directory_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | no_follow)
     except OSError as exc:
         raise ValueError("atomic write parent is unsafe") from exc
-    directory_stat = os.fstat(directory_fd)
-    if not stat.S_ISDIR(directory_stat.st_mode):
-        os.close(directory_fd)
-        raise ValueError("atomic write parent is unsafe")
-    try:
-        existing = os.stat(path.name, dir_fd=directory_fd, follow_symlinks=False)
-    except FileNotFoundError:
-        existing = None
-    if existing is not None and (
-        stat.S_ISLNK(existing.st_mode)
-        or not stat.S_ISREG(existing.st_mode)
-        or existing.st_nlink != 1
-    ):
-        os.close(directory_fd)
-        raise ValueError("atomic write destination is unsafe")
-    payload = text.encode(encoding)
     temp_name = f".{path.name}.{uuid.uuid4().hex}.tmp"
-    fd = -1
+    temp_fd = -1
     try:
-        fd = os.open(
+        directory_stat = os.fstat(directory_fd)
+        if not stat.S_ISDIR(directory_stat.st_mode):
+            raise ValueError("atomic write parent is unsafe")
+        try:
+            existing = os.stat(path.name, dir_fd=directory_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            existing = None
+        if existing is not None and (
+            stat.S_ISLNK(existing.st_mode)
+            or not stat.S_ISREG(existing.st_mode)
+            or existing.st_nlink != 1
+        ):
+            raise ValueError("atomic write destination is unsafe")
+        payload = text.encode(encoding)
+        temp_fd = os.open(
             temp_name,
             os.O_CREAT | os.O_EXCL | os.O_WRONLY | no_follow,
             0o600,
@@ -72,13 +70,13 @@ def atomic_write_text(path: Path, text: str, encoding: str = "utf-8") -> None:
         )
         offset = 0
         while offset < len(payload):
-            written = os.write(fd, payload[offset:])
+            written = os.write(temp_fd, payload[offset:])
             if written <= 0:
                 raise OSError("atomic write made no forward progress")
             offset += written
-        os.fsync(fd)
+        os.fsync(temp_fd)
         temporary = os.stat(temp_name, dir_fd=directory_fd, follow_symlinks=False)
-        opened = os.fstat(fd)
+        opened = os.fstat(temp_fd)
         if (
             stat.S_ISLNK(temporary.st_mode)
             or not stat.S_ISREG(temporary.st_mode)
@@ -96,11 +94,14 @@ def atomic_write_text(path: Path, text: str, encoding: str = "utf-8") -> None:
             or current.st_nlink != 1
         ):
             raise ValueError("atomic write destination is unsafe")
+        fd_to_close = temp_fd
+        temp_fd = -1
+        os.close(fd_to_close)
         os.replace(temp_name, path.name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
         os.fsync(directory_fd)
     except BaseException:
-        if fd >= 0:
-            os.close(fd)
+        if temp_fd >= 0:
+            os.close(temp_fd)
         try:
             os.unlink(temp_name, dir_fd=directory_fd)
         except FileNotFoundError:
