@@ -213,12 +213,15 @@ def authorized_card_resource_id(
     field_mask: tuple[str, ...],
     semantic_classes: tuple[str, ...],
     visible_absent_ids: tuple[str, ...] = (),
+    *,
+    scope: AuthorizedCardScopeV1,
 ) -> str:
     constraint = {
         "visible_set_sha256": visible_set_sha256(values),
         "field_mask": list(field_mask),
         "semantic_classes": list(semantic_classes),
         "visible_absent_ids": list(visible_absent_ids),
+        "scope": _scope(scope),
     }
     digest = hashlib.sha256(_canonical_bytes(constraint)).hexdigest()
     return f"authorized-card-set:sha256:{digest}"
@@ -260,6 +263,11 @@ def _no_value(scope: AuthorizedCardScopeV1) -> dict:
             }
         ],
     }
+
+
+def unavailable_authorized_card_snapshot(scope: AuthorizedCardScopeV1) -> dict:
+    """Return the stable no-value envelope without consulting a source."""
+    return _no_value(scope)
 
 
 def _parse_timestamp(value) -> datetime | None:
@@ -476,6 +484,7 @@ class AuthorizedCardSnapshotReader:
                 decision.field_mask,
                 decision.semantic_classes,
                 decision.visible_absent_ids,
+                scope=decision.scope,
             )
             and decision.scope == request.scope
             and decision.issued_at.tzinfo is not None
