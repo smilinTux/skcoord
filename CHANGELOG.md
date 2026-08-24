@@ -71,6 +71,11 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
 
 ### Added
 
+- Added a durable bounded owner-policy backend for authorized CardStore reads.
+  It loads exact immutable entries from owner-controlled storage, rejects
+  malformed or unsafe files, and suppresses results when policy identity,
+  revision, or validity changes during a protected read (card `19acf874`).
+
 - Added a frozen SKCoord owner-policy index and provider that binds only an
   exact policy-selected CardStore identifier set to the current attributable
   CapAuth decision before the authorized snapshot reader can access records

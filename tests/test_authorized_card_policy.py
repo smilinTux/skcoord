@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Lock, Thread
@@ -29,9 +30,14 @@ from capauth import (
 )
 from pydantic import ValidationError
 
+from skcoord.atomic_io import atomic_write_text
 from skcoord.authorized_card_policy import (
+    MAX_POLICY_DOCUMENT_BYTES,
+    AuthorizedCardPolicyDocumentV1,
     AuthorizedCardPolicyEntryV1,
     AuthorizedCardPolicyProvider,
+    AuthorizedCardPolicySelectionV1,
+    FileAuthorizedCardPolicyBackend,
     StaticAuthorizedCardPolicyBackend,
 )
 from skcoord.authorized_card_snapshot import AuthorizedCardScopeV1
@@ -123,6 +129,22 @@ def entry(**changes) -> AuthorizedCardPolicyEntryV1:
     }
     values.update(changes)
     return AuthorizedCardPolicyEntryV1.issue(**values)
+
+
+def policy_selection(policy: AuthorizedCardPolicyEntryV1) -> AuthorizedCardPolicySelectionV1:
+    return AuthorizedCardPolicySelectionV1(
+        subject=policy.subject,
+        acting_principal_id=policy.acting_principal_id,
+        node_id=policy.node_id,
+        resource_id=policy.resource_id,
+        owner_policy_revision=policy.owner_policy_revision,
+    )
+
+
+def write_policy(path: Path, *entries: AuthorizedCardPolicyEntryV1) -> None:
+    document = AuthorizedCardPolicyDocumentV1(entries=entries)
+    atomic_write_text(path, document.model_dump_json())
+    path.chmod(0o600)
 
 
 class Rig:
@@ -777,3 +799,201 @@ def test_projection_respects_owner_wire_ceiling() -> None:
 
     assert len(json.dumps(result, sort_keys=True).encode()) <= 384 * 1024
     assert result["truncated"] is True
+
+
+def test_file_policy_backend_loads_exact_immutable_selection(tmp_path) -> None:
+    project = entry()
+    architect = entry(
+        subject="architect@example.test",
+        acting_principal_id="architect-1",
+        scope=AuthorizedCardScopeV1(role="architect"),
+    )
+    path = tmp_path / "owner-policy.json"
+    write_policy(path, project, architect)
+    backend = FileAuthorizedCardPolicyBackend(path, clock=lambda: NOW)
+
+    selected = backend.snapshot(policy_selection(project))
+    wrong_revision = policy_selection(project).model_copy(
+        update={"owner_policy_revision": architect.owner_policy_revision}
+    )
+
+    assert selected == project
+    assert selected is not project
+    assert backend.snapshot(wrong_revision) is None
+    with pytest.raises(ValidationError):
+        selected.subject = "changed"  # type: ignore[misc]
+
+
+def test_file_policy_backend_rejects_duplicate_and_scope_tampered_documents(tmp_path) -> None:
+    policy = entry()
+    path = tmp_path / "owner-policy.json"
+    duplicate = {"schema_version": "1.0.0", "entries": [policy.model_dump(mode="json")] * 2}
+    atomic_write_text(path, json.dumps(duplicate))
+    path.chmod(0o600)
+    backend = FileAuthorizedCardPolicyBackend(path, clock=lambda: NOW)
+
+    assert backend.snapshot(policy_selection(policy)) is None
+
+    tampered = policy.model_dump(mode="json")
+    tampered["scope"]["role"] = "architect"
+    atomic_write_text(path, json.dumps({"schema_version": "1.0.0", "entries": [tampered]}))
+    path.chmod(0o600)
+
+    assert backend.snapshot(policy_selection(policy)) is None
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        '{"schema_version":"1.0.0","schema_version":"1.0.0","entries":[]}',
+        '{"schema_version":"1.0.0","entries":[],"entries":[]}',
+        '{"schema_version":"1.0.0","entries":[{"subject":"one","subject":"two"}]}',
+    ),
+)
+def test_file_policy_backend_rejects_duplicate_json_members(tmp_path, payload) -> None:
+    policy = entry()
+    path = tmp_path / "owner-policy.json"
+    atomic_write_text(path, payload)
+    path.chmod(0o600)
+
+    assert (
+        FileAuthorizedCardPolicyBackend(path, clock=lambda: NOW).snapshot(policy_selection(policy))
+        is None
+    )
+
+
+@pytest.mark.parametrize("state", ("missing", "malformed", "oversized", "unsafe-mode"))
+def test_file_policy_backend_storage_failures_return_no_value(tmp_path, state) -> None:
+    policy = entry()
+    path = tmp_path / "owner-policy.json"
+    if state == "malformed":
+        atomic_write_text(path, "{")
+        path.chmod(0o600)
+    elif state == "oversized":
+        atomic_write_text(path, "x" * (MAX_POLICY_DOCUMENT_BYTES + 1))
+        path.chmod(0o600)
+    elif state == "unsafe-mode":
+        write_policy(path, policy)
+        path.chmod(0o640)
+
+    assert (
+        FileAuthorizedCardPolicyBackend(path, clock=lambda: NOW).snapshot(policy_selection(policy))
+        is None
+    )
+
+
+def test_file_policy_backend_rejects_symlink_hardlink_wrong_owner_and_unsafe_parent(
+    tmp_path,
+) -> None:
+    policy = entry()
+    target = tmp_path / "target.json"
+    write_policy(target, policy)
+    selection = policy_selection(policy)
+
+    symlink = tmp_path / "symlink.json"
+    symlink.symlink_to(target)
+    hardlink = tmp_path / "hardlink.json"
+    os.link(target, hardlink)
+    assert FileAuthorizedCardPolicyBackend(symlink, clock=lambda: NOW).snapshot(selection) is None
+    assert FileAuthorizedCardPolicyBackend(hardlink, clock=lambda: NOW).snapshot(selection) is None
+    assert (
+        FileAuthorizedCardPolicyBackend(
+            target, expected_uid=os.geteuid() + 1, clock=lambda: NOW
+        ).snapshot(selection)
+        is None
+    )
+
+    target.unlink()
+    write_policy(target, policy)
+    tmp_path.chmod(0o770)
+    try:
+        assert (
+            FileAuthorizedCardPolicyBackend(target, clock=lambda: NOW).snapshot(selection) is None
+        )
+    finally:
+        tmp_path.chmod(0o700)
+
+
+def test_file_policy_backend_rejects_intermediate_ancestor_symlink(tmp_path) -> None:
+    policy = entry()
+    real = tmp_path / "real"
+    nested = real / "nested"
+    nested.mkdir(parents=True, mode=0o700)
+    write_policy(nested / "owner-policy.json", policy)
+    alias = tmp_path / "alias"
+    alias.symlink_to(real, target_is_directory=True)
+
+    backend = FileAuthorizedCardPolicyBackend(
+        alias / "nested" / "owner-policy.json", clock=lambda: NOW
+    )
+
+    assert backend.snapshot(policy_selection(policy)) is None
+
+
+def test_file_policy_backend_expired_and_stale_revisions_fail_closed(tmp_path) -> None:
+    expired = entry(valid_from=NOW - timedelta(minutes=2), expires_at=NOW)
+    path = tmp_path / "owner-policy.json"
+    write_policy(path, expired)
+    backend = FileAuthorizedCardPolicyBackend(path, clock=lambda: NOW)
+
+    assert backend.snapshot(policy_selection(expired)) is None
+    assert (
+        backend.read_if_current(
+            policy_selection(expired), expired.owner_policy_revision, lambda _: {"secret": True}
+        )
+        is None
+    )
+
+
+def test_file_policy_backend_revision_change_during_read_suppresses_result(tmp_path) -> None:
+    initial = entry()
+    changed = entry(expires_at=NOW + timedelta(minutes=4))
+    path = tmp_path / "owner-policy.json"
+    write_policy(path, initial)
+    backend = FileAuthorizedCardPolicyBackend(path, clock=lambda: NOW)
+
+    def replace_policy(_entry):
+        write_policy(path, changed)
+        return {"protected": "value"}
+
+    assert (
+        backend.read_if_current(
+            policy_selection(initial), initial.owner_policy_revision, replace_policy
+        )
+        is None
+    )
+
+
+def test_file_policy_backend_unchanged_read_returns_result(tmp_path) -> None:
+    policy = entry()
+    path = tmp_path / "owner-policy.json"
+    write_policy(path, policy)
+    backend = FileAuthorizedCardPolicyBackend(path, clock=lambda: NOW)
+
+    assert backend.read_if_current(
+        policy_selection(policy), policy.owner_policy_revision, lambda _: {"ok": True}
+    ) == {"ok": True}
+
+
+def test_file_policy_backend_drives_bounded_provider_without_enumeration(tmp_path) -> None:
+    policy = entry()
+    path = tmp_path / "owner-policy.json"
+    write_policy(path, policy)
+    store = Store((card("source", labels=("project",)), card("protected")))
+    backend = FileAuthorizedCardPolicyBackend(path, clock=lambda: NOW)
+    rig = Rig(policy, store=store, backend=backend)
+    context, verifier = current_authority(rig)
+
+    result = rig.provider.read(
+        context,
+        SCOPE,
+        Path("/unused"),
+        currentness_verifier=verifier,
+        now=NOW,
+    )
+
+    assert [record["record_id"] for record in result["records"]] == ["source"]
+    assert store.fold_calls == ["source"]
+    store.list_card_ids.assert_not_called()
+    store.list_cards.assert_not_called()
+    assert "protected" not in json.dumps(result)
