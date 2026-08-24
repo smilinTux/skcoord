@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Callable
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
 
@@ -276,7 +276,7 @@ def _parse_timestamp(value) -> datetime | None:
         return None
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         return None
-    return parsed.astimezone(UTC)
+    return parsed.astimezone(timezone.utc)
 
 
 def _timestamp_text(value) -> str | None:
@@ -410,10 +410,10 @@ class AuthorizedCardSnapshotReader:
         now: datetime | None = None,
     ) -> dict:
         denied = _no_value(request.scope)
-        current = now or datetime.now(UTC)
+        current = now or datetime.now(timezone.utc)
         if current.tzinfo is None or current.utcoffset() is None:
             return denied
-        current = current.astimezone(UTC)
+        current = current.astimezone(timezone.utc)
         try:
             decision = self.validate_policy_decision(request)
         except Exception:  # noqa: BLE001 - policy failure is one constant result
@@ -631,7 +631,7 @@ class AuthorizedCardSnapshotReader:
                 "capauth_decision_id": decision.capauth_decision_id,
                 "owner_policy_revision": decision.owner_policy_revision,
                 "visible_set_sha256": decision.visible_set_sha256,
-                "expires_at": decision.expires_at.astimezone(UTC)
+                "expires_at": decision.expires_at.astimezone(timezone.utc)
                 .isoformat()
                 .replace("+00:00", "Z"),
             },

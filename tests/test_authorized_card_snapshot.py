@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import inspect
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -22,7 +22,7 @@ from skcoord.authorized_card_snapshot import (
 from skcoord.card import Card, Column, Kind
 from skcoord.card_store import CardCore, CardStore
 
-NOW = datetime(2026, 8, 24, 12, tzinfo=UTC)
+NOW = datetime(2026, 8, 24, 12, tzinfo=timezone.utc)
 FIELD_MASK = (
     "claim_conflict",
     "human_gate",
