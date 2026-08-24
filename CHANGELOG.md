@@ -61,6 +61,12 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
 
 ### Added
 
+- Added immutable, persona-neutral Portfolio Steward contracts and a pure
+  shadow-only readiness evaluator with deterministic ordering, explicit
+  abstention, exact content bindings, and independent-review completion gates
+  (card `7efc76c0`). The slice has no board, authorization, model, network,
+  execution, or mutation integration.
+
 - Added `Board.record_success`, the write half of cross-run success memory
   (card 506782a4, S9). Sibling of `record_attempt`, writing distilled
   terminal-PASS entries to `meta.autopilot.successes[]` -- a key
