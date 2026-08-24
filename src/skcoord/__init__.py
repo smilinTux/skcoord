@@ -21,9 +21,11 @@ from .agent_card import AgentCapability, AgentCard
 from .atomic_io import atomic_write_text
 from .authorized_card_policy import (
     AuthorizedCardPolicyBackend,
+    AuthorizedCardPolicyDocumentV1,
     AuthorizedCardPolicyEntryV1,
     AuthorizedCardPolicyProvider,
     AuthorizedCardPolicySelectionV1,
+    FileAuthorizedCardPolicyBackend,
     StaticAuthorizedCardPolicyBackend,
 )
 from .card import (
@@ -66,6 +68,7 @@ __all__ = [
     "CardEvent",
     "CardEventLog",
     "AuthorizedCardPolicyBackend",
+    "AuthorizedCardPolicyDocumentV1",
     "AuthorizedCardPolicyEntryV1",
     "AuthorizedCardPolicyProvider",
     "AuthorizedCardPolicySelectionV1",
@@ -80,6 +83,7 @@ __all__ = [
     "TaskPriority",
     "TaskStatus",
     "TaskView",
+    "FileAuthorizedCardPolicyBackend",
     "StaticAuthorizedCardPolicyBackend",
     "atomic_write_text",
     "audit_lifecycle",

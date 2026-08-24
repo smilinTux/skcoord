@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import stat
 from collections.abc import Callable, Iterable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import MappingProxyType
-from typing import Protocol
+from typing import Literal, Protocol
 
 from capauth import (
     AuthorizationDecision,
@@ -39,6 +41,8 @@ from .card_store import CardStore
 
 UTC = timezone.utc
 MAX_POLICY_ENTRY_BYTES = 384 * 1024
+MAX_POLICY_DOCUMENT_BYTES = 4 * 1024 * 1024
+MAX_POLICY_ENTRIES = 256
 
 
 class _Contract(BaseModel):
@@ -206,6 +210,76 @@ class AuthorizedCardPolicyEntryV1(_Contract):
         )
 
 
+def _policy_key(entry: AuthorizedCardPolicyEntryV1) -> tuple[str, str, str, str, str]:
+    return (
+        entry.subject,
+        entry.acting_principal_id,
+        entry.node_id,
+        entry.resource_id,
+        entry.owner_policy_revision,
+    )
+
+
+def _policy_identity(value: os.stat_result) -> tuple[int, ...]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_uid,
+        stat.S_IMODE(value.st_mode),
+        value.st_nlink,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+
+def _safe_policy_identity(
+    listed: os.stat_result, opened: os.stat_result, expected_uid: int
+) -> tuple[int, ...]:
+    identity = _policy_identity(opened)
+    if (
+        stat.S_ISLNK(listed.st_mode)
+        or not stat.S_ISREG(opened.st_mode)
+        or opened.st_nlink != 1
+        or opened.st_uid != expected_uid
+        or opened.st_mode & 0o077
+        or _policy_identity(listed) != identity
+    ):
+        raise ValueError("owner policy file is unsafe")
+    return identity
+
+
+def _open_policy_parent(path: Path) -> int:
+    """Open every parent component without following a symlink."""
+    no_follow = getattr(os, "O_NOFOLLOW", None)
+    if no_follow is None:
+        raise ValueError("owner policy path is unsafe")
+    flags = os.O_RDONLY | os.O_DIRECTORY | no_follow
+    descriptor = os.open("/" if path.is_absolute() else ".", flags)
+    try:
+        for component in path.parent.parts:
+            if component in {"/", "."}:
+                continue
+            if component in {"", ".."}:
+                raise ValueError("owner policy path is unsafe")
+            child = os.open(component, flags, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = child
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _unique_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    value: dict[str, object] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("owner policy document contains duplicate keys")
+        value[key] = item
+    return value
+
+
 class AuthorizedCardPolicySelectionV1(_Contract):
     """Exact O(1) owner-policy lookup key derived from a signed binding."""
 
@@ -213,6 +287,21 @@ class AuthorizedCardPolicySelectionV1(_Contract):
     acting_principal_id: str = Field(min_length=1, max_length=128)
     node_id: str = Field(min_length=1, max_length=128)
     resource_id: str = Field(pattern=r"^authorized-card-set:sha256:[0-9a-f]{64}$")
+    owner_policy_revision: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class AuthorizedCardPolicyDocumentV1(_Contract):
+    """Bounded durable owner-policy document loaded as one immutable value."""
+
+    schema_version: Literal["1.0.0"] = "1.0.0"
+    entries: tuple[AuthorizedCardPolicyEntryV1, ...] = Field(max_length=MAX_POLICY_ENTRIES)
+
+    @model_validator(mode="after")
+    def unique_selections(self) -> "AuthorizedCardPolicyDocumentV1":
+        keys = [_policy_key(entry) for entry in self.entries]
+        if len(keys) != len(set(keys)):
+            raise ValueError("duplicate authorized card policy selection")
+        return self
 
 
 class AuthorizedCardPolicyBackend(Protocol):
@@ -249,8 +338,8 @@ class StaticAuthorizedCardPolicyBackend:
         self._entries = MappingProxyType(indexed)
 
     @staticmethod
-    def _key(entry: AuthorizedCardPolicyEntryV1) -> tuple[str, str, str, str]:
-        return (entry.subject, entry.acting_principal_id, entry.node_id, entry.resource_id)
+    def _key(entry: AuthorizedCardPolicyEntryV1) -> tuple[str, str, str, str, str]:
+        return _policy_key(entry)
 
     def snapshot(
         self, selection: AuthorizedCardPolicySelectionV1
@@ -263,6 +352,7 @@ class StaticAuthorizedCardPolicyBackend:
                 selection.acting_principal_id,
                 selection.node_id,
                 selection.resource_id,
+                selection.owner_policy_revision,
             )
         )
 
@@ -276,6 +366,128 @@ class StaticAuthorizedCardPolicyBackend:
         if entry is None or entry.owner_policy_revision != expected_revision:
             return None
         return operation(entry)
+
+
+class FileAuthorizedCardPolicyBackend:
+    """Fail-closed durable policy backend for an owner-controlled JSON file."""
+
+    __slots__ = ("_clock", "_expected_uid", "_path")
+
+    def __init__(
+        self,
+        path: Path,
+        *,
+        expected_uid: int | None = None,
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+    ) -> None:
+        self._path = Path(path)
+        self._expected_uid = os.geteuid() if expected_uid is None else expected_uid
+        self._clock = clock
+
+    def snapshot(
+        self, selection: AuthorizedCardPolicySelectionV1
+    ) -> AuthorizedCardPolicyEntryV1 | None:
+        try:
+            loaded = self._load()
+            return self._select(loaded[0], selection, self._current())
+        except Exception:
+            return None
+
+    def read_if_current(
+        self,
+        selection: AuthorizedCardPolicySelectionV1,
+        expected_revision: str,
+        operation: Callable[[AuthorizedCardPolicyEntryV1], dict],
+    ) -> dict | None:
+        try:
+            before_document, before_identity = self._load()
+            before = self._select(before_document, selection, self._current())
+            if before is None or before.owner_policy_revision != expected_revision:
+                return None
+            result = operation(before)
+            after_document, after_identity = self._load()
+            after = self._select(after_document, selection, self._current())
+            if (
+                before_identity != after_identity
+                or after is None
+                or after != before
+                or after.owner_policy_revision != expected_revision
+            ):
+                return None
+            return result
+        except Exception:
+            return None
+
+    def _load(self) -> tuple[AuthorizedCardPolicyDocumentV1, tuple[int, ...]]:
+        path = self._path
+        no_follow = getattr(os, "O_NOFOLLOW", None)
+        if no_follow is None or path.name in {"", ".", ".."}:
+            raise ValueError("owner policy path is unsafe")
+        directory_fd = _open_policy_parent(path)
+        descriptor = -1
+        try:
+            directory_stat = os.fstat(directory_fd)
+            if (
+                not stat.S_ISDIR(directory_stat.st_mode)
+                or directory_stat.st_uid != self._expected_uid
+                or directory_stat.st_mode & 0o022
+            ):
+                raise ValueError("owner policy directory is unsafe")
+            listed = os.stat(path.name, dir_fd=directory_fd, follow_symlinks=False)
+            descriptor = os.open(path.name, os.O_RDONLY | no_follow, dir_fd=directory_fd)
+            opened = os.fstat(descriptor)
+            identity = _safe_policy_identity(listed, opened, self._expected_uid)
+            if opened.st_size > MAX_POLICY_DOCUMENT_BYTES:
+                raise ValueError("owner policy document exceeds the safe cap")
+            payload = bytearray()
+            while len(payload) <= MAX_POLICY_DOCUMENT_BYTES:
+                chunk = os.read(
+                    descriptor, min(65536, MAX_POLICY_DOCUMENT_BYTES + 1 - len(payload))
+                )
+                if not chunk:
+                    break
+                payload.extend(chunk)
+            if len(payload) > MAX_POLICY_DOCUMENT_BYTES:
+                raise ValueError("owner policy document exceeds the safe cap")
+            current = os.stat(path.name, dir_fd=directory_fd, follow_symlinks=False)
+            if (
+                _policy_identity(current) != identity
+                or _policy_identity(os.fstat(descriptor)) != identity
+            ):
+                raise ValueError("owner policy changed during load")
+            parsed = json.loads(bytes(payload), object_pairs_hook=_unique_json_object)
+            document = AuthorizedCardPolicyDocumentV1.model_validate_json(_canonical_bytes(parsed))
+            return document, identity
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+            os.close(directory_fd)
+
+    @staticmethod
+    def _select(
+        document: AuthorizedCardPolicyDocumentV1,
+        selection: AuthorizedCardPolicySelectionV1,
+        current: datetime,
+    ) -> AuthorizedCardPolicyEntryV1 | None:
+        if type(selection) is not AuthorizedCardPolicySelectionV1:
+            return None
+        key = (
+            selection.subject,
+            selection.acting_principal_id,
+            selection.node_id,
+            selection.resource_id,
+            selection.owner_policy_revision,
+        )
+        for entry in document.entries:
+            if _policy_key(entry) == key:
+                return entry if entry.valid_from <= current < entry.expires_at else None
+        return None
+
+    def _current(self) -> datetime:
+        current = self._clock()
+        if current.tzinfo is None or current.utcoffset() != timedelta(0):
+            raise ValueError("policy clock must use UTC offset zero")
+        return current.astimezone(UTC)
 
 
 class AuthorizedCardPolicyProvider:
@@ -488,6 +700,7 @@ class AuthorizedCardPolicyProvider:
             acting_principal_id=binding.agent_id or binding.principal.principal_id,
             node_id=binding.node_id,
             resource_id=binding.resource_id or "",
+            owner_policy_revision=binding.owner_policy_revision or "",
         )
 
     def _authority_current(
@@ -514,8 +727,10 @@ def _raise_policy() -> AuthorizedCardSetDecisionV1:
 
 __all__ = [
     "AuthorizedCardPolicyBackend",
+    "AuthorizedCardPolicyDocumentV1",
     "AuthorizedCardPolicyEntryV1",
     "AuthorizedCardPolicyProvider",
     "AuthorizedCardPolicySelectionV1",
+    "FileAuthorizedCardPolicyBackend",
     "StaticAuthorizedCardPolicyBackend",
 ]
