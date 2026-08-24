@@ -15,6 +15,12 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
   existing append-only record instead of remaining resolved or creating a
   duplicate incident (card `5b57816b`).
 
+- Legacy task views now fold append-only acceptance criteria amendments from
+  CardStore in every rollback selector, keep birth criteria only for tasks
+  never mirrored into CardStore, and fail closed on malformed or unreadable
+  known-card state. Criteria drift is now a gating parity mismatch, and task
+  files plus `core.json` remain immutable (card d9b08c7a).
+
 - `atomic_write_text` closes its temporary descriptor before replacing the
   target and closes both temporary and parent-directory descriptors on every
   failure path. This prevents the append-only board's safe writes from leaking

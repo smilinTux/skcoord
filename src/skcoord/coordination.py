@@ -1483,6 +1483,27 @@ class Board:
         legacy agent file must never be missed by a sweep.
         """
         tasks = self.load_tasks(include_archived=include_archived)
+        # Acceptance criteria amendments are governance state, just like
+        # dependency amendments. The rollback projection must fold the latest
+        # CardStore event without rewriting either immutable birth record. A
+        # known but unreadable CardStore card propagates failure so a claim
+        # cannot proceed under stale criteria.
+        from .card_store import CardStore, current_acceptance_criteria
+
+        criteria_store = CardStore(self.home)
+        tasks = [
+            task.model_copy(
+                update={
+                    "acceptance_criteria": current_acceptance_criteria(
+                        self.home,
+                        task.id,
+                        birth_criteria=task.acceptance_criteria,
+                        store=criteria_store,
+                    )
+                }
+            )
+            for task in tasks
+        ]
         # Dependency amendments are governance state, not mutable task-file
         # contents. Apply their append-only fold even when the CardStore read
         # kill switch selects the legacy projection, so rollback cannot reopen a
