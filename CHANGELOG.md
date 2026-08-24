@@ -11,6 +11,10 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
 
 ### Fixed
 
+- Same-day recurring deterministic service-health incidents now reopen their
+  existing append-only record instead of remaining resolved or creating a
+  duplicate incident (card `5b57816b`).
+
 - `atomic_write_text` closes its temporary descriptor before replacing the
   target and closes both temporary and parent-directory descriptors on every
   failure path. This prevents the append-only board's safe writes from leaking
