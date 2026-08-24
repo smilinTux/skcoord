@@ -607,15 +607,25 @@ class CardStore:
         if card_fd is None:
             return None
         try:
-            raw = self._read_regular_file_bytes(card_fd, "core.json", "CardStore core")
+            try:
+                raw = self._read_regular_file_bytes(card_fd, "core.json", "CardStore core")
+            except ValueError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                raise ValueError(f"CardStore core for {card_id} is unreadable") from exc
             if raw is None:
                 return None
-            return json.loads(raw.decode("utf-8"))
-        except ValueError:
-            raise
+            try:
+                core = json.loads(raw.decode("utf-8"))
+            except (UnicodeError, json.JSONDecodeError) as exc:
+                raise ValueError(f"CardStore core for {card_id} is malformed") from exc
+            if not isinstance(core, dict):
+                raise ValueError(f"CardStore core for {card_id} must be a JSON object")
+            return core
         except Exception as exc:  # noqa: BLE001
-            logger.warning("Bad core.json for card %s: %s", card_id, exc)
-            return None
+            if isinstance(exc, ValueError):
+                raise
+            raise ValueError(f"CardStore core for {card_id} is unreadable") from exc
         finally:
             os.close(card_fd)
 
@@ -636,17 +646,39 @@ class CardStore:
             for name in sorted(os.listdir(events_fd)):
                 if not name.endswith(".jsonl"):
                     continue
-                raw = self._read_regular_file_bytes(events_fd, name, "CardStore event source")
+                try:
+                    raw = self._read_regular_file_bytes(
+                        events_fd, name, "CardStore event source"
+                    )
+                except ValueError:
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    raise ValueError(
+                        f"CardStore event source for {card_id} is unreadable"
+                    ) from exc
                 if raw is None:
                     continue
-                for line in raw.decode("utf-8").splitlines():
+                try:
+                    lines = raw.decode("utf-8").splitlines()
+                except UnicodeError as exc:
+                    raise ValueError(
+                        f"CardStore event source for {card_id} is malformed"
+                    ) from exc
+                for line in lines:
                     line = line.strip()
                     if not line:
                         continue
                     try:
-                        out.append(json.loads(line))
-                    except Exception:  # noqa: BLE001
-                        continue
+                        event = json.loads(line)
+                    except json.JSONDecodeError as exc:
+                        raise ValueError(
+                            f"CardStore event source for {card_id} is malformed"
+                        ) from exc
+                    if not isinstance(event, dict):
+                        raise ValueError(
+                            f"CardStore event source for {card_id} must contain JSON objects"
+                        )
+                    out.append(event)
         finally:
             os.close(events_fd)
         # Deterministic order: ts, then writer, then per-writer seq.
@@ -793,8 +825,17 @@ class CardStore:
                     card.title = e["title"]
                 if e.get("description") is not None:
                     card.description = e["description"]
-            elif action == "amend_criteria" and isinstance(e.get("criteria"), list):
-                card.acceptance_criteria = list(e["criteria"])
+            elif action == "amend_criteria":
+                criteria = e.get("criteria")
+                if (
+                    not isinstance(criteria, list)
+                    or not criteria
+                    or any(not isinstance(value, str) or not value.strip() for value in criteria)
+                ):
+                    raise ValueError(
+                        f"CardStore criteria amendment for {card_id} is malformed"
+                    )
+                card.acceptance_criteria = list(criteria)
             elif action == "add_dependency" and isinstance(e.get("dependency"), str):
                 dependency = e["dependency"]
                 if dependency and dependency not in card.dependencies:
@@ -1068,6 +1109,43 @@ def current_dependencies(
     return list(dict.fromkeys(birth_dependencies or []))
 
 
+def current_acceptance_criteria(
+    home: Path,
+    card_id: str,
+    birth_criteria: Optional[list[str]] = None,
+    store: Optional[CardStore] = None,
+) -> list[str]:
+    """Return acceptance criteria after the append-only CardStore fold.
+
+    A task with no CardStore directory is a legitimate legacy-only task and
+    retains its immutable birth criteria. A known CardStore directory without
+    a readable core is indeterminate and fails closed rather than presenting
+    stale governance requirements.
+
+    Args:
+        home: Shared SKCapstone root.
+        card_id: Card whose effective acceptance criteria are requested.
+        birth_criteria: Immutable task-file criteria for a legacy-only task.
+        store: Short-lived shared fold reader for one board projection.
+
+    Returns:
+        The latest valid folded criteria, or legacy birth criteria when the
+        task has never been mirrored into CardStore.
+
+    Raises:
+        ValueError: If a known CardStore card has missing or invalid state.
+    """
+    reader = store or CardStore(home)
+    card = reader.fold(card_id)
+    if card is not None:
+        return list(card.acceptance_criteria)
+    card_fd = reader._open_existing_card_directory(card_id)
+    if card_fd is None:
+        return list(birth_criteria or [])
+    os.close(card_fd)
+    raise ValueError(f"CardStore core for {card_id} is missing")
+
+
 def amend_dependency(
     home: Path,
     card_id: str,
@@ -1322,9 +1400,9 @@ def _open_count(cards: dict) -> int:
 def parity_check(home: Path, open_drift_threshold: int = OPEN_DRIFT_THRESHOLD) -> dict:
     """Diff the legacy board against the CardStore fold.
 
-    Compares every card on (status, owner, archived, priority, swimlane), and
-    computes the PARITY ALERT: whether the store-served open-count diverges
-    from legacy by more than ``open_drift_threshold``.
+    Compares every card on lifecycle and governance state, and computes the
+    PARITY ALERT: whether the store-served open-count diverges from legacy by
+    more than ``open_drift_threshold``.
 
     Returns:
         dict: ``{"checked", "matched", "mismatches", "missing",
@@ -1374,6 +1452,11 @@ def parity_check(home: Path, open_drift_threshold: int = OPEN_DRIFT_THRESHOLD) -
             diff["owner"] = [lc.owner, sc.owner]
         if lc.archived != sc.archived:
             diff["archived"] = [lc.archived, sc.archived]
+        if lc.acceptance_criteria != sc.acceptance_criteria:
+            diff["acceptance_criteria"] = [
+                lc.acceptance_criteria,
+                sc.acceptance_criteria,
+            ]
 
         # INFORMATIONAL diffs: priority and swimlane are written STORE-ONLY by
         # the dashboard, so legacy is the stale side by design and
