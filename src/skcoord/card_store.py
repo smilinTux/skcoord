@@ -610,7 +610,8 @@ class CardStore:
 
     def _require_foldable_core(self, card_id: str) -> None:
         """Reject an event target before creating an orphan directory."""
-        if self.fold(card_id) is None:
+        card = self.fold(card_id)
+        if card is None or card.id != card_id:
             raise ValueError(f"CardStore card {card_id} has no foldable core")
 
     def has_transition(self, card_id: str, transition_id: str) -> bool:

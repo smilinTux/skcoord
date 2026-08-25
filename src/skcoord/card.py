@@ -258,6 +258,11 @@ class CardEventLog:
 
     def append(self, event: CardEvent) -> None:
         """Append one overlay event to this host's log."""
+        if event.action in {"describe", "link"}:
+            from .card_store import CardStore
+
+            if CardStore(self.home).fold(event.card_id) is None:
+                raise ValueError(f"CardStore card {event.card_id} has no foldable core")
         if not event.writer:
             event.writer = socket.gethostname()
         filename = f"{socket.gethostname()}.jsonl"

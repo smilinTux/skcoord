@@ -14,8 +14,9 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
 - CardStore mutations now reject targets without a foldable immutable core,
   legacy migration preserves acceptance criteria with the other birth facts,
   and every board or CardStore entry point rejects a `coordination/`
-  subdirectory passed as the shared home before it can strand nested events
-  (card `0146e817`).
+  subdirectory passed as the shared home before it can strand nested events.
+  Describe and link overlay writes also require that core before opening an
+  append-only overlay file (card `0146e817`).
 
 - Same-day recurring deterministic service-health incidents now reopen their
   existing append-only record instead of remaining resolved or creating a
