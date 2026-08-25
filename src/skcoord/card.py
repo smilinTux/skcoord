@@ -20,7 +20,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
-from .coordination import Board, TaskStatus, TaskView
+from .coordination import Board, TaskStatus, TaskView, validate_shared_home
 
 logger = logging.getLogger(__name__)
 
@@ -113,7 +113,7 @@ class CardEventLog:
     """
 
     def __init__(self, home: Path) -> None:
-        self.home = Path(home).expanduser()
+        self.home = validate_shared_home(home)
         self.dir = self.home / "coordination" / "card_events"
 
     @staticmethod
@@ -258,6 +258,11 @@ class CardEventLog:
 
     def append(self, event: CardEvent) -> None:
         """Append one overlay event to this host's log."""
+        if event.action in {"describe", "link"}:
+            from .card_store import CardStore
+
+            if CardStore(self.home).fold(event.card_id) is None:
+                raise ValueError(f"CardStore card {event.card_id} has no foldable core")
         if not event.writer:
             event.writer = socket.gethostname()
         filename = f"{socket.gethostname()}.jsonl"
@@ -581,7 +586,7 @@ class KanbanBoard:
     """
 
     def __init__(self, home: Path) -> None:
-        self.home = Path(home).expanduser()
+        self.home = validate_shared_home(home)
 
     def cards(self, include_archived: bool = False) -> list[Card]:
         """All cards from both sources, with the kanban overlay applied.

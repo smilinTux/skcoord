@@ -126,6 +126,7 @@ def test_kanban_board_applies_describe_overlay_to_legacy_projection(tmp_path, mo
     """The legacy (store-disabled) projection honours describe too."""
     monkeypatch.setenv("SKCOORD_CARD_STORE", "0")
     Board(tmp_path).create_task(Task(id="d10", title="Card", description="original"))
+    CardStore(tmp_path).create(CardCore(id="d10", title="Card", description="original"))
     CardEventLog(tmp_path).append(
         CardEvent(card_id="d10", action="describe", description="patched", writer="lumina")
     )

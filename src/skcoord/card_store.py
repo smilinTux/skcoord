@@ -34,6 +34,7 @@ from typing import Any, Optional
 from pydantic import BaseModel, Field
 
 from .card import Card, Column, Kind
+from .coordination import validate_shared_home
 
 logger = logging.getLogger(__name__)
 
@@ -312,7 +313,7 @@ class CardStore:
     """
 
     def __init__(self, home: Path) -> None:
-        self.home = Path(home).expanduser()
+        self.home = validate_shared_home(home)
         self.cards_dir = self.home / "cards"
         # Per-instance cache of legacy mutations (archive index + overlay).
         # Instances are short-lived (one per CLI/MCP call), so a single load
@@ -537,6 +538,7 @@ class CardStore:
         which lets a caller safely classify a write-then-error as success.
         """
         validate_card_lock_identifier(card_id)
+        self._require_foldable_core(card_id)
         writer_filename = f"{self._writer_id(agent)}.jsonl"
         rec_fd = self._open_card_directory(card_id)
         try:
@@ -605,6 +607,12 @@ class CardStore:
             if descriptor >= 0:
                 os.close(descriptor)
             os.close(events_fd)
+
+    def _require_foldable_core(self, card_id: str) -> None:
+        """Reject an event target before creating an orphan directory."""
+        card = self.fold(card_id)
+        if card is None or card.id != card_id:
+            raise ValueError(f"CardStore card {card_id} has no foldable core")
 
     def has_transition(self, card_id: str, transition_id: str) -> bool:
         """Return whether an exact intended CardStore event is durable."""
@@ -997,6 +1005,7 @@ def import_from_legacy(home: Path, dry_run: bool = False) -> dict:
                 description=c.description,
                 created_by=c.originator,
                 created_at=c.created_at or _now_iso(),
+                acceptance_criteria=list(c.acceptance_criteria),
                 dependencies=list(c.dependencies),
                 initial_priority=c.priority,
                 initial_swimlane=c.swimlane,

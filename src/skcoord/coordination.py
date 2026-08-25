@@ -36,6 +36,21 @@ from .atomic_io import atomic_write_text
 logger = logging.getLogger(__name__)
 
 
+def validate_shared_home(home: Path) -> Path:
+    """Return the SKCapstone root, rejecting its coordination child.
+
+    Callers pass the shared root that owns sibling ``coordination/`` and
+    ``cards/`` directories. Accepting the coordination child as that root
+    silently doubles the path and strands append-only writes.
+    """
+    root = Path(home).expanduser()
+    if root.name == "coordination":
+        raise ValueError(
+            "coordination home must be the shared root, not its coordination subdirectory"
+        )
+    return root
+
+
 @contextmanager
 def _board_mutation_lock(home: Path, timeout_seconds: float = 5.0):
     """Lock agent projections before sorted per-card locks.
@@ -265,7 +280,7 @@ class Board:
     """
 
     def __init__(self, home: Path) -> None:
-        self.home = Path(home).expanduser()
+        self.home = validate_shared_home(home)
         self.coord_dir = self.home / "coordination"
         self.tasks_dir = self.coord_dir / "tasks"
         self.agents_dir = self.coord_dir / "agents"
