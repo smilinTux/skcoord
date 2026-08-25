@@ -129,6 +129,8 @@ def _candidate_decision(
         reasons.add("repo_count_invalid")
     if len(card.size_values) != 1:
         reasons.add("size_count_invalid")
+    elif card.size_values[0] not in {"S", "M", "L", "XL"}:
+        reasons.add("size_invalid")
 
     dependency_ids = set(card.dependency_ids)
     if dependency_ids != set(card.dependency_states) or dependency_ids != set(
@@ -191,6 +193,8 @@ def _candidate_decision(
             reasons.add("capacity_stale")
         if not capacity.lease_state_fresh:
             reasons.add("capacity_lease_unknown")
+        if capacity.active_wip != len(capacity.active_card_ids):
+            reasons.add("capacity_conflict")
         if capacity.active_wip >= capacity.wip_limit:
             reasons.add("wip_exhausted")
         if card.kind not in capacity.allowed_task_classes:

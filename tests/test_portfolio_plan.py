@@ -336,6 +336,7 @@ def test_conflicting_duplicate_card_ids_abstain_without_guessing() -> None:
         ({"state": "blocked"}, {}, "state_not_eligible"),
         ({"repo_ids": ("skcapstone", "skcoord")}, {}, "repo_count_invalid"),
         ({"size_values": ("L", "M")}, {}, "size_count_invalid"),
+        ({"size_values": ("NOT-A-RECOGNIZED-SIZE",)}, {}, "size_invalid"),
         ({"owner_principal_id": "someone"}, {}, "already_owned"),
         ({"lease_state": "unknown"}, {}, "lease_unknown"),
         (
@@ -344,7 +345,8 @@ def test_conflicting_duplicate_card_ids_abstain_without_guessing() -> None:
             "lease_active",
         ),
         ({"ready_at": None}, {}, "ready_time_missing"),
-        ({}, {"active_wip": 2}, "wip_exhausted"),
+        ({}, {"active_wip": 2, "active_card_ids": ("card-1", "card-2")}, "wip_exhausted"),
+        ({}, {"active_card_ids": ("already-active",)}, "capacity_conflict"),
         ({}, {"expires_at": AS_OF}, "capacity_stale"),
         ({}, {"capability_state": "unauthorized"}, "executor_capability_unauthorized"),
     ],
