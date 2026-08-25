@@ -13,12 +13,15 @@ docs/superpowers/plans/2026-07-16-cards-storage-cutover-phase4-SHELVED.md.
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import fcntl
 import hashlib
+import hmac
 import json
 import logging
 import os
+import secrets
 import socket
 import stat
 import time
@@ -33,6 +36,15 @@ from pydantic import BaseModel, Field
 from .card import Card, Column, Kind
 
 logger = logging.getLogger(__name__)
+
+_TASK_VIEW_PAGE_LIMIT = 200
+_TASK_VIEW_SCOPE_MAX_CHARACTERS = 256
+_TASK_VIEW_SCOPE_MAX_BYTES = 1024
+# Maximum unpadded base64url bytes for the canonical ASCII-escaped cursor with
+# every bounded text field filled by worst-case Unicode, plus its HMAC-SHA256.
+_TASK_VIEW_CURSOR_MAX_ENCODED_BYTES = 10382
+# Process-local by design: restart invalidates every outstanding cursor.
+_TASK_VIEW_CURSOR_SECRET = secrets.token_bytes(32)
 
 
 def validate_card_lock_identifier(card_id: str) -> str:
@@ -1041,6 +1053,172 @@ _COLUMN_TO_STATUS = {
 }
 
 
+def _task_view_from_card(card):
+    """Reconstruct one coord ``TaskView`` from a folded CardStore card."""
+    from .coordination import Task, TaskPriority, TaskStatus, TaskView
+
+    try:
+        priority = TaskPriority(card.priority)
+    except ValueError:
+        priority = TaskPriority.MEDIUM
+    task = Task(
+        id=card.id,
+        title=card.title,
+        description=card.description,
+        priority=priority,
+        tags=list(card.labels),
+        created_by=card.originator,
+        created_at=card.created_at,
+        acceptance_criteria=list(card.acceptance_criteria),
+        dependencies=list(card.dependencies),
+        meta=dict(card.meta),
+    )
+    status = TaskStatus(_COLUMN_TO_STATUS.get(card.status.value, "open"))
+    return TaskView(task=task, status=status, claimed_by=card.owner)
+
+
+def _task_view_cursor(payload: dict) -> str:
+    body = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    signature = hmac.digest(_TASK_VIEW_CURSOR_SECRET, body, "sha256")
+    cursor = base64.urlsafe_b64encode(body + signature).decode().rstrip("=")
+    if len(cursor) > _TASK_VIEW_CURSOR_MAX_ENCODED_BYTES:
+        raise ValueError("task-view cursor exceeds its encoded-size contract")
+    return cursor
+
+
+def _task_view_cursor_position(
+    cursor: str | None,
+    *,
+    scope: str,
+    limit: int,
+    include_archived: bool,
+) -> tuple[str | None, str | None]:
+    if cursor is None:
+        return None, None
+    if (
+        not isinstance(cursor, str)
+        or not cursor
+        or len(cursor) > _TASK_VIEW_CURSOR_MAX_ENCODED_BYTES
+        or not cursor.isascii()
+    ):
+        raise ValueError("task-view cursor is malformed")
+    try:
+        raw = base64.b64decode(
+            cursor + "=" * (-len(cursor) % 4), altchars=b"-_", validate=True
+        )
+        body, signature = raw[:-32], raw[-32:]
+        expected = hmac.digest(_TASK_VIEW_CURSOR_SECRET, body, "sha256")
+        if len(signature) != 32 or not hmac.compare_digest(signature, expected):
+            raise ValueError
+        payload = json.loads(body)
+        if (
+            not isinstance(payload, dict)
+            or set(payload) != {"after", "archived", "limit", "population", "scope", "v"}
+            or payload["v"] != 2
+            or payload["scope"] != scope
+            or payload["limit"] != limit
+            or payload["archived"] is not include_archived
+            or not isinstance(payload["after"], str)
+            or not payload["after"]
+            or len(payload["after"]) > 128
+            or not isinstance(payload["population"], str)
+            or not payload["population"]
+            or len(payload["population"]) > 256
+        ):
+            raise ValueError
+        validate_card_lock_identifier(payload["after"])
+        return payload["after"], payload["population"]
+    except (ValueError, TypeError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError("task-view cursor is malformed, stale, or out of scope") from exc
+
+
+def task_view_page_from_store(
+    home: Path,
+    scope,
+    *,
+    limit: int,
+    cursor: str | None = None,
+    include_archived: bool = False,
+):
+    """Fold only one authorized ``limit + 1`` task-view page.
+
+    The owner provides a bounded keyset result and its exact population-state
+    identity. A missing, non-task, archived, mismatched, reordered, or changed
+    result fails closed rather than skipping forward and creating a gap.
+    """
+    from .coordination import TaskViewPage, TaskViewReadBatch, TaskViewReadScope
+
+    if not isinstance(scope, TaskViewReadScope):
+        raise TypeError("task-view scope must be owner-authorized before paging")
+    if (
+        isinstance(limit, bool)
+        or not isinstance(limit, int)
+        or not 1 <= limit <= _TASK_VIEW_PAGE_LIMIT
+    ):
+        raise ValueError(f"task-view limit must be between 1 and {_TASK_VIEW_PAGE_LIMIT}")
+    after, expected_population = _task_view_cursor_position(
+        cursor,
+        scope=scope.authorization_scope,
+        limit=limit,
+        include_archived=include_archived,
+    )
+    try:
+        batch = scope.read_page(after, limit + 1)
+    except Exception as exc:  # noqa: BLE001 - authorization owner failures fail closed
+        raise ValueError("task-view authorization population is unavailable") from exc
+    if not isinstance(batch, TaskViewReadBatch):
+        raise TypeError("task-view owner reader returned an invalid batch")
+    selected_ids = batch.card_ids
+    if not isinstance(selected_ids, (tuple, list)) or len(selected_ids) > limit + 1:
+        raise ValueError("task-view owner reader exceeded the bounded request")
+    if (
+        not isinstance(batch.population_state, str)
+        or not batch.population_state
+        or len(batch.population_state) > 256
+        or (expected_population is not None and batch.population_state != expected_population)
+    ):
+        raise ValueError("task-view cursor population is stale")
+
+    store = CardStore(home)
+    cards = []
+    previous = after
+    for card_id in selected_ids:
+        validate_card_lock_identifier(card_id)
+        if previous is not None and card_id <= previous:
+            raise ValueError("task-view owner reader returned an unstable order")
+        card = store.fold(card_id)
+        if (
+            card is None
+            or card.id != card_id
+            or card.kind.value not in ("task", "epic")
+            or (card.archived and not include_archived)
+        ):
+            raise ValueError("task-view cursor population is stale")
+        cards.append(card)
+        previous = card_id
+    has_more = len(cards) > limit
+    items = tuple(_task_view_from_card(card) for card in cards[:limit])
+    next_cursor = None
+    if has_more:
+        next_cursor = _task_view_cursor(
+            {
+                "after": cards[limit - 1].id,
+                "archived": include_archived,
+                "limit": limit,
+                "population": batch.population_state,
+                "scope": scope.authorization_scope,
+                "v": 2,
+            }
+        )
+    return TaskViewPage(
+        items=items,
+        population_state=batch.population_state,
+        next_cursor=next_cursor,
+        has_more=has_more,
+        eligible_records_touched=len(selected_ids),
+    )
+
+
 def task_views_from_store(home: Path, include_archived: bool = False) -> list:
     """Reconstruct coord ``TaskView`` objects from the CardStore.
 
@@ -1049,34 +1227,14 @@ def task_views_from_store(home: Path, include_archived: bool = False) -> list:
     validation all serve from the event-sourced store while legacy keeps being
     written as a hot backup.
     """
-    from .coordination import Task, TaskPriority, TaskStatus, TaskView
-
     store = CardStore(home)
-    views = []
-    for c in store.list_cards(include_archived=include_archived):
+    return [
+        _task_view_from_card(card)
+        for card in store.list_cards(include_archived=include_archived)
         # get_task_views is the COORD task board: coord-origin kinds only.
         # ITIL cards (incident/problem/change) live in the kanban view, not here.
-        if c.kind.value not in ("task", "epic"):
-            continue
-        try:
-            priority = TaskPriority(c.priority)
-        except ValueError:
-            priority = TaskPriority.MEDIUM
-        task = Task(
-            id=c.id,
-            title=c.title,
-            description=c.description,
-            priority=priority,
-            tags=list(c.labels),
-            created_by=c.originator,
-            created_at=c.created_at,
-            acceptance_criteria=list(c.acceptance_criteria),
-            dependencies=list(c.dependencies),
-            meta=dict(c.meta),
-        )
-        status = TaskStatus(_COLUMN_TO_STATUS.get(c.status.value, "open"))
-        views.append(TaskView(task=task, status=status, claimed_by=c.owner))
-    return views
+        if card.kind.value in ("task", "epic")
+    ]
 
 
 def _card_exists(home: Path, card_id: str) -> bool:

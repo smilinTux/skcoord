@@ -23,10 +23,11 @@ import stat
 import time
 import uuid
 from contextlib import ExitStack, contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Optional, Sequence
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -197,6 +198,60 @@ class TaskView(BaseModel):
     task: Task
     status: TaskStatus = TaskStatus.OPEN
     claimed_by: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class TaskViewReadBatch:
+    """One bounded owner result and its owner-maintained population identity."""
+
+    card_ids: Sequence[str]
+    population_state: str
+
+
+@dataclass(frozen=True)
+class TaskViewReadScope:
+    """Owner-authorized keyset reader for bounded task-view pages.
+
+    The owner reader returns no more than the requested identifiers plus an
+    exact state identity maintained by the authorization source. SKCoord never
+    materializes or revisions the complete eligible population. Scope is
+    bounded to 256 Unicode characters and 1024 UTF-8 bytes, which fits the
+    cursor's explicit maximum encoded size even at the worst Unicode bound.
+    """
+
+    authorization_scope: str
+    read_page: Callable[[str | None, int], TaskViewReadBatch]
+
+    def __post_init__(self) -> None:
+        from .card_store import _TASK_VIEW_SCOPE_MAX_BYTES, _TASK_VIEW_SCOPE_MAX_CHARACTERS
+
+        scope = self.authorization_scope
+        if not isinstance(scope, str) or not 1 <= len(scope) <= _TASK_VIEW_SCOPE_MAX_CHARACTERS:
+            raise ValueError(
+                "authorization scope must contain 1 to 256 characters and at most 1024 UTF-8 bytes"
+            )
+        try:
+            scope_bytes = scope.encode()
+        except UnicodeEncodeError as exc:
+            raise ValueError("authorization scope must be valid UTF-8") from exc
+        if len(scope_bytes) > _TASK_VIEW_SCOPE_MAX_BYTES:
+            raise ValueError(
+                "authorization scope must contain 1 to 256 characters and at most 1024 UTF-8 bytes"
+            )
+        if not callable(self.read_page):
+            raise TypeError("task-view scope requires an owner page reader")
+
+
+class TaskViewPage(BaseModel):
+    """One bounded page plus an opaque continuation cursor."""
+
+    model_config = {"extra": "forbid", "frozen": True}
+
+    items: tuple[TaskView, ...]
+    population_state: str
+    next_cursor: str | None
+    has_more: bool
+    eligible_records_touched: int = Field(ge=0, le=201)
 
 
 class Board:
@@ -1436,6 +1491,35 @@ class Board:
                     ):
                         changed.append(task_id)
             return changed
+
+    def get_task_view_page(
+        self,
+        scope: TaskViewReadScope,
+        *,
+        limit: int,
+        cursor: str | None = None,
+        include_archived: bool = False,
+    ) -> TaskViewPage:
+        """Read at most ``limit + 1`` owner-authorized CardStore records.
+
+        The authorization owner supplies a bounded keyset reader and exact
+        population-state identity; this method never enumerates the CardStore.
+        Cursors are process-local, opaque, integrity-protected, and bound to
+        that state, the authorization scope, limit, and archive mode. A forged,
+        malformed, restarted, stale, or scope-shifted cursor fails closed.
+
+        Existing callers remain on :meth:`get_task_views`, whose unpaginated
+        return type and behavior are unchanged.
+        """
+        from .card_store import task_view_page_from_store
+
+        return task_view_page_from_store(
+            self.home,
+            scope,
+            limit=limit,
+            cursor=cursor,
+            include_archived=include_archived,
+        )
 
     def get_task_views(self, include_archived: bool = False) -> list[TaskView]:
         """Build enriched task views with derived status.
