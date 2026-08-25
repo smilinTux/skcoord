@@ -344,7 +344,9 @@ Layout created under that root:
 | `cards/<id>/events/<agent>@<host>.jsonl` | that writer, append-only | CardStore events, folded on read. |
 
 Note that the CardStore lives at `<home>/cards/`, a **sibling** of
-`<home>/coordination/`, not inside it.
+`<home>/coordination/`, not inside it. Every `home` argument must name that
+shared root. Passing `<home>/coordination/` is rejected before a doubled
+`coordination/coordination/` path or an orphan CardStore event can be created.
 
 ### `SKCOORD_CARD_STORE`
 

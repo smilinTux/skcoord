@@ -11,6 +11,12 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
 
 ### Fixed
 
+- CardStore mutations now reject targets without a foldable immutable core,
+  legacy migration preserves acceptance criteria with the other birth facts,
+  and every board or CardStore entry point rejects a `coordination/`
+  subdirectory passed as the shared home before it can strand nested events
+  (card `0146e817`).
+
 - Same-day recurring deterministic service-health incidents now reopen their
   existing append-only record instead of remaining resolved or creating a
   duplicate incident (card `5b57816b`).
