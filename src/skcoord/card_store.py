@@ -1552,24 +1552,59 @@ def mirror_coord_archive(home: Path, task_id: str, agent: str) -> None:
 OPEN_DRIFT_THRESHOLD = 5
 
 
-def _open_count(cards: dict) -> int:
-    """Count coord-board OPEN cards (what ``coord status`` reports as open).
+def _open_count(
+    cards: dict, known_status_ids: Optional[set[str]] = None
+) -> int:
+    """Count comparable coord-board OPEN cards.
 
-    Open = a task/epic card, not archived, still in the backlog column.
+    Args:
+        cards: Projected cards keyed by identifier.
+        known_status_ids: Optional card ids whose immutable legacy record
+            carries an explicit ``status`` field. Other cards are unknown.
+
+    Returns:
+        The number of non-archived task cards explicitly known to be open.
     """
     return sum(
         1
-        for c in cards.values()
-        if not c.archived and c.kind.value in ("task", "epic") and c.status.value == "backlog"
+        for card_id, card in cards.items()
+        if (known_status_ids is None or card_id in known_status_ids)
+        and not card.archived
+        and card.kind.value in ("task", "epic")
+        and card.status.value == "backlog"
     )
+
+
+def _legacy_status_ids(home: Path) -> set[str]:
+    """Return task ids with status physically present in the legacy record.
+
+    Args:
+        home: Shared SKCapstone root.
+
+    Returns:
+        Task ids whose immutable birth record explicitly carries ``status``.
+    """
+    from .coordination import Board
+
+    card_ids: set[str] = set()
+    for path in sorted(Board(home).tasks_dir.glob("*.json")):
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            continue
+        card_id = record.get("id") if isinstance(record, dict) else None
+        if isinstance(card_id, str) and card_id and "status" in record:
+            card_ids.add(card_id)
+    return card_ids
 
 
 def parity_check(home: Path, open_drift_threshold: int = OPEN_DRIFT_THRESHOLD) -> dict:
     """Diff the legacy board against the CardStore fold.
 
-    Compares every card on lifecycle and governance state, and computes the
-    PARITY ALERT: whether the store-served open-count diverges from legacy by
-    more than ``open_drift_threshold``.
+    Compares only fields physically maintained by each legacy record. A
+    projected default for an absent legacy field is unknown, not disagreement.
+    The open-count alert likewise compares only records with explicit legacy
+    lifecycle state.
 
     Returns:
         dict: ``{"checked", "matched", "mismatches", "missing",
@@ -1585,6 +1620,7 @@ def parity_check(home: Path, open_drift_threshold: int = OPEN_DRIFT_THRESHOLD) -
     with _forced_legacy_read():
         legacy = {c.id: c for c in KanbanBoard(home).cards(include_archived=True)}
     stored = {c.id: c for c in store.list_cards(include_archived=True)}
+    legacy_status_ids = _legacy_status_ids(home)
 
     # Coarse lifecycle bucket: legacy coord can only derive todo/active/done from
     # its claim files, so kanban-native column moves (ready<->doing<->review) made
@@ -1613,7 +1649,11 @@ def parity_check(home: Path, open_drift_threshold: int = OPEN_DRIFT_THRESHOLD) -
         # reconcile_from_legacy() can actually converge. A diff here means the
         # mirror is genuinely broken.
         diff = {}
-        if _bucket(lc.status.value) != _bucket(sc.status.value):
+        # Legacy task JSON is a birth record. A projected status default for
+        # a record without that field is unknown and cannot disagree.
+        if cid in legacy_status_ids and _bucket(lc.status.value) != _bucket(
+            sc.status.value
+        ):
             diff["status"] = [lc.status.value, sc.status.value]
         if (lc.owner or None) != (sc.owner or None):
             diff["owner"] = [lc.owner, sc.owner]
@@ -1649,8 +1689,11 @@ def parity_check(home: Path, open_drift_threshold: int = OPEN_DRIFT_THRESHOLD) -
             matched += 1
         if info:
             informational.append({"id": cid, "diff": info})
-    open_legacy = _open_count(legacy)
-    open_store = _open_count(stored)
+    # Compare only lifecycle values the legacy side actually carries. A
+    # status-less birth record projected to backlog is unknown, not evidence
+    # that the CardStore completion is wrong.
+    open_legacy = _open_count(legacy, legacy_status_ids)
+    open_store = _open_count(stored, legacy_status_ids)
     open_drift = abs(open_legacy - open_store)
     return {
         "checked": len(legacy),
