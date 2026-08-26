@@ -146,6 +146,8 @@ class TaskStatus(str, Enum):
     REVIEW = "review"
     DONE = "done"
     BLOCKED = "blocked"
+    SUPERSEDED = "superseded"
+    INDETERMINATE = "indeterminate"
 
 
 class AgentState(str, Enum):
@@ -1769,6 +1771,21 @@ class Board:
 
         if target is None:
             raise ValueError(f"Task {task_id} not found")
+        if target.status == TaskStatus.SUPERSEDED:
+            raise ValueError(
+                f"Task {task_id} is superseded by "
+                f"{target.task.meta.get('superseded_by', 'unknown card')}"
+            )
+        if target.status == TaskStatus.INDETERMINATE:
+            raise ValueError(
+                f"Task {task_id} supersession is indeterminate: "
+                f"{target.task.meta.get('supersession_reason', 'invalid enforced evidence')}"
+            )
+        if self._legacy_supersession_marker(task_id):
+            raise ValueError(
+                f"Task {task_id} supersession is indeterminate: "
+                "legacy superseded marker has no enforced supersession evidence"
+            )
         # Kanban moves to ready/doing/review carry no owner, yet the card
         # folds to CLAIMED/IN_PROGRESS/REVIEW with claimed_by None. The
         # lifecycle reconciler only projects claims for cards WITH an owner
@@ -1827,6 +1844,15 @@ class Board:
         agent.state = AgentState.ACTIVE
         self.save_agent(agent)
         return agent, bumped
+
+    def _legacy_supersession_marker(self, task_id: str) -> bool:
+        """Protect marker-only cards when CardStore reads are unavailable."""
+        from .card_store import CardStore, card_store_read_enabled
+
+        if card_store_read_enabled() or CardStore(self.home)._load_core(task_id) is not None:
+            return False
+        task = next((item for item in self.load_tasks(True) if item.id == task_id), None)
+        return bool(task and any(label.casefold() == "superseded" for label in task.tags))
 
     def claim_task(self, agent_name: str, task_id: str, force: bool = False) -> AgentFile:
         """Claim under the board lock and every affected card lock.

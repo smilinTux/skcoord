@@ -11,6 +11,11 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
 
 ### Fixed
 
+- CardStore now folds only enforced `supersede` events into typed canonical
+  supersession truth. Free-form links remain annotations, while conflicting,
+  malformed, self-referential, absent-target, or marker-only evidence fails
+  closed and cannot render or claim as ordinary open work (card `658dd722`).
+
 - Incident folds now apply append-only `assignment` events to `managed_by`,
   and `ITILManager.update_incident` can append those events without rewriting
   immutable incident cores or changing creation provenance (card `aece9475`).

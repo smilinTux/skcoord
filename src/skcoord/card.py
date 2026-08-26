@@ -40,6 +40,14 @@ class Kind(str, Enum):
     CHANGE = "change"
 
 
+class SupersessionState(str, Enum):
+    """Canonical supersession disposition, separate from lifecycle state."""
+
+    ACTIVE = "active"
+    SUPERSEDED = "superseded"
+    INDETERMINATE = "indeterminate"
+
+
 class Column(str, Enum):
     """The kanban lifecycle stage (shared by every kind)."""
 
@@ -68,6 +76,10 @@ class Card(BaseModel):
     dependencies: list[str] = Field(default_factory=list)
     links: dict = Field(default_factory=dict)
     meta: dict = Field(default_factory=dict)
+    supersession_state: SupersessionState = SupersessionState.ACTIVE
+    superseded_by: str | None = None
+    supersession_evidence: tuple[str, ...] = Field(default_factory=tuple)
+    supersession_reason: str | None = None
     archived: bool = False
     created_at: str = ""
     updated_at: str = ""
@@ -394,6 +406,8 @@ _STATUS_TO_COLUMN = {
     TaskStatus.REVIEW: Column.REVIEW,
     TaskStatus.DONE: Column.DONE,
     TaskStatus.BLOCKED: Column.DOING,
+    TaskStatus.SUPERSEDED: Column.BACKLOG,
+    TaskStatus.INDETERMINATE: Column.BACKLOG,
 }
 
 
@@ -417,6 +431,12 @@ def card_from_taskview(view: TaskView) -> Card:
     meta = dict(t.meta)
     if view.status == TaskStatus.BLOCKED:
         meta["blocked"] = True
+    elif view.status == TaskStatus.SUPERSEDED:
+        meta["supersession_state"] = "superseded"
+        meta["superseded_by"] = t.meta.get("superseded_by")
+    elif view.status == TaskStatus.INDETERMINATE:
+        meta["supersession_state"] = "indeterminate"
+        meta["supersession_reason"] = t.meta.get("supersession_reason")
     return Card(
         id=t.id,
         kind=kind,
@@ -431,6 +451,9 @@ def card_from_taskview(view: TaskView) -> Card:
         acceptance_criteria=list(t.acceptance_criteria),
         dependencies=list(t.dependencies),
         meta=meta,
+        supersession_state=meta.get("supersession_state", "active"),
+        superseded_by=meta.get("superseded_by"),
+        supersession_reason=meta.get("supersession_reason"),
         created_at=t.created_at,
         source="coord",
     )

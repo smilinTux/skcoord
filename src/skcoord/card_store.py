@@ -33,7 +33,7 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
-from .card import Card, Column, Kind
+from .card import Card, Column, Kind, SupersessionState
 from .coordination import validate_shared_home
 
 logger = logging.getLogger(__name__)
@@ -715,6 +715,60 @@ class CardStore:
                 self._legacy_cache = {}
         return self._legacy_cache.get(card_id, [])
 
+    def _apply_supersession(
+        self,
+        card: Card,
+        card_id: str,
+        events: list[dict],
+    ) -> None:
+        """Apply only enforced supersession evidence, failing closed on ambiguity."""
+        enforced = [event for event in events if event.get("action") == "supersede"]
+        evidence_ids: list[str] = []
+        successors: set[str] = set()
+        malformed = False
+        for event in enforced:
+            event_id = event.get("event_id")
+            successor = event.get("superseding_card_id")
+            if (
+                not isinstance(event_id, str)
+                or not event_id
+                or not isinstance(successor, str)
+                or not successor
+                or successor != successor.strip()
+                or successor == card_id
+            ):
+                malformed = True
+                continue
+            evidence_ids.append(event_id)
+            successors.add(successor)
+
+        reason = None
+        successor = None
+        if malformed:
+            reason = "enforced supersession evidence is malformed"
+        elif len(successors) > 1:
+            reason = "enforced supersession evidence conflicts"
+        elif successors:
+            candidate = next(iter(successors))
+            if self._load_core(candidate) is None:
+                reason = "enforced superseding card is absent"
+            else:
+                successor = candidate
+        elif any(label.casefold() == "superseded" for label in card.labels):
+            reason = "superseded marker has no enforced supersession evidence"
+
+        card.supersession_evidence = tuple(evidence_ids)
+        if successor is not None:
+            card.supersession_state = SupersessionState.SUPERSEDED
+            card.superseded_by = successor
+            card.owner = None
+            card.meta.pop("_claim_revision", None)
+        elif reason is not None:
+            card.supersession_state = SupersessionState.INDETERMINATE
+            card.supersession_reason = reason
+            card.owner = None
+            card.meta.pop("_claim_revision", None)
+
     def fold(self, card_id: str) -> Optional[Card]:
         """Fold core + events into the current ``Card`` state.
 
@@ -919,6 +973,7 @@ class CardStore:
                 if col in {c.value for c in Column}:
                     card.status = Column(col)
             card.updated_at = e.get("ts", card.updated_at)
+        self._apply_supersession(card, card_id, events)
         return card
 
     def list_card_ids(self) -> list[str]:
@@ -1070,6 +1125,14 @@ def _task_view_from_card(card):
         priority = TaskPriority(card.priority)
     except ValueError:
         priority = TaskPriority.MEDIUM
+    meta = dict(card.meta)
+    meta["supersession_state"] = card.supersession_state.value
+    if card.superseded_by is not None:
+        meta["superseded_by"] = card.superseded_by
+    if card.supersession_reason is not None:
+        meta["supersession_reason"] = card.supersession_reason
+    if card.supersession_evidence:
+        meta["supersession_evidence"] = list(card.supersession_evidence)
     task = Task(
         id=card.id,
         title=card.title,
@@ -1080,9 +1143,14 @@ def _task_view_from_card(card):
         created_at=card.created_at,
         acceptance_criteria=list(card.acceptance_criteria),
         dependencies=list(card.dependencies),
-        meta=dict(card.meta),
+        meta=meta,
     )
-    status = TaskStatus(_COLUMN_TO_STATUS.get(card.status.value, "open"))
+    if card.supersession_state == SupersessionState.SUPERSEDED:
+        status = TaskStatus.SUPERSEDED
+    elif card.supersession_state == SupersessionState.INDETERMINATE:
+        status = TaskStatus.INDETERMINATE
+    else:
+        status = TaskStatus(_COLUMN_TO_STATUS.get(card.status.value, "open"))
     return TaskView(task=task, status=status, claimed_by=card.owner)
 
 

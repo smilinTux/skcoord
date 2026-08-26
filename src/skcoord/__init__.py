@@ -35,6 +35,7 @@ from .card import (
     Column,
     KanbanBoard,
     Kind,
+    SupersessionState,
     render_html,
 )
 from .coordination import (
@@ -85,6 +86,7 @@ __all__ = [
     "TaskView",
     "FileAuthorizedCardPolicyBackend",
     "StaticAuthorizedCardPolicyBackend",
+    "SupersessionState",
     "atomic_write_text",
     "audit_lifecycle",
     "get_briefing_json",
