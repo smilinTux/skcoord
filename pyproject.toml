@@ -28,6 +28,7 @@ classifiers = [
 dependencies = [
     "capauth>=0.3.8",
     "pydantic>=2.0,<3.0",
+    "jsonschema>=4.18,<5.0",
 ]
 
 [project.urls]
@@ -35,6 +36,9 @@ Homepage = "https://github.com/smilinTux/skcoord"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+skcoord = ["schemas/*.json"]
 
 [tool.ruff]
 line-length = 99
