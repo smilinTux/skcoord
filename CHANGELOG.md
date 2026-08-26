@@ -11,6 +11,11 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
 
 ### Fixed
 
+- Legacy task fields that are absent now remain unknown during parity checks
+  instead of being projected as disagreements. In particular, status-less
+  immutable birth records no longer make complete CardStore chains appear
+  stale or inflate the parity open-count alert (card `9ccc42ec`).
+
 - CardStore mutations now reject targets without a foldable immutable core,
   legacy migration preserves acceptance criteria with the other birth facts,
   and every board or CardStore entry point rejects a `coordination/`
