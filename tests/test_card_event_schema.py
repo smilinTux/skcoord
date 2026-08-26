@@ -4,6 +4,7 @@ import json
 
 import pytest
 
+from skcoord.card import CardEvent, CardEventLog
 from skcoord.card_event_schema import (
     CARD_EVENT_SCHEMA_VERSION,
     join_event_evidence,
@@ -69,7 +70,7 @@ def test_structural_lifecycle_and_links_never_imply_verdict():
         _legacy_event(action="complete", verdict="PASS"),
         _legacy_event(event_id="event-2", action="link", link_value="PASS"),
     ]
-    assert join_event_evidence(events) == {"event-1": (), "event-2": ()}
+    assert join_event_evidence(events, []) == {"event-1": (), "event-2": ()}
 
 
 def test_only_separate_valid_evidence_event_joins_to_structural_event():
@@ -86,8 +87,78 @@ def test_only_separate_valid_evidence_event_joins_to_structural_event():
         subject_event_id="absent",
         verdict="FAIL",
     )
-    joined = join_event_evidence([structural, evidence, orphan])
+    joined = join_event_evidence([structural], [evidence, orphan])
     assert joined == {"event-1": (evidence,)}
+
+
+def test_verdict_link_in_separate_evidence_source_does_not_join():
+    structural = _legacy_event(action="complete")
+    verdict_link = _legacy_event(
+        event_id="link-1",
+        action="link",
+        subject_event_id="event-1",
+        verdict="PASS",
+        link_key="verdict",
+        link_value="PASS",
+    )
+    assert join_event_evidence([structural], [verdict_link]) == {"event-1": ()}
+
+
+def test_evidence_from_structural_source_is_not_treated_as_evidence():
+    structural = _legacy_event(action="complete")
+    misplaced = _legacy_event(
+        event_id="misplaced-1",
+        action="evidence",
+        subject_event_id="event-1",
+        verdict="PASS",
+    )
+    assert join_event_evidence([structural, misplaced], []) == {
+        "event-1": (),
+        "misplaced-1": (),
+    }
+
+
+def test_append_parses_every_existing_line_before_writing(tmp_path, monkeypatch):
+    store = CardStore(tmp_path)
+    store.create(CardCore(id="parsefirst", title="Parse first"))
+    path = store.cards_dir / "parsefirst" / "events" / f"{store._writer_id('agent')}.jsonl"
+    path.parent.mkdir()
+    path.write_text('{"event_id":"valid"}\nnot-json\n', encoding="utf-8")
+    before = path.read_bytes()
+    monkeypatch.setattr(store, "_require_foldable_core", lambda card_id: None)
+
+    with pytest.raises(ValueError, match="malformed JSON at line 2"):
+        store.append_event("parsefirst", "move", "agent", column="doing")
+    assert path.read_bytes() == before
+
+
+def test_overlay_append_parses_existing_lines_before_writing(tmp_path, monkeypatch):
+    monkeypatch.setattr("skcoord.card.socket.gethostname", lambda: "test-host")
+    path = tmp_path / "coordination" / "card_events" / "test-host.jsonl"
+    path.parent.mkdir(parents=True)
+    path.write_text("not-json\n", encoding="utf-8")
+    before = path.read_bytes()
+
+    with pytest.raises(ValueError, match="malformed JSON at line 1"):
+        CardEventLog(tmp_path).append(
+            CardEvent(card_id="any-card", action="move", writer="agent", column="doing")
+        )
+    assert path.read_bytes() == before
+
+
+def test_append_rejects_existing_non_object_before_writing(tmp_path, monkeypatch):
+    store = CardStore(tmp_path)
+    store.create(CardCore(id="parseobject", title="Parse object"))
+    filename = f"{store._writer_id('agent')}.jsonl"
+    path = store.cards_dir / "parseobject" / "events" / filename
+    path.parent.mkdir()
+    path.write_text("[]\n", encoding="utf-8")
+    before = path.read_bytes()
+    monkeypatch.setattr(store, "_require_foldable_core", lambda card_id: None)
+
+    with pytest.raises(ValueError, match="non-object at line 1"):
+        store.append_event("parseobject", "move", "agent", column="doing")
+    assert path.read_bytes() == before
 
 
 def test_v1_evidence_event_requires_explicit_subject_and_verdict():

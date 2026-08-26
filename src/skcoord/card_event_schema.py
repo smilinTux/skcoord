@@ -103,23 +103,28 @@ def validate_card_event(
     return tuple(findings)
 
 
-def join_event_evidence(events: Iterable[Mapping[str, Any]]) -> dict[str, tuple[dict, ...]]:
-    """Join explicit evidence events to structural events by event id.
+def join_event_evidence(
+    structural_events: Iterable[Mapping[str, Any]],
+    evidence_events: Iterable[Mapping[str, Any]],
+) -> dict[str, tuple[dict, ...]]:
+    """Join CardStore structure to separate coordination evidence by event id.
 
-    Lifecycle, completion, links, labels, and free-form payload fields never
-    synthesize a verdict.  Orphan evidence is ignored by this projection (but
-    remains readable in the source stream).
+    The two arguments are deliberately separate trust domains: callers read
+    structure from ``cards/<id>/events/*.jsonl`` and evidence from
+    ``coordination/card_events/*.jsonl``.  Only an explicit ``evidence`` event
+    with ``subject_event_id`` and ``verdict`` joins.  Lifecycle, completion,
+    and link events in either source never synthesize a verdict.  Orphan
+    evidence remains readable in its source stream but is absent here.
     """
-    materialized = [dict(event) for event in events]
+    structural = [dict(event) for event in structural_events]
+    evidence = [dict(event) for event in evidence_events]
     structural_ids = {
         event.get("event_id")
-        for event in materialized
-        if event.get("action") != EVIDENCE_ACTION
-        and isinstance(event.get("event_id"), str)
-        and event.get("event_id")
+        for event in structural
+        if isinstance(event.get("event_id"), str) and event.get("event_id")
     }
     joined: dict[str, list[dict]] = {event_id: [] for event_id in structural_ids}
-    for event in materialized:
+    for event in evidence:
         if event.get("action") != EVIDENCE_ACTION:
             continue
         subject = event.get("subject_event_id")
