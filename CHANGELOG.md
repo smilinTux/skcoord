@@ -16,6 +16,10 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
   immutable birth records no longer make complete CardStore chains appear
   stale or inflate the parity open-count alert (card `9ccc42ec`).
 
+- Incident folds now apply append-only `assignment` events to `managed_by`,
+  and `ITILManager.update_incident` can append those events without rewriting
+  immutable incident cores or changing creation provenance (card `aece9475`).
+
 - CardStore mutations now reject targets without a foldable immutable core,
   legacy migration preserves acceptance criteria with the other birth facts,
   and every board or CardStore entry point rejects a `coordination/`

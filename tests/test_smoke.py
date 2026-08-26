@@ -8,6 +8,7 @@ import time, and round-trips the board + ITIL against a temp home.
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 
@@ -57,6 +58,20 @@ def test_itil_incident_roundtrip(tmp_path):
     assert inc.id
     listed = mgr.list_incidents()
     assert any(i.id == inc.id for i in listed)
+
+    reassigned = mgr.update_incident(
+        inc.id,
+        agent="jarvis",
+        managed_by="jarvis",
+        note="CHI incident ownership belongs to Jarvis",
+    )
+    assert reassigned.managed_by == "jarvis"
+    assert reassigned.created_by == "service_health"
+    assert any(e["action"] == "managed_by:lumina->jarvis" for e in reassigned.timeline)
+    core = json.loads(
+        (tmp_path / "coordination" / "itil" / "incidents" / inc.id / "core.json").read_text()
+    )
+    assert core["managed_by"] == "lumina"
 
 
 def test_recurring_auto_incident_reopens_append_only(tmp_path):

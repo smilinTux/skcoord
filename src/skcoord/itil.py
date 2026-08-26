@@ -732,6 +732,7 @@ class ITILManager:
         tags = list(core.get("tags") or [])
         gtd_ids: list[str] = []
         title = core.get("title", "")
+        managed_by = core.get("managed_by", "")
         seen_created = False
 
         for e in events:
@@ -825,6 +826,18 @@ class ITILManager:
                 timeline.append(
                     {"ts": ts, "agent": agent, "action": "title", "note": e.get("text", "")}
                 )
+            elif kind == "assignment":
+                to = e.get("to")
+                if to:
+                    timeline.append(
+                        {
+                            "ts": ts,
+                            "agent": agent,
+                            "action": f"managed_by:{managed_by}->{to}",
+                            "note": note,
+                        }
+                    )
+                    managed_by = to
             elif kind == "tags":
                 for t in e.get("add") or []:
                     if t not in tags:
@@ -846,7 +859,7 @@ class ITILManager:
             source=core.get("source", "manual"),
             affected_services=list(core.get("affected_services") or []),
             impact=core.get("impact", ""),
-            managed_by=core.get("managed_by", ""),
+            managed_by=managed_by,
             created_by=core.get("created_by", ""),
             detected_at=core.get("detected_at") or _now_iso(),
             acknowledged_at=acknowledged_at,
@@ -1465,6 +1478,7 @@ class ITILManager:
         note: str = "",
         resolution_summary: str | None = None,
         related_problem_id: str | None = None,
+        managed_by: str | None = None,
     ) -> Incident:
         """Append one event per non-None argument, then return the folded state.
 
@@ -1498,7 +1512,12 @@ class ITILManager:
                 self.incidents_dir, rid, agent, "link_problem", id=related_problem_id
             )
 
-        if note and not new_status and not severity:
+        if managed_by:
+            self._append_event(
+                self.incidents_dir, rid, agent, "assignment", to=managed_by, note=note
+            )
+
+        if note and not new_status and not severity and not managed_by:
             self._append_event(self.incidents_dir, rid, agent, "note", note=note)
 
         return self._fold_record(self.incidents_dir, rid, Incident)
