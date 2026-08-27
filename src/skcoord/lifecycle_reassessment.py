@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-from .evidence_vocab import canonical_key, read_links
+from .evidence_vocab import read_links
 
 _VERDICTS = {"PASS", "PASS_FOR_REVIEW", "BLOCKED"}
 # Live verdicts are qualified, e.g. BLOCKED_FAIL_CLOSED,

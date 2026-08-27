@@ -28,8 +28,6 @@ import time
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
-
-from .evidence_vocab import canonical_key, validate_for_write
 from pathlib import Path
 from typing import Any, Optional
 
@@ -37,6 +35,7 @@ from pydantic import BaseModel, Field
 
 from .card import Card, Column, Kind
 from .coordination import validate_shared_home
+from .evidence_vocab import canonical_key, validate_for_write
 
 logger = logging.getLogger(__name__)
 
