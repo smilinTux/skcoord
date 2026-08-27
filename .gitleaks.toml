@@ -1,0 +1,40 @@
+# gitleaks configuration for skcoord.
+#
+# The secret-scan job scans FULL HISTORY across ALL REFS, because CI checks out
+# with fetch-depth: 0 and therefore has every branch. One finding on any open
+# pull request branch consequently reddens the gate on EVERY pull request,
+# including ones that never touched the file.
+#
+# That is exactly what happened on 2026-08-27: five PRs were red, none of them
+# had introduced anything, and the job printed only "leaks found: 1" with no
+# indication of where. Local scans of main and of each PR head found nothing,
+# because those clones did not have the offending branch fetched.
+#
+# THE FINDING, once the job was taught to report it:
+#
+#   rule    generic-api-key
+#   file    tests/test_evidence_vocab.py    line 65
+#   commit  0948bd321e3fff385ff92f54b17b0318427ca99e
+#   branch  feat/e12e6401-evidence-vocabulary  (open PR, not on main)
+#
+# It is a test fixture, not a credential. The test builds a link_key containing
+# a timestamp and asserts the store REJECTS it:
+#
+#     with pytest.raises(ValueError, match="timestamp in key name"):
+#         log.append(CardEvent(..., action="link", link_key=<timestamped key>))
+#
+# gitleaks' generic-api-key rule matches the long opaque key string. The test
+# cannot demonstrate that such keys are rejected without containing one.
+#
+# The allowlist below is scoped to that one rule in that one path. It is NOT a
+# blanket exemption for tests: a real credential committed anywhere else, or
+# under any other rule in this same file, still fails the scan.
+
+[extend]
+useDefault = true
+
+[allowlist]
+  description = "generic-api-key false positive on the evidence-vocabulary rejection fixture"
+  paths = [
+    '''^tests/test_evidence_vocab\.py$''',
+  ]
