@@ -20,6 +20,26 @@ ORIGIN_DISTRO = "distro"
 ORIGIN_UNKNOWN = "unknown"
 
 _DISTRO_UNIT_DIRS = ("/usr/lib/systemd/", "/lib/systemd/", "/usr/local/lib/systemd/")
+_CONTAINER_RESTART_SUFFIX = re.compile(r"^(?P<stable>.+)-(?P<pid>[1-9]\d*)-(?P<token>[0-9a-f]{8})$")
+
+
+def _stable_container_name(name: str) -> tuple[str, dict[str, str]]:
+    """Remove the known per-restart PID and token suffix from a container name.
+
+    The SKLegal job launcher names PostgreSQL containers
+    ``<subject>-<pid>-<8 hex run token>``. Those process-local fields are useful
+    evidence, but they are not configuration identity. Keep them as attributes
+    and retain the raw name as an alias while returning the stable subject used
+    for the CI id and drift deduplication.
+    """
+    match = _CONTAINER_RESTART_SUFFIX.fullmatch(name)
+    if not match:
+        return name, {}
+    return match.group("stable"), {
+        "observed_container_name": name,
+        "launcher_pid": match.group("pid"),
+        "restart_token": match.group("token"),
+    }
 
 
 def _classify_origin(fragment_path: str) -> str:
@@ -245,11 +265,16 @@ def collect_docker_containers(runner: CommandRunner) -> list[DiscoveredCI]:
             parts = line.split("\t")
             if not parts or not parts[0].strip():
                 continue
-            name = parts[0].strip()
+            observed_name = parts[0].strip()
+            name, volatile_identity = _stable_container_name(observed_name)
             if name in seen:
                 continue
             seen.add(name)
-            attributes: dict[str, Any] = {"runtime": runtime, "origin": "container"}
+            attributes: dict[str, Any] = {
+                "runtime": runtime,
+                "origin": "container",
+                **volatile_identity,
+            }
             if len(parts) > 1 and parts[1].strip():
                 attributes["image"] = parts[1].strip()
             if len(parts) > 2 and parts[2].strip():
@@ -279,6 +304,7 @@ def collect_docker_containers(runner: CommandRunner) -> list[DiscoveredCI]:
                     node=runner.host,
                     attributes=attributes,
                     tags=(runtime, DISCOVERED_TAG),
+                    aliases=(observed_name,) if observed_name != name else (),
                     relationships=(("runs_on", make_ci_id(CIType.HOST.value, runner.host)),),
                 )
             )
