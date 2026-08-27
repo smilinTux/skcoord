@@ -952,11 +952,48 @@ class CardStore:
             os.close(cards_fd)
         return card_ids
 
-    def list_cards(self, include_archived: bool = False) -> list[Card]:
-        """Fold every card. Archived excluded unless requested."""
+    @staticmethod
+    def _unreadable_card(card_id: str, error: Exception) -> Card:
+        """Project one failed fold without weakening that card's read boundary.
+
+        The underlying fold still fails closed. Only the multi-card aggregation
+        boundary converts that failure into an explicit record, so one corrupt
+        stream cannot erase its card or prevent healthy cards from being read.
+        """
+        source = f"cards/{card_id}"
+        reason = str(error).strip() or error.__class__.__name__
+        return Card(
+            id=card_id,
+            kind=Kind.TASK,
+            title=f"UNREADABLE [source: {source}; reason: {reason}]",
+            description=f"Source: {source}\nReason: {reason}",
+            status=Column.BACKLOG,
+            swimlane="bug",
+            priority="critical",
+            labels=["unreadable"],
+            meta={"unreadable": True, "source": source, "reason": reason},
+            source="cards",
+        )
+
+    def list_cards(
+        self, include_archived: bool = False, *, degrade_unreadable: bool = False
+    ) -> list[Card]:
+        """Fold every card, optionally degrading failed folds explicitly.
+
+        ``fold`` and ``_read_events`` remain strict and raise on malformed
+        input. Human-facing multi-card board callers opt into the one-card
+        fault boundary. Governance callers such as parity and export retain
+        strict all-or-nothing reads by leaving ``degrade_unreadable`` false.
+        """
         out: list[Card] = []
         for cid in self.list_card_ids():
-            card = self.fold(cid)
+            try:
+                card = self.fold(cid)
+            except Exception as exc:  # noqa: BLE001 - one-card fault boundary
+                if not degrade_unreadable:
+                    raise
+                logger.error("CardStore card %s is unreadable: %s", cid, exc)
+                card = self._unreadable_card(cid, exc)
             if card is None:
                 continue
             if card.archived and not include_archived:
@@ -1239,7 +1276,9 @@ def task_views_from_store(home: Path, include_archived: bool = False) -> list:
     store = CardStore(home)
     return [
         _task_view_from_card(card)
-        for card in store.list_cards(include_archived=include_archived)
+        for card in store.list_cards(
+            include_archived=include_archived, degrade_unreadable=True
+        )
         # get_task_views is the COORD task board: coord-origin kinds only.
         # ITIL cards (incident/problem/change) live in the kanban view, not here.
         if card.kind.value in ("task", "epic")
