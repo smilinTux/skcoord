@@ -753,8 +753,29 @@ class CardStore:
         if legacy_events:
             events = events + legacy_events
             events.sort(key=lambda e: (e.get("ts", ""), e.get("writer", ""), e.get("seq", 0)))
+        terminal_action: str | None = None
+        terminal_lifecycle_actions = {
+            "move",
+            "assign",
+            "unassign",
+            "release_claim",
+            "claim",
+            "complete",
+            "void",
+            "reopen",
+        }
         for e in events:
             action = e.get("action")
+            if terminal_action is not None and action in terminal_lifecycle_actions:
+                card.meta.setdefault("ignored_terminal_events", []).append(
+                    {
+                        "event_id": e.get("event_id"),
+                        "action": action,
+                        "terminal_action": terminal_action,
+                    }
+                )
+                card.updated_at = e.get("ts", card.updated_at)
+                continue
             if action == "move":
                 col = e.get("column")
                 if col in {c.value for c in Column}:
@@ -823,8 +844,17 @@ class CardStore:
                         card.meta.pop("claim_conflicts", None)
             elif action == "complete":
                 card.status = _COMPLETE_COLUMN
+                terminal_action = "complete"
+                card.meta["terminal_action"] = terminal_action
                 # coord drops a completed task from claimed_tasks, so its derived
                 # claimed_by is None. Match that so parity holds on done cards.
+                card.owner = None
+                card.meta.pop("_claim_revision", None)
+            elif action == "void":
+                card.status = _COMPLETE_COLUMN
+                terminal_action = "void"
+                card.meta["terminal_action"] = terminal_action
+                card.meta["void_reason"] = e.get("reason", "")
                 card.owner = None
                 card.meta.pop("_claim_revision", None)
             elif action == "priority" and e.get("priority"):
