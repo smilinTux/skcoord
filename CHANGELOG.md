@@ -9,6 +9,38 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
 
 ## [Unreleased]
 
+### Added
+
+- Schemas and validators for the two coordination stores, derived from live data
+  rather than intent: `schemas/itil-record.v1.schema.json` and
+  `schemas/itil-event.v1.schema.json` (all 318 records and 1702 events scanned,
+  every event validates), and a controlled `link_key` vocabulary for the evidence
+  store (`schemas/evidence_vocab.py`, `schemas/card-event.v1.schema.json`,
+  `schemas/evidence-key-map.v1.json`) with `schemas/validate_itil.py` and
+  `schemas/validate_card_events.py` (#47).
+
+  The evidence store used 3674 distinct `link_key` values across 19408 link
+  events, so readers matching a key literally missed most of what was recorded.
+  `human_approval` alone had 26 spellings: a check reading only the canonical key
+  found 41 of 173 recorded approvals. Folding never invents a concept; a key that
+  cannot be confidently folded stays uncontrolled and is reported rather than
+  reinterpreted.
+
+- `dead_worker_claims` class in the lifecycle reassessment report, covering a
+  claim held by an ephemeral worker that produced no evidence at all. Named
+  agents are excluded by owner pattern, never by age (#48).
+
+### Fixed
+
+- Stale-claim detection now joins the evidence store. It previously scanned only
+  `cards/<id>/events/*.jsonl` looking for verdicts that are written to
+  `coordination/card_events/*.jsonl`, so it reported `stale_claims: 0` against a
+  live store holding cards claimed for days with recorded BLOCKED verdicts. Its
+  test passed because the test wrote a synthetic verdict onto a card event, a
+  shape production never produces. Verdict matching also required exact equality
+  with `BLOCKED` while live verdicts are qualified (`BLOCKED_FAIL_CLOSED`), and
+  link keys were compared unfolded (#48).
+
 ### Fixed
 
 - Legacy task fields that are absent now remain unknown during parity checks
