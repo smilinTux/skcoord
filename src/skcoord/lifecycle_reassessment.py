@@ -12,6 +12,56 @@ from pathlib import Path
 from typing import Any, Iterable
 
 _VERDICTS = {"PASS", "PASS_FOR_REVIEW", "BLOCKED"}
+# Live verdicts are qualified, e.g. BLOCKED_FAIL_CLOSED,
+# BLOCKED_ACCURATE_OUTCOME_NOT_RUNTIME_APPROVAL. Exact equality against "BLOCKED"
+# matches none of them, so match on the family.
+_BLOCKED_RE = re.compile(r"^BLOCKED\b|^BLOCKED_", re.IGNORECASE)
+# Evidence keys carrying an outcome. The evidence store spells these many ways
+# (verdict has 41 spellings, review_decision several more), so fold before matching.
+_OUTCOME_KEY_RE = re.compile(r"(^|_)(verdict|result|disposition|review_decision)(_|$)")
+# Ephemeral fleet workers are named pi-auto-<card>/pi-<slug>. Named agents such as
+# jarvis or lumina hold claims deliberately and must never be treated as dead.
+_EPHEMERAL_OWNER_RE = re.compile(r"^(pi|codex)[-_]", re.IGNORECASE)
+
+
+def _fold_key(key: object) -> str:
+    """Fold a link_key to a comparable form. Mirrors schemas/evidence_vocab.py."""
+    k = str(key or "").strip().lower().replace("-", "_")
+    k = re.sub(r"_?20\d{6}t?\d{0,6}z?", "", k)
+    k = re.sub(r"_[0-9a-f]{8,64}$", "", k)
+    k = re.sub(r"__+", "_", k).strip("_")
+    return k
+
+
+def load_evidence(evidence_dir: Path) -> dict[str, list[dict[str, Any]]]:
+    """Load the SEPARATE evidence store, keyed by card_id.
+
+    Structure lives in cards/<id>/events/*.jsonl; evidence lives in
+    coordination/card_events/*.jsonl as link events. Neither store alone answers
+    whether a card is done AND passed. Reading only structure is why a card
+    claimed for 96 hours with a recorded BLOCKED verdict was reported as having
+    no stale claims at all.
+    """
+    rows: dict[str, list[dict[str, Any]]] = {}
+    if not evidence_dir or not Path(evidence_dir).is_dir():
+        return rows
+    for path in sorted(Path(evidence_dir).glob("*.jsonl")):
+        for event in _json_object_lines(path):
+            if event.get("action") != "link":
+                continue
+            card_id = event.get("card_id")
+            if not isinstance(card_id, str):
+                continue
+            rows.setdefault(card_id, []).append({
+                "ts": event.get("ts"),
+                "key": _fold_key(event.get("link_key")),
+                "raw_key": event.get("link_key"),
+                "value": event.get("link_value"),
+                "event_id": event.get("event_id") or event.get("link_key"),
+            })
+    for card_id in rows:
+        rows[card_id].sort(key=lambda r: (str(r.get("ts") or ""), str(r.get("event_id") or "")))
+    return rows
 _TERMINAL = {"complete", "void", "archive"}
 _SUPERSEDES_RE = re.compile(r"\bsupersedes(?:\s+card)?\s+([a-z0-9-]+)", re.IGNORECASE)
 _VOLATILE_CI_RE = re.compile(r"(?:^|[-_])\d{2,}(?:[-_][0-9a-f]{6,})?$")
@@ -96,15 +146,49 @@ def _current_claim(record: CardRecord) -> dict[str, Any] | None:
     return claim
 
 
-def _blocked_evidence_after(record: CardRecord, after: datetime) -> dict[str, Any] | None:
+def _blocked_evidence_after(
+    record: CardRecord,
+    after: datetime,
+    evidence_rows: list[dict[str, Any]] | None = None,
+) -> dict[str, Any] | None:
+    """Find a BLOCKED outcome recorded after `after`, joining BOTH stores.
+
+    Previously this read only record.events, the structure store. Verdicts are
+    written to the evidence store as link events, so the detector never saw one
+    in production and reported stale_claims: 0 while cards sat claimed for 96
+    hours with recorded BLOCKED verdicts and approving review decisions.
+    """
     result = None
+
+    # structure store: some writers embed the verdict directly on an event
     for event in record.events:
         event_time = _parse_time(event.get("ts"))
         verdict = event.get("verdict")
-        if event_time and event_time >= after and verdict in _VERDICTS and verdict == "BLOCKED":
-            artifact_hash = event.get("artifact_sha256") or event.get("verdict_hash") or event.get("evidence_sha256")
+        if event_time and event_time >= after and isinstance(verdict, str) and _BLOCKED_RE.match(verdict):
+            artifact_hash = (
+                event.get("artifact_sha256")
+                or event.get("verdict_hash")
+                or event.get("evidence_sha256")
+            )
             if isinstance(artifact_hash, str) and len(artifact_hash) == 64:
                 result = event
+
+    # evidence store: the normal case
+    for row in evidence_rows or ():
+        row_time = _parse_time(row.get("ts"))
+        if not row_time or row_time < after:
+            continue
+        if not _OUTCOME_KEY_RE.search(row.get("key", "")):
+            continue
+        value = row.get("value")
+        if isinstance(value, str) and _BLOCKED_RE.match(value):
+            result = {
+                "event_id": row.get("event_id"),
+                "ts": row.get("ts"),
+                "verdict": value,
+                "source": "evidence_store",
+                "link_key": row.get("raw_key"),
+            }
     return result
 
 
@@ -144,11 +228,16 @@ def assess(
     *,
     now: datetime | None = None,
     stale_after: timedelta = timedelta(hours=24),
+    evidence_dir: Path | None = None,
+    dead_worker_after: timedelta = timedelta(hours=6),
 ) -> dict[str, Any]:
     """Return a deterministic, mutation free lifecycle report and exclusion set."""
     now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     records = load_cards(cards_dir)
     actions = {card_id: _actions(record) for card_id, record in records.items()}
+    if evidence_dir is None:
+        evidence_dir = Path(cards_dir).parent / "coordination" / "card_events"
+    evidence = load_evidence(Path(evidence_dir))
 
     void_edges: list[dict[str, str]] = []
     for dependent in records.values():
@@ -157,19 +246,46 @@ def assess(
                 void_edges.append({"card_id": dependent.card_id, "void_dependency_id": dependency})
 
     stale_claims: list[dict[str, Any]] = []
+    dead_worker_claims: list[dict[str, Any]] = []
     for record in records.values():
         claim = _current_claim(record)
         claimed_at = _parse_time(claim.get("ts")) if claim else None
         if not claim or not claimed_at or now - claimed_at < stale_after:
             continue
-        evidence = _blocked_evidence_after(record, claimed_at)
-        if evidence:
+        card_evidence = evidence.get(record.card_id, [])
+        blocked = _blocked_evidence_after(record, claimed_at, card_evidence)
+        age_hours = int((now - claimed_at).total_seconds() // 3600)
+        if blocked:
+            # class 2a: finished in evidence, structure never caught up.
             stale_claims.append({
                 "card_id": record.card_id,
                 "owner": claim["owner"],
                 "claimed_at": claimed_at.isoformat(),
-                "age_hours": int((now - claimed_at).total_seconds() // 3600),
-                "evidence_event_id": evidence.get("event_id"),
+                "age_hours": age_hours,
+                "evidence_event_id": blocked.get("event_id"),
+                "verdict": blocked.get("verdict"),
+                "evidence_source": blocked.get("source", "structure_store"),
+                "kind": "finished_in_evidence",
+            })
+            continue
+        # class 2b: no evidence at all since the claim, and the owner is an
+        # ephemeral worker that cannot still be alive. A named agent (jarvis,
+        # lumina) or a human may hold a claim deliberately and is never included.
+        owner = claim.get("owner") or ""
+        produced_anything = any(
+            (_parse_time(row.get("ts")) or claimed_at) >= claimed_at for row in card_evidence
+        )
+        if (
+            not produced_anything
+            and _EPHEMERAL_OWNER_RE.match(str(owner))
+            and now - claimed_at >= dead_worker_after
+        ):
+            dead_worker_claims.append({
+                "card_id": record.card_id,
+                "owner": owner,
+                "claimed_at": claimed_at.isoformat(),
+                "age_hours": age_hours,
+                "kind": "dead_worker",
             })
 
     launch_counts = _launch_counts(launch_log_roots)
@@ -197,13 +313,14 @@ def assess(
     classes: dict[str, list[dict[str, Any]]] = {
         "void_dependency_edges": sorted(void_edges, key=lambda row: (row["card_id"], row["void_dependency_id"])),
         "stale_claims": sorted(stale_claims, key=lambda row: row["card_id"]),
+        "dead_worker_claims": sorted(dead_worker_claims, key=lambda row: row["card_id"]),
         "unclaimable_cards": unclaimable,
         "superseded_cards": superseded_rows,
         "volatile_ci_identity": sorted(volatile_ci, key=lambda row: row["card_id"]),
     }
     excluded = sorted({
         row["card_id"]
-        for name in ("void_dependency_edges", "stale_claims", "unclaimable_cards", "superseded_cards")
+        for name in ("void_dependency_edges", "stale_claims", "dead_worker_claims", "unclaimable_cards", "superseded_cards")
         for row in classes[name]
     })
     report: dict[str, Any] = {
@@ -216,6 +333,7 @@ def assess(
         "proposed_remediations": {
             "void_dependency_edges": "Approve separate dependency removal or successor edge actions.",
             "stale_claims": "Approve separate claim release and dependent successor actions.",
+            "dead_worker_claims": "Release the claim. Reversible, asserts no outcome; the card returns to the pool.",
             "unclaimable_cards": "Close or normalize the source record in a separate approved action.",
             "superseded_cards": "Append a canonical supersession event in a separate approved action.",
             "volatile_ci_identity": "Complete CMDB-IDENT-01 before incident reconciliation.",

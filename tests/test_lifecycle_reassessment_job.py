@@ -67,6 +67,7 @@ def test_assessment_reports_all_classes_and_exclusions(tmp_path: Path) -> None:
         "unclaimable_cards": 1,
         "superseded_cards": 1,
         "volatile_ci_identity": 1,
+        "dead_worker_claims": 0,
     }
     assert report["excluded_card_ids"] == ["dependent1", "oldcard1", "stale001", "unclaim1"]
     assert report["classes"]["stale_claims"][0]["evidence_event_id"] == "evidence1"
@@ -89,3 +90,74 @@ def test_write_report_round_trips_json(tmp_path: Path) -> None:
     report = assess(tmp_path / "cards", now=datetime(2026, 8, 27, tzinfo=timezone.utc))
     write_report(report, output)
     assert json.loads(output.read_text(encoding="utf-8")) == report
+
+
+def test_stale_claim_is_found_in_the_separate_evidence_store(tmp_path: Path) -> None:
+    """The production shape: verdict lives in card_events, not on a card event.
+
+    The original detector read only record.events and therefore reported
+    stale_claims: 0 against a live store holding cards claimed for days with
+    recorded BLOCKED verdicts. Verdicts are also qualified in practice
+    (BLOCKED_FAIL_CLOSED), so exact equality against "BLOCKED" matched none.
+    """
+    cards = tmp_path / "cards"
+    card = _card(cards, "evid0001")
+    _events(card, [{"action": "claim", "owner": "codex-deploy", "ts": "2026-08-20T01:00:00+00:00"}])
+
+    evidence = tmp_path / "card_events"
+    evidence.mkdir(parents=True)
+    (evidence / "node.jsonl").write_text(
+        json.dumps({
+            "card_id": "evid0001",
+            "action": "link",
+            "writer": "codex-deploy",
+            "ts": "2026-08-20T02:00:00+00:00",
+            "event_id": "eve1",
+            "link_key": "disposition",
+            "link_value": "BLOCKED_FAIL_CLOSED: absent qualified verifier",
+        }) + "\n",
+        encoding="utf-8",
+    )
+
+    report = assess(
+        cards,
+        [],
+        now=datetime(2026, 8, 25, tzinfo=timezone.utc),
+        evidence_dir=evidence,
+    )
+    rows = report["classes"]["stale_claims"]
+    assert [row["card_id"] for row in rows] == ["evid0001"]
+    assert rows[0]["evidence_source"] == "evidence_store"
+    assert rows[0]["verdict"].startswith("BLOCKED_FAIL_CLOSED")
+
+
+def test_unassign_clears_a_claim_so_it_is_not_stale(tmp_path: Path) -> None:
+    """unassign ends a claim exactly as release_claim does.
+
+    A reader that tracks only claim/release_claim/complete/void reports an
+    unassigned card as still claimed, which both fabricates stale claims and
+    hides the card from any pool that skips claimed cards.
+    """
+    cards = tmp_path / "cards"
+    card = _card(cards, "unas0001")
+    _events(card, [
+        {"action": "claim", "owner": "codex-deploy", "ts": "2026-08-20T01:00:00+00:00"},
+        {"action": "unassign", "ts": "2026-08-21T01:00:00+00:00"},
+    ])
+    report = assess(cards, [], now=datetime(2026, 8, 25, tzinfo=timezone.utc))
+    assert report["classes"]["stale_claims"] == []
+    assert report["classes"]["dead_worker_claims"] == []
+
+
+def test_named_agent_claim_is_never_a_dead_worker(tmp_path: Path) -> None:
+    """jarvis and lumina hold claims deliberately; only ephemeral workers die."""
+    cards = tmp_path / "cards"
+    _events(_card(cards, "named001"), [
+        {"action": "claim", "owner": "jarvis", "ts": "2026-08-20T01:00:00+00:00"},
+    ])
+    _events(_card(cards, "ephem001"), [
+        {"action": "claim", "owner": "pi-auto-ephem001", "ts": "2026-08-20T01:00:00+00:00"},
+    ])
+    report = assess(cards, [], now=datetime(2026, 8, 25, tzinfo=timezone.utc))
+    dead = [row["card_id"] for row in report["classes"]["dead_worker_claims"]]
+    assert dead == ["ephem001"]
