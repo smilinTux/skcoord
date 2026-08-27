@@ -21,6 +21,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from .coordination import Board, TaskStatus, TaskView, validate_shared_home
+from .evidence_vocab import canonical_key, validate_for_write
 
 logger = logging.getLogger(__name__)
 
@@ -257,12 +258,19 @@ class CardEventLog:
             os.close(descriptor)
 
     def append(self, event: CardEvent) -> None:
-        """Append one overlay event to this host's log."""
+        """Append one overlay event to this host's log.
+
+        Link keys are rejected before any directory or file is opened. The event
+        is serialized by Pydantic and parsed again before append, preserving the
+        append-only CardStore contract.
+        """
         if event.action in {"describe", "link"}:
             from .card_store import CardStore
 
             if CardStore(self.home).fold(event.card_id) is None:
                 raise ValueError(f"CardStore card {event.card_id} has no foldable core")
+        if event.action == "link" and event.link_key is not None:
+            validate_for_write(event.link_key)
         if not event.writer:
             event.writer = socket.gethostname()
         filename = f"{socket.gethostname()}.jsonl"
@@ -288,7 +296,9 @@ class CardEventLog:
                 descriptor = -1
                 fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
                 try:
-                    fh.write(event.model_dump_json() + "\n")
+                    serialized = event.model_dump_json()
+                    CardEvent.model_validate_json(serialized)
+                    fh.write(serialized + "\n")
                     fh.flush()
                     os.fsync(fh.fileno())
                 finally:
@@ -368,7 +378,7 @@ def fold_overlay(events: list[CardEvent]) -> dict[str, dict]:
         elif e.action == "remove_label" and e.label in patch["labels"]:
             patch["labels"].remove(e.label)
         elif e.action == "link" and e.link_key is not None:
-            patch["links"][e.link_key] = e.link_value
+            patch["links"][canonical_key(e.link_key)] = e.link_value
         elif e.action == "assign" and e.owner:
             patch["owner"] = e.owner
             patch["owner_set"] = True
