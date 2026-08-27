@@ -79,7 +79,9 @@ __all__ = [
 
 
 def _aware(value: datetime | None) -> bool:
-    return value is not None and value.tzinfo is not None and value.utcoffset() is not None
+    return (
+        value is not None and value.tzinfo is not None and value.utcoffset() is not None
+    )
 
 
 def _global_quality_reasons(
@@ -157,7 +159,9 @@ def _candidate_decision(
     elif card.lease_expires_at and card.lease_expires_at > as_of:
         reasons.add("lease_active")
     if not _aware(card.ready_at):
-        reasons.add("ready_time_missing" if card.ready_at is None else "ready_time_invalid")
+        reasons.add(
+            "ready_time_missing" if card.ready_at is None else "ready_time_invalid"
+        )
     if card.class_of_service == "fixed-date" and not _aware(card.fixed_date_at):
         reasons.add(
             "fixed_date_missing" if card.fixed_date_at is None else "fixed_date_invalid"
@@ -252,7 +256,9 @@ def evaluate_portfolio(
     warnings: list[CanonicalWarning] = []
     ordered_candidates = sorted(candidates, key=lambda item: item.card_id)
     if "duplicate_card_id" in global_reasons:
-        ordered_candidates = list({card.card_id: card for card in ordered_candidates}.values())
+        ordered_candidates = list(
+            {card.card_id: card for card in ordered_candidates}.values()
+        )
     for card in ordered_candidates:
         if global_reasons:
             decision = EligibilityDecision(
@@ -307,7 +313,9 @@ def evaluate_portfolio(
         policy_hash=policy.policy_hash,
         recommendations=ranked,
         exclusions=exclusions,
-        warnings=tuple(sorted(warnings, key=lambda item: (item.card_id or "", item.code))),
+        warnings=tuple(
+            sorted(warnings, key=lambda item: (item.card_id or "", item.code))
+        ),
         abstention=(
             CanonicalAbstention(reason_codes=abstention_reasons)
             if abstention_reasons
@@ -329,7 +337,10 @@ def evaluate_review_completion(
     if not _aware(as_of):
         raise ValueError("as_of must be timezone-aware")
     reasons: set[str] = set()
-    if assignment.artifact_revision != artifact_revision or assignment.artifact_hash != artifact_hash:
+    if (
+        assignment.artifact_revision != artifact_revision
+        or assignment.artifact_hash != artifact_hash
+    ):
         reasons.add("assignment_artifact_mismatch")
     if not _aware(assignment.created_at) or not _aware(assignment.expires_at):
         reasons.add("assignment_timestamp_invalid")

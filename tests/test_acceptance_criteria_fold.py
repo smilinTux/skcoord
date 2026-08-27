@@ -84,16 +84,16 @@ def test_board_task_view_exposes_folded_acceptance_criteria(tmp_path, monkeypatc
         criteria=["folded criterion"],
     )
 
-    view = next(view for view in board.get_task_views() if view.task.id == "criteria-view")
+    view = next(
+        view for view in board.get_task_views() if view.task.id == "criteria-view"
+    )
 
     assert view.task.acceptance_criteria == ["folded criterion"]
     assert _core_bytes(store, "criteria-view") == before
 
 
 @pytest.mark.parametrize("mode", [None, "1", "dual", "0", "off", "false", "no"])
-def test_every_projection_folds_latest_criteria_amendment(
-    tmp_path, monkeypatch, mode
-):
+def test_every_projection_folds_latest_criteria_amendment(tmp_path, monkeypatch, mode):
     monkeypatch.setenv("SKCOORD_CARD_STORE", "1")
     board = Board(tmp_path)
     board.create_task(
@@ -124,7 +124,9 @@ def test_every_projection_folds_latest_criteria_amendment(
     else:
         monkeypatch.setenv("SKCOORD_CARD_STORE", mode)
     projected = next(
-        card for card in KanbanBoard(tmp_path).cards() if card.id == "criteria-kill-switch"
+        card
+        for card in KanbanBoard(tmp_path).cards()
+        if card.id == "criteria-kill-switch"
     )
 
     assert projected.acceptance_criteria == ["current one", "current two"]
@@ -144,7 +146,9 @@ def test_legacy_only_task_retains_birth_criteria(tmp_path, monkeypatch):
     )
 
     projected = next(
-        view for view in board.get_task_views() if view.task.id == "criteria-legacy-only"
+        view
+        for view in board.get_task_views()
+        if view.task.id == "criteria-legacy-only"
     )
 
     assert not (tmp_path / "cards" / "criteria-legacy-only").exists()
@@ -202,7 +206,9 @@ def test_known_card_with_malformed_event_json_fails_closed(tmp_path, monkeypatch
     store.append_event(
         "criteria-bad-event", "amend_criteria", "reviewer", criteria=["current"]
     )
-    event_path = next((tmp_path / "cards" / "criteria-bad-event" / "events").glob("*.jsonl"))
+    event_path = next(
+        (tmp_path / "cards" / "criteria-bad-event" / "events").glob("*.jsonl")
+    )
     event_path.write_text("{malformed\n", encoding="utf-8")
     monkeypatch.setenv("SKCOORD_CARD_STORE", "0")
 
@@ -272,7 +278,9 @@ def test_parity_reports_criteria_when_legacy_fold_is_bypassed(tmp_path, monkeypa
 
     monkeypatch.setattr(card_store, "current_acceptance_criteria", stale_criteria)
     result = parity_check(tmp_path)
-    mismatch = next(item for item in result["mismatches"] if item["id"] == "criteria-parity")
+    mismatch = next(
+        item for item in result["mismatches"] if item["id"] == "criteria-parity"
+    )
 
     assert mismatch["diff"]["acceptance_criteria"] == [
         ["birth criterion"],
@@ -298,7 +306,9 @@ def test_rollback_export_preserves_current_folded_criteria(tmp_path):
     )
 
     result = export_to_legacy(tmp_path)
-    exported = next(task for task in Board(tmp_path).load_tasks() if task.id == "criteria-export")
+    exported = next(
+        task for task in Board(tmp_path).load_tasks() if task.id == "criteria-export"
+    )
 
     assert result["tasks_written"] == 1
     assert exported.acceptance_criteria == ["current criterion"]

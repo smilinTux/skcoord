@@ -132,7 +132,10 @@ def test_card_from_change_passes_through_prepared_pr_and_validation(tmp_path):
 
     assert card.meta["itil_status"] == "reviewing"  # validation pass auto-advances
     assert card.meta["prepared_by"] == "lumina"
-    assert card.meta["prepared_pr"]["url"] == "https://github.com/smilinTux/skcoord/pull/42"
+    assert (
+        card.meta["prepared_pr"]["url"]
+        == "https://github.com/smilinTux/skcoord/pull/42"
+    )
     assert card.meta["validation"]["passed"] is True
     assert card.meta["validation"]["head_sha"] == "deadbeef"
     assert card.status == Column.READY
@@ -140,7 +143,9 @@ def test_card_from_change_passes_through_prepared_pr_and_validation(tmp_path):
 
 def test_card_from_change_scheduled_lands_in_ready_column(tmp_path):
     mgr = ITILManager(tmp_path)
-    chg = mgr.propose_change(title="scheduled thing", change_type="standard", managed_by="lumina")
+    chg = mgr.propose_change(
+        title="scheduled thing", change_type="standard", managed_by="lumina"
+    )
     # standard auto-approves at fold time
     mgr._append_event(
         mgr.changes_dir,
@@ -167,7 +172,9 @@ def test_card_from_change_without_events_defaults_window_missed_false(tmp_path):
     """The events=None default path (a caller that has not fetched the raw
     log) must never guess "missed" - it conservatively reports False."""
     mgr = ITILManager(tmp_path)
-    mgr.propose_change(title="no events passed", change_type="normal", managed_by="lumina")
+    mgr.propose_change(
+        title="no events passed", change_type="normal", managed_by="lumina"
+    )
     folded = mgr.list_changes()[0]
 
     card = card_from_change(folded)
@@ -234,7 +241,9 @@ def test_window_missed_false_when_re_scheduled_after_a_miss(tmp_path):
     """A re-schedule after a missed window must clear the miss flag: the
     last lifecycle event is the new `schedule`, not the earlier miss."""
     mgr = ITILManager(tmp_path)
-    chg = mgr.propose_change(title="re-scheduled", change_type="standard", managed_by="lumina")
+    chg = mgr.propose_change(
+        title="re-scheduled", change_type="standard", managed_by="lumina"
+    )
     mgr._append_event(
         mgr.changes_dir,
         chg.id,
@@ -245,7 +254,9 @@ def test_window_missed_false_when_re_scheduled_after_a_miss(tmp_path):
         asap=False,
         deploy_mode="confirm",
     )
-    mgr._append_event(mgr.changes_dir, chg.id, "change-deploy-runner", "window_missed", note="")
+    mgr._append_event(
+        mgr.changes_dir, chg.id, "change-deploy-runner", "window_missed", note=""
+    )
     mgr._append_event(
         mgr.changes_dir,
         chg.id,
@@ -277,7 +288,9 @@ def test_kanban_board_places_scheduled_change_in_ready(tmp_path, monkeypatch):
     # and this test seeds data through ITILManager directly.
     monkeypatch.setenv("SKCOORD_CARD_STORE", "0")
     mgr = ITILManager(tmp_path)
-    chg = mgr.propose_change(title="board placement", change_type="standard", managed_by="lumina")
+    chg = mgr.propose_change(
+        title="board placement", change_type="standard", managed_by="lumina"
+    )
     mgr._append_event(
         mgr.changes_dir,
         chg.id,

@@ -20,7 +20,9 @@ ORIGIN_DISTRO = "distro"
 ORIGIN_UNKNOWN = "unknown"
 
 _DISTRO_UNIT_DIRS = ("/usr/lib/systemd/", "/lib/systemd/", "/usr/local/lib/systemd/")
-_CONTAINER_RESTART_SUFFIX = re.compile(r"^(?P<stable>.+)-(?P<pid>[1-9]\d*)-(?P<token>[0-9a-f]{8})$")
+_CONTAINER_RESTART_SUFFIX = re.compile(
+    r"^(?P<stable>.+)-(?P<pid>[1-9]\d*)-(?P<token>[0-9a-f]{8})$"
+)
 
 
 def _stable_container_name(name: str) -> tuple[str, dict[str, str]]:
@@ -59,7 +61,9 @@ def _classify_origin(fragment_path: str) -> str:
 _SHOW_CHUNK = 400
 
 
-def _fragment_paths(runner: CommandRunner, scope: str, units: Sequence[str]) -> dict[str, str]:
+def _fragment_paths(
+    runner: CommandRunner, scope: str, units: Sequence[str]
+) -> dict[str, str]:
     """Bulk Id -> FragmentPath for named units, in as few systemctl calls as possible.
 
     The units are named explicitly rather than globbed. ``systemctl show
@@ -73,7 +77,17 @@ def _fragment_paths(runner: CommandRunner, scope: str, units: Sequence[str]) -> 
         if not chunk:
             continue
         stdout = runner.run(
-            ["systemctl", scope, "show", *chunk, "-p", "Id", "-p", "FragmentPath", "--no-pager"]
+            [
+                "systemctl",
+                scope,
+                "show",
+                *chunk,
+                "-p",
+                "Id",
+                "-p",
+                "FragmentPath",
+                "--no-pager",
+            ]
         )
         if not stdout:
             continue
@@ -161,7 +175,9 @@ def collect_systemd_units(
                 ]
             )
             if stdout is None:
-                logger.debug("systemd %s/%s unavailable on %s", scope, kind, runner.host)
+                logger.debug(
+                    "systemd %s/%s unavailable on %s", scope, kind, runner.host
+                )
                 continue
             for line in stdout.splitlines():
                 match = _UNIT_RE.match(line.strip())
@@ -305,7 +321,9 @@ def collect_docker_containers(runner: CommandRunner) -> list[DiscoveredCI]:
                     attributes=attributes,
                     tags=(runtime, DISCOVERED_TAG),
                     aliases=(observed_name,) if observed_name != name else (),
-                    relationships=(("runs_on", make_ci_id(CIType.HOST.value, runner.host)),),
+                    relationships=(
+                        ("runs_on", make_ci_id(CIType.HOST.value, runner.host)),
+                    ),
                 )
             )
     return out

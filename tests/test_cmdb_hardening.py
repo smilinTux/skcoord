@@ -103,7 +103,9 @@ def test_alias_relationship_is_part_of_integrity_vocabulary(tmp_path: Path) -> N
     assert mgr.audit_relationships() == []
 
 
-def test_projection_is_deterministic_and_sink_only_gets_snapshot(tmp_path: Path) -> None:
+def test_projection_is_deterministic_and_sink_only_gets_snapshot(
+    tmp_path: Path,
+) -> None:
     mgr = CMDBManager(tmp_path)
     mgr.create_ci("api", "service")
     first = build_snapshot(mgr)

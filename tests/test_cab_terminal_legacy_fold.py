@@ -39,9 +39,7 @@ from skcoord.itil import (
     _is_legacy_unprovenanced_approval,
 )
 
-FIXTURE = (
-    pathlib.Path(__file__).parent / "fixtures" / "itil-terminal-legacy"
-)
+FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "itil-terminal-legacy"
 
 # The jarvis seq-19 event: the first, authoritative verified -> closed edge.
 CLOSE_TS = "2026-08-21T03:26:14.354111+00:00"
@@ -154,7 +152,9 @@ def test_new_change_cannot_self_approve_via_raw_terminal_chain(mgr):
 
     assert folded.status.value == "proposed"
     conflicts = [t for t in folded.timeline if t.get("conflicted")]
-    assert any("CAB approval required" in t.get("conflict_reason", "") for t in conflicts)
+    assert any(
+        "CAB approval required" in t.get("conflict_reason", "") for t in conflicts
+    )
 
 
 def test_post_cutoff_historical_shape_still_demotes(legacy_mgr):
@@ -164,9 +164,7 @@ def test_post_cutoff_historical_shape_still_demotes(legacy_mgr):
     copy only - proving the cutoff, not the record's content, is what gates
     the legacy clause.
     """
-    vote_path = (
-        legacy_mgr.cab_dir / "chg-a76c0aee-jarvis.json"
-    )
+    vote_path = legacy_mgr.cab_dir / "chg-a76c0aee-jarvis.json"
     vote = json.loads(vote_path.read_text(encoding="utf-8"))
     vote["decided_at"] = "2026-08-21T15:54:46.863110+00:00"
     vote_path.write_text(json.dumps(vote, indent=2), encoding="utf-8")

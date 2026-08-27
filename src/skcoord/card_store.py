@@ -369,7 +369,9 @@ class CardStore:
         except OSError as exc:
             raise ValueError("CardStore home is unsafe") from exc
         try:
-            return self._open_or_create_directory(home_fd, "cards", "CardStore cards directory")
+            return self._open_or_create_directory(
+                home_fd, "cards", "CardStore cards directory"
+            )
         finally:
             os.close(home_fd)
 
@@ -378,7 +380,9 @@ class CardStore:
         validate_card_lock_identifier(card_id)
         cards_fd = self._open_cards_directory()
         try:
-            return self._open_or_create_directory(cards_fd, card_id, "CardStore card directory")
+            return self._open_or_create_directory(
+                cards_fd, card_id, "CardStore card directory"
+            )
         finally:
             os.close(cards_fd)
 
@@ -424,7 +428,9 @@ class CardStore:
         except OSError as exc:
             raise ValueError("CardStore home is unsafe") from exc
         try:
-            return self._open_existing_directory(home_fd, "cards", "CardStore cards directory")
+            return self._open_existing_directory(
+                home_fd, "cards", "CardStore cards directory"
+            )
         finally:
             os.close(home_fd)
 
@@ -435,7 +441,9 @@ class CardStore:
         if cards_fd is None:
             return None
         try:
-            return self._open_existing_directory(cards_fd, card_id, "CardStore card directory")
+            return self._open_existing_directory(
+                cards_fd, card_id, "CardStore card directory"
+            )
         finally:
             os.close(cards_fd)
 
@@ -530,7 +538,9 @@ class CardStore:
             os.close(rec_fd)
         return core.id
 
-    def append_event(self, card_id: str, action: str, agent: str, **payload: Any) -> dict:
+    def append_event(
+        self, card_id: str, action: str, agent: str, **payload: Any
+    ) -> dict:
         """Append one event line to this writer's own log (flock-guarded).
 
         ``transition_id`` is an optional deterministic caller token. Repeating
@@ -550,7 +560,9 @@ class CardStore:
         descriptor = -1
         try:
             try:
-                existing = os.stat(writer_filename, dir_fd=events_fd, follow_symlinks=False)
+                existing = os.stat(
+                    writer_filename, dir_fd=events_fd, follow_symlinks=False
+                )
             except FileNotFoundError:
                 existing = None
             if existing is not None and (
@@ -617,7 +629,8 @@ class CardStore:
     def has_transition(self, card_id: str, transition_id: str) -> bool:
         """Return whether an exact intended CardStore event is durable."""
         return any(
-            event.get("transition_id") == transition_id for event in self._read_events(card_id)
+            event.get("transition_id") == transition_id
+            for event in self._read_events(card_id)
         )
 
     # ── reads ─────────────────────────────────────────────────────────────
@@ -628,7 +641,9 @@ class CardStore:
             return None
         try:
             try:
-                raw = self._read_regular_file_bytes(card_fd, "core.json", "CardStore core")
+                raw = self._read_regular_file_bytes(
+                    card_fd, "core.json", "CardStore core"
+                )
             except ValueError:
                 raise
             except Exception as exc:  # noqa: BLE001
@@ -752,7 +767,9 @@ class CardStore:
         legacy_events = self._legacy_events(card_id)
         if legacy_events:
             events = events + legacy_events
-            events.sort(key=lambda e: (e.get("ts", ""), e.get("writer", ""), e.get("seq", 0)))
+            events.sort(
+                key=lambda e: (e.get("ts", ""), e.get("writer", ""), e.get("seq", 0))
+            )
         for e in events:
             action = e.get("action")
             if action == "move":
@@ -795,7 +812,9 @@ class CardStore:
                     card.meta.pop("_claim_revision", None)
             elif action == "claim":
                 owner = e.get("owner")
-                was_unowned_backlog = card.owner is None and card.status == Column.BACKLOG
+                was_unowned_backlog = (
+                    card.owner is None and card.status == Column.BACKLOG
+                )
                 if (
                     isinstance(owner, str)
                     and owner
@@ -831,7 +850,11 @@ class CardStore:
                 card.priority = e["priority"]
             elif action == "swimlane" and e.get("swimlane"):
                 card.swimlane = e["swimlane"]
-            elif action == "add_label" and e.get("label") and e["label"] not in card.labels:
+            elif (
+                action == "add_label"
+                and e.get("label")
+                and e["label"] not in card.labels
+            ):
                 card.labels.append(e["label"])
             elif action == "remove_label" and e.get("label") in card.labels:
                 card.labels.remove(e["label"])
@@ -850,7 +873,10 @@ class CardStore:
                 if (
                     not isinstance(criteria, list)
                     or not criteria
-                    or any(not isinstance(value, str) or not value.strip() for value in criteria)
+                    or any(
+                        not isinstance(value, str) or not value.strip()
+                        for value in criteria
+                    )
                 ):
                     raise ValueError(
                         f"CardStore criteria amendment for {card_id} is malformed"
@@ -937,12 +963,16 @@ class CardStore:
                 if not stat.S_ISDIR(entry.st_mode):
                     continue
                 validate_card_lock_identifier(name)
-                card_fd = self._open_existing_directory(cards_fd, name, "CardStore card directory")
+                card_fd = self._open_existing_directory(
+                    cards_fd, name, "CardStore card directory"
+                )
                 if card_fd is None:
                     continue
                 try:
                     if (
-                        self._read_regular_file_bytes(card_fd, "core.json", "CardStore core")
+                        self._read_regular_file_bytes(
+                            card_fd, "core.json", "CardStore core"
+                        )
                         is not None
                     ):
                         card_ids.append(name)
@@ -1122,7 +1152,8 @@ def _task_view_cursor_position(
         payload = json.loads(body)
         if (
             not isinstance(payload, dict)
-            or set(payload) != {"after", "archived", "limit", "population", "scope", "v"}
+            or set(payload)
+            != {"after", "archived", "limit", "population", "scope", "v"}
             or payload["v"] != 2
             or payload["scope"] != scope
             or payload["limit"] != limit
@@ -1138,7 +1169,9 @@ def _task_view_cursor_position(
         validate_card_lock_identifier(payload["after"])
         return payload["after"], payload["population"]
     except (ValueError, TypeError, UnicodeError, json.JSONDecodeError) as exc:
-        raise ValueError("task-view cursor is malformed, stale, or out of scope") from exc
+        raise ValueError(
+            "task-view cursor is malformed, stale, or out of scope"
+        ) from exc
 
 
 def task_view_page_from_store(
@@ -1164,7 +1197,9 @@ def task_view_page_from_store(
         or not isinstance(limit, int)
         or not 1 <= limit <= _TASK_VIEW_PAGE_LIMIT
     ):
-        raise ValueError(f"task-view limit must be between 1 and {_TASK_VIEW_PAGE_LIMIT}")
+        raise ValueError(
+            f"task-view limit must be between 1 and {_TASK_VIEW_PAGE_LIMIT}"
+        )
     after, expected_population = _task_view_cursor_position(
         cursor,
         scope=scope.authorization_scope,
@@ -1184,7 +1219,10 @@ def task_view_page_from_store(
         not isinstance(batch.population_state, str)
         or not batch.population_state
         or len(batch.population_state) > 256
-        or (expected_population is not None and batch.population_state != expected_population)
+        or (
+            expected_population is not None
+            and batch.population_state != expected_population
+        )
     ):
         raise ValueError("task-view cursor population is stale")
 
@@ -1253,7 +1291,9 @@ def _card_exists(home: Path, card_id: str) -> bool:
         return True
     from .coordination import Board
 
-    return any(task.id == card_id for task in Board(home).load_tasks(include_archived=True))
+    return any(
+        task.id == card_id for task in Board(home).load_tasks(include_archived=True)
+    )
 
 
 def current_dependencies(
@@ -1400,14 +1440,18 @@ def add_dependency(
     home: Path, card_id: str, dependency_id: str, agent: str = "", reason: str = ""
 ) -> bool:
     """Append an idempotent dependency addition for a coordination card."""
-    return amend_dependency(home, card_id, dependency_id, "add_dependency", agent, reason)
+    return amend_dependency(
+        home, card_id, dependency_id, "add_dependency", agent, reason
+    )
 
 
 def remove_dependency(
     home: Path, card_id: str, dependency_id: str, agent: str = "", reason: str = ""
 ) -> bool:
     """Append an idempotent dependency removal for a coordination card."""
-    return amend_dependency(home, card_id, dependency_id, "remove_dependency", agent, reason)
+    return amend_dependency(
+        home, card_id, dependency_id, "remove_dependency", agent, reason
+    )
 
 
 def mirror_coord_create(home: Path, task) -> None:
@@ -1454,7 +1498,9 @@ def mirror_coord_claim(
     return revision
 
 
-def mirror_coord_complete(home: Path, task_id: str, agent: str, transition_id: str = "") -> None:
+def mirror_coord_complete(
+    home: Path, task_id: str, agent: str, transition_id: str = ""
+) -> None:
     """Mirror a coord completion into the CardStore."""
     CardStore(home).append_event(
         task_id, "complete", agent, transition_id=transition_id or uuid.uuid4().hex
@@ -1473,7 +1519,10 @@ def current_claim_precondition(home: Path, task_id: str, owner: str) -> str | No
         raise ValueError(f"CardStore claim on {task_id} has no revision")
     if card.owner is None and card.status == Column.BACKLOG:
         for event in reversed(CardStore(home)._read_events(task_id)):
-            if event.get("action") == "release_claim" and event.get("released_owner") == owner:
+            if (
+                event.get("action") == "release_claim"
+                and event.get("released_owner") == owner
+            ):
                 return None
     raise ValueError(f"CardStore owner conflict for {task_id}: expected {owner}")
 
@@ -1552,9 +1601,7 @@ def mirror_coord_archive(home: Path, task_id: str, agent: str) -> None:
 OPEN_DRIFT_THRESHOLD = 5
 
 
-def _open_count(
-    cards: dict, known_status_ids: Optional[set[str]] = None
-) -> int:
+def _open_count(cards: dict, known_status_ids: Optional[set[str]] = None) -> int:
     """Count comparable coord-board OPEN cards.
 
     Args:

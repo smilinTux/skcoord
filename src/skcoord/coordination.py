@@ -170,7 +170,9 @@ class Task(BaseModel):
     priority: TaskPriority = TaskPriority.MEDIUM
     tags: list[str] = Field(default_factory=list)
     created_by: str = ""
-    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    created_at: str = Field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
     acceptance_criteria: list[str] = Field(default_factory=list)
     dependencies: list[str] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
@@ -186,7 +188,9 @@ class AgentFile(BaseModel):
     """
 
     agent: str
-    last_seen: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    last_seen: str = Field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
     host: str = Field(default_factory=socket.gethostname)
     state: AgentState = AgentState.ACTIVE
     current_task: Optional[str] = None
@@ -238,10 +242,16 @@ class TaskViewReadScope:
     read_page: Callable[[str | None, int], TaskViewReadBatch]
 
     def __post_init__(self) -> None:
-        from .card_store import _TASK_VIEW_SCOPE_MAX_BYTES, _TASK_VIEW_SCOPE_MAX_CHARACTERS
+        from .card_store import (
+            _TASK_VIEW_SCOPE_MAX_BYTES,
+            _TASK_VIEW_SCOPE_MAX_CHARACTERS,
+        )
 
         scope = self.authorization_scope
-        if not isinstance(scope, str) or not 1 <= len(scope) <= _TASK_VIEW_SCOPE_MAX_CHARACTERS:
+        if (
+            not isinstance(scope, str)
+            or not 1 <= len(scope) <= _TASK_VIEW_SCOPE_MAX_CHARACTERS
+        ):
             raise ValueError(
                 "authorization scope must contain 1 to 256 characters and at most 1024 UTF-8 bytes"
             )
@@ -305,7 +315,9 @@ class Board:
             raise ValueError("agent projection directory escapes coordination") from exc
         path = agents / f"{canonical}.json"
         if path.parent != agents:
-            raise ValueError("agent projection destination escapes the agents directory")
+            raise ValueError(
+                "agent projection destination escapes the agents directory"
+            )
         return path
 
     def archived_ids(self) -> set[str]:
@@ -392,7 +404,9 @@ class Board:
                 data = json.loads(f.read_text(encoding="utf-8"))
                 agent = AgentFile.model_validate(data)
                 if agent.agent != f.stem:
-                    raise ValueError("agent payload identity does not match its filename")
+                    raise ValueError(
+                        "agent payload identity does not match its filename"
+                    )
                 agents.append(agent)
             except Exception as exc:  # noqa: BLE001
                 # A dropped agent file loses that agent's claims/completions from
@@ -439,7 +453,8 @@ class Board:
         if path.is_symlink() or (path.exists() and not path.is_file()):
             raise ValueError("agent projection destination must be a regular file")
         self._replace_agent_projection_bytes(
-            agent.agent, (json.dumps(agent.model_dump(), indent=2) + "\n").encode("utf-8")
+            agent.agent,
+            (json.dumps(agent.model_dump(), indent=2) + "\n").encode("utf-8"),
         )
         return path
 
@@ -468,7 +483,9 @@ class Board:
             try:
                 file_stat = os.fstat(descriptor)
                 if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_nlink != 1:
-                    raise ValueError("agent projection must be a regular single-link file")
+                    raise ValueError(
+                        "agent projection must be a regular single-link file"
+                    )
                 chunks: list[bytes] = []
                 while True:
                     chunk = os.read(descriptor, 65536)
@@ -489,12 +506,16 @@ class Board:
         no_follow = getattr(os, "O_NOFOLLOW", None)
         if no_follow is None:
             os.close(directory_fd)
-            raise RuntimeError("safe agent projection writes require O_NOFOLLOW support")
+            raise RuntimeError(
+                "safe agent projection writes require O_NOFOLLOW support"
+            )
         temp_name = f".{canonical}.restore-{uuid.uuid4().hex}.tmp"
         descriptor = -1
         try:
             try:
-                existing = os.stat(f"{canonical}.json", dir_fd=directory_fd, follow_symlinks=False)
+                existing = os.stat(
+                    f"{canonical}.json", dir_fd=directory_fd, follow_symlinks=False
+                )
             except FileNotFoundError:
                 existing = None
             if existing is not None and (
@@ -502,7 +523,9 @@ class Board:
                 or not stat.S_ISREG(existing.st_mode)
                 or existing.st_nlink != 1
             ):
-                raise ValueError("agent projection destination must be a regular single-link file")
+                raise ValueError(
+                    "agent projection destination must be a regular single-link file"
+                )
             descriptor = os.open(
                 temp_name,
                 os.O_WRONLY | os.O_CREAT | os.O_EXCL | no_follow,
@@ -519,11 +542,14 @@ class Board:
                 stat.S_ISLNK(temporary.st_mode)
                 or not stat.S_ISREG(temporary.st_mode)
                 or temporary.st_nlink != 1
-                or (temporary.st_dev, temporary.st_ino) != (opened.st_dev, opened.st_ino)
+                or (temporary.st_dev, temporary.st_ino)
+                != (opened.st_dev, opened.st_ino)
             ):
                 raise ValueError("agent projection temporary destination is unsafe")
             try:
-                current = os.stat(f"{canonical}.json", dir_fd=directory_fd, follow_symlinks=False)
+                current = os.stat(
+                    f"{canonical}.json", dir_fd=directory_fd, follow_symlinks=False
+                )
             except FileNotFoundError:
                 current = None
             if current is not None and (
@@ -531,7 +557,9 @@ class Board:
                 or not stat.S_ISREG(current.st_mode)
                 or current.st_nlink != 1
             ):
-                raise ValueError("agent projection destination must be a regular single-link file")
+                raise ValueError(
+                    "agent projection destination must be a regular single-link file"
+                )
             os.replace(
                 temp_name,
                 f"{canonical}.json",
@@ -561,7 +589,9 @@ class Board:
         directory_fd = self._agent_projection_directory_fd()
         try:
             try:
-                existing = os.stat(f"{canonical}.json", dir_fd=directory_fd, follow_symlinks=False)
+                existing = os.stat(
+                    f"{canonical}.json", dir_fd=directory_fd, follow_symlinks=False
+                )
             except FileNotFoundError:
                 return
             if (
@@ -569,7 +599,9 @@ class Board:
                 or not stat.S_ISREG(existing.st_mode)
                 or existing.st_nlink != 1
             ):
-                raise ValueError("agent projection destination must be a regular single-link file")
+                raise ValueError(
+                    "agent projection destination must be a regular single-link file"
+                )
             os.unlink(f"{canonical}.json", dir_fd=directory_fd)
             os.fsync(directory_fd)
         finally:
@@ -662,11 +694,15 @@ class Board:
             record["phase"] = "legacy_restore_failed"
             record["restore_error"] = str(restore_error)
             self._append_release_recovery(record)
-            raise RuntimeError("recovery record written; board is fail-closed") from restore_error
+            raise RuntimeError(
+                "recovery record written; board is fail-closed"
+            ) from restore_error
         record["phase"] = "legacy_restored_card_store_uncertain"
         self._append_release_recovery(record)
 
-    def _store_transitions_are_durable(self, transitions: list[tuple[str, str]]) -> bool:
+    def _store_transitions_are_durable(
+        self, transitions: list[tuple[str, str]]
+    ) -> bool:
         """Return whether every exact intended CardStore transition exists."""
         from .card_store import CardStore
 
@@ -919,7 +955,9 @@ class Board:
             if exact.exists():
                 matches = [exact]
         if not matches:
-            raise FileNotFoundError(f"No task file for id {task_id} in {self.tasks_dir}")
+            raise FileNotFoundError(
+                f"No task file for id {task_id} in {self.tasks_dir}"
+            )
         path = matches[0]
         if path.is_symlink() or not path.is_file():
             raise ValueError("task destination must be a regular file")
@@ -937,7 +975,9 @@ class Board:
         if no_follow is None or path.name in {"", ".", ".."}:
             raise ValueError("task destination is unsafe")
         try:
-            directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | no_follow)
+            directory_fd = os.open(
+                path.parent, os.O_RDONLY | os.O_DIRECTORY | no_follow
+            )
         except OSError as exc:
             raise ValueError("task parent is unsafe") from exc
         descriptor = -1
@@ -949,7 +989,9 @@ class Board:
                 or existing.st_nlink != 1
             ):
                 raise ValueError("task destination must be a regular single-link file")
-            descriptor = os.open(path.name, os.O_RDONLY | no_follow, dir_fd=directory_fd)
+            descriptor = os.open(
+                path.name, os.O_RDONLY | no_follow, dir_fd=directory_fd
+            )
             opened = os.fstat(descriptor)
             if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
                 raise ValueError("task destination must be a regular single-link file")
@@ -1014,7 +1056,10 @@ class Board:
                 "harness": harness,
             }
             for i, existing in enumerate(scores):
-                if existing.get("round") == round and existing.get("harness") == harness:
+                if (
+                    existing.get("round") == round
+                    and existing.get("harness") == harness
+                ):
                     scores[i] = entry
                     break
             else:
@@ -1084,16 +1129,22 @@ class Board:
             Path to the written task file.
         """
         if size not in _GRADE_SIZE_RANK:
-            raise ValueError(f"invalid size {size!r}, must be one of {sorted(_GRADE_SIZE_RANK)}")
+            raise ValueError(
+                f"invalid size {size!r}, must be one of {sorted(_GRADE_SIZE_RANK)}"
+            )
         if risk not in _GRADE_RISK_RANK:
-            raise ValueError(f"invalid risk {risk!r}, must be one of {sorted(_GRADE_RISK_RANK)}")
+            raise ValueError(
+                f"invalid risk {risk!r}, must be one of {sorted(_GRADE_RISK_RANK)}"
+            )
         if sensitivity not in _GRADE_SENSITIVITY_VALUES:
             raise ValueError(
                 f"invalid sensitivity {sensitivity!r}, must be one of "
                 f"{sorted(_GRADE_SENSITIVITY_VALUES)}"
             )
         if pool not in _GRADE_POOL_VALUES:
-            raise ValueError(f"invalid pool {pool!r}, must be one of {sorted(_GRADE_POOL_VALUES)}")
+            raise ValueError(
+                f"invalid pool {pool!r}, must be one of {sorted(_GRADE_POOL_VALUES)}"
+            )
 
         rank = max(_GRADE_SIZE_RANK[size], _GRADE_RISK_RANK[risk])
         model_class = _GRADE_CLASS_BY_RANK[rank]
@@ -1169,7 +1220,10 @@ class Board:
                 "replacement_hint": replacement_hint,
             }
             for i, existing in enumerate(attempts):
-                if existing.get("run_id") == run_id and existing.get("outcome") == outcome:
+                if (
+                    existing.get("run_id") == run_id
+                    and existing.get("outcome") == outcome
+                ):
                     attempts[i] = entry
                     break
             else:
@@ -1248,7 +1302,10 @@ class Board:
                 "approach_hint": approach_hint,
             }
             for i, existing in enumerate(successes):
-                if existing.get("run_id") == run_id and existing.get("outcome") == outcome:
+                if (
+                    existing.get("run_id") == run_id
+                    and existing.get("outcome") == outcome
+                ):
                     successes[i] = entry
                     break
             else:
@@ -1347,7 +1404,9 @@ class Board:
                         transition_id=transition_id,
                     )
                 except Exception:
-                    if not self._store_transitions_are_durable([(task_id, transition_id)]):
+                    if not self._store_transitions_are_durable(
+                        [(task_id, transition_id)]
+                    ):
                         raise
                 completed_events.append((action, tag, transition_id))
         except Exception as mirror_error:
@@ -1392,7 +1451,9 @@ class Board:
             raise
         return path
 
-    def close_task_obsolete(self, task_id: str, reason: str, run_id: str | None = None) -> Path:
+    def close_task_obsolete(
+        self, task_id: str, reason: str, run_id: str | None = None
+    ) -> Path:
         """Mark a task obsolete on the task file itself.
 
         Task files carry no status field: done/claimed status is derived from
@@ -1459,7 +1520,8 @@ class Board:
             view.task.id
             for view in self._legacy_task_views()
             if all(
-                status_by_id.get(dep_id) == TaskStatus.DONE for dep_id in view.task.dependencies
+                status_by_id.get(dep_id) == TaskStatus.DONE
+                for dep_id in view.task.dependencies
             )
             and "autopilot-staged" not in (view.task.tags or [])
         }
@@ -1805,11 +1867,14 @@ class Board:
             # done. An unknown dependency ID (no card anywhere) is treated as
             # incomplete and fails closed. ``force`` is deliberately not an
             # escape hatch for dependency gates.
-            dep_views = {v.task.id: v for v in self.get_task_views(include_archived=True)}
+            dep_views = {
+                v.task.id: v for v in self.get_task_views(include_archived=True)
+            }
             incomplete = [
                 dep_id
                 for dep_id in target.task.dependencies
-                if dep_id not in dep_views or dep_views[dep_id].status != TaskStatus.DONE
+                if dep_id not in dep_views
+                or dep_views[dep_id].status != TaskStatus.DONE
             ]
             if incomplete:
                 raise ValueError(
@@ -1820,7 +1885,9 @@ class Board:
         # Capture the task being bumped out of current_task: it stays claimed but
         # is no longer in_progress, so legacy derives it as CLAIMED (ready). The
         # store must demote it too, else the cutover read shows it as doing.
-        bumped = agent.current_task if agent.current_task not in (None, task_id) else None
+        bumped = (
+            agent.current_task if agent.current_task not in (None, task_id) else None
+        )
         if task_id not in agent.claimed_tasks:
             agent.claimed_tasks.append(task_id)
         agent.current_task = task_id
@@ -1828,7 +1895,9 @@ class Board:
         self.save_agent(agent)
         return agent, bumped
 
-    def claim_task(self, agent_name: str, task_id: str, force: bool = False) -> AgentFile:
+    def claim_task(
+        self, agent_name: str, task_id: str, force: bool = False
+    ) -> AgentFile:
         """Claim under the board lock and every affected card lock.
 
         A new current task demotes the old current task. Both IDs therefore
@@ -1854,7 +1923,9 @@ class Board:
                     stack.enter_context(card_mutation_lock(self.home, card_id))
                 _, original = self._snapshot_agent_projection(canonical)
                 target_snapshot = (
-                    CardStore(self.home).fold(task_id) if card_store_write_enabled() else None
+                    CardStore(self.home).fold(task_id)
+                    if card_store_write_enabled()
+                    else None
                 )
                 agent, bumped = self._claim_task(canonical, task_id, force)
                 transitions = [(task_id, uuid.uuid4().hex)]
@@ -1880,7 +1951,9 @@ class Board:
                     expected_states = [(task_id, canonical, "doing")]
                     if bumped is not None:
                         expected_states.append((bumped, canonical, "ready"))
-                    if self._store_transitions_are_applied(transitions, expected_states):
+                    if self._store_transitions_are_applied(
+                        transitions, expected_states
+                    ):
                         return agent
                     compensation: list[tuple[str, str]] = []
                     if bumped is not None:
@@ -1925,7 +1998,9 @@ class Board:
         validate_card_lock_identifier(task_id)
         audit_actor = AgentFile.validate_agent_name(actor or canonical_owner)
         with _board_mutation_lock(self.home), card_mutation_lock(self.home, task_id):
-            return self._release_claim_locked(canonical_owner, task_id, actor=audit_actor)
+            return self._release_claim_locked(
+                canonical_owner, task_id, actor=audit_actor
+            )
 
     def _release_claim_locked(
         self,
@@ -1951,7 +2026,9 @@ class Board:
         should_mirror = card_store_write_enabled()
         if should_mirror:
             try:
-                expected_claim_revision = current_claim_precondition(self.home, task_id, owner)
+                expected_claim_revision = current_claim_precondition(
+                    self.home, task_id, owner
+                )
             except ValueError:
                 if (
                     not allow_missing_card_store
@@ -1960,7 +2037,9 @@ class Board:
                     raise
                 should_mirror = False
         _, original = self._snapshot_agent_projection(owner)
-        agent.claimed_tasks = [claimed for claimed in agent.claimed_tasks if claimed != task_id]
+        agent.claimed_tasks = [
+            claimed for claimed in agent.claimed_tasks if claimed != task_id
+        ]
         if agent.current_task == task_id:
             agent.current_task = None
         self.save_agent(agent)
@@ -1977,7 +2056,9 @@ class Board:
                 transition_id=transitions[0][1],
             )
         except Exception as exc:
-            if self._store_transitions_are_applied(transitions, [(task_id, None, "backlog")]):
+            if self._store_transitions_are_applied(
+                transitions, [(task_id, None, "backlog")]
+            ):
                 return True
             self._recover_store_failure(
                 operation="release_claim",
@@ -2038,7 +2119,8 @@ class Board:
         return [
             dependency_id
             for dependency_id in target.task.dependencies
-            if dependency_id not in by_id or by_id[dependency_id].status != TaskStatus.DONE
+            if dependency_id not in by_id
+            or by_id[dependency_id].status != TaskStatus.DONE
         ]
 
     def complete_task(self, agent_name: str, task_id: str) -> AgentFile:
@@ -2069,7 +2151,9 @@ class Board:
                     transition_id=transitions[0][1],
                 )
             except Exception as exc:
-                if self._store_transitions_are_applied(transitions, [(task_id, None, "done")]):
+                if self._store_transitions_are_applied(
+                    transitions, [(task_id, None, "done")]
+                ):
                     should_mint = True
                 else:
                     self._recover_store_failure(
@@ -2119,11 +2203,16 @@ class Board:
             for v in section_tasks:
                 t = v.task
                 assignee = f" @{v.claimed_by}" if v.claimed_by else ""
-                priority_icon = {"critical": "!!!", "high": "!!", "medium": "!", "low": ""}.get(
-                    t.priority.value, ""
-                )
+                priority_icon = {
+                    "critical": "!!!",
+                    "high": "!!",
+                    "medium": "!",
+                    "low": "",
+                }.get(t.priority.value, "")
                 tags_str = " ".join(f"`{tag}`" for tag in t.tags)
-                lines.append(f"- **[{t.id}]** {t.title}{assignee} {priority_icon} {tags_str}")
+                lines.append(
+                    f"- **[{t.id}]** {t.title}{assignee} {priority_icon} {tags_str}"
+                )
                 if t.description:
                     lines.append(f"  > {t.description[:120]}")
             lines.append("")
@@ -2221,7 +2310,9 @@ def _mint_joules_for_task(board: Board, task_id: str, agent_name: str) -> None:
             print(f"[SKJoule] Minted {record.joules} Joules for task: {title}")
     except Exception as exc:
         # Never let tokenization failure block task completion
-        logger.warning("Joule tokenization failed for task %s (non-fatal): %s", task_id, exc)
+        logger.warning(
+            "Joule tokenization failed for task %s (non-fatal): %s", task_id, exc
+        )
 
 
 _BRIEFING_PROTOCOL = """\

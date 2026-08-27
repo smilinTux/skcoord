@@ -57,7 +57,9 @@ def collect_datastores(runner: CommandRunner) -> list[DiscoveredCI]:
                     node=runner.host,
                     attributes=attributes,
                     tags=("mount", "datastore", DISCOVERED_TAG),
-                    relationships=(("runs_on", make_ci_id(CIType.HOST.value, runner.host)),),
+                    relationships=(
+                        ("runs_on", make_ci_id(CIType.HOST.value, runner.host)),
+                    ),
                 )
             )
 
@@ -86,7 +88,9 @@ def collect_datastores(runner: CommandRunner) -> list[DiscoveredCI]:
                     node=runner.host,
                     attributes={"runtime": runtime, "container": name, "image": image},
                     tags=(runtime, "database", "datastore", DISCOVERED_TAG),
-                    relationships=(("runs_on", make_ci_id(CIType.HOST.value, runner.host)),),
+                    relationships=(
+                        ("runs_on", make_ci_id(CIType.HOST.value, runner.host)),
+                    ),
                 )
             )
     return out
@@ -124,6 +128,7 @@ def collect_observed_agents(runner: CommandRunner) -> list[DiscoveredCI]:
         for name in names
         if str(name).strip() and not str(name).endswith("-template")
     ]
+
 
 def collect_model_endpoints(runner: CommandRunner) -> list[DiscoveredCI]:
     """Observed Ollama endpoint, version and bounded installed-model inventory."""

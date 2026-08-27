@@ -27,12 +27,16 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     gate = evaluate_shadow_gate(args.artifact)
-    plan = plan_ownership_backfill(CMDBManager(args.home), load_manifest(args.manifest), gate)
+    plan = plan_ownership_backfill(
+        CMDBManager(args.home), load_manifest(args.manifest), gate
+    )
     if not args.apply:
         print(json.dumps(plan, indent=2, sort_keys=True))
         return 0 if plan["eligible"] else 2
     try:
-        audit = apply_ownership_backfill(CMDBManager(args.home), plan, args.approval_digest)
+        audit = apply_ownership_backfill(
+            CMDBManager(args.home), plan, args.approval_digest
+        )
     except (ValueError, RuntimeError) as exc:
         parser.error(str(exc))
     print(json.dumps({"applied": True, "audit": str(audit)}, sort_keys=True))

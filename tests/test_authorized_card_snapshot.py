@@ -142,8 +142,12 @@ class _Store:
     def __init__(self, cards):
         self.cards = {card.id: card for card in cards}
         self.fold_calls = []
-        self.list_card_ids = Mock(side_effect=AssertionError("raw id enumeration called"))
-        self.list_cards = Mock(side_effect=AssertionError("raw record enumeration called"))
+        self.list_card_ids = Mock(
+            side_effect=AssertionError("raw id enumeration called")
+        )
+        self.list_cards = Mock(
+            side_effect=AssertionError("raw record enumeration called")
+        )
         self.create = Mock(side_effect=AssertionError("mutation called"))
         self.append_event = Mock(side_effect=AssertionError("mutation called"))
 
@@ -201,7 +205,9 @@ def _keys(value):
         _decision(visible_absent=("owner-attested-absent",)),
     ],
 )
-def test_non_allow_expired_and_mismatched_policy_never_construct_store(decision) -> None:
+def test_non_allow_expired_and_mismatched_policy_never_construct_store(
+    decision,
+) -> None:
     factory = Mock(side_effect=AssertionError("CardStore constructed before allow"))
     reader = AuthorizedCardSnapshotReader(
         Path("/unused"), lambda _request: decision, store_factory=factory
@@ -214,7 +220,9 @@ def test_non_allow_expired_and_mismatched_policy_never_construct_store(decision)
     assert result["records"] == result["dependency_edges"] == result["milestones"] == []
 
 
-def test_policy_failure_invalid_result_and_revocation_are_constant_and_no_read() -> None:
+def test_policy_failure_invalid_result_and_revocation_are_constant_and_no_read() -> (
+    None
+):
     factory = Mock(side_effect=AssertionError("CardStore constructed before allow"))
     validators = [
         lambda _request: (_ for _ in ()).throw(RuntimeError("SECRET-POLICY-ERROR")),
@@ -222,9 +230,9 @@ def test_policy_failure_invalid_result_and_revocation_are_constant_and_no_read()
         lambda _request: _decision(state="deny"),
     ]
     outputs = [
-        AuthorizedCardSnapshotReader(Path("/unused"), validator, store_factory=factory).read(
-            REQUEST, now=NOW
-        )
+        AuthorizedCardSnapshotReader(
+            Path("/unused"), validator, store_factory=factory
+        ).read(REQUEST, now=NOW)
         for validator in validators
     ]
     factory.assert_not_called()
@@ -302,7 +310,10 @@ def test_malformed_dependency_container_is_partial_not_empty() -> None:
     assert result["truth_state"] == "partial"
     assert result["classification_complete"] is False
     assert result["dependency_edges"] == []
-    assert any(error["code"] == "AUTHORIZED_CARD_SNAPSHOT_PARTIAL" for error in result["errors"])
+    assert any(
+        error["code"] == "AUTHORIZED_CARD_SNAPSHOT_PARTIAL"
+        for error in result["errors"]
+    )
 
 
 def test_malformed_label_container_is_partial_not_empty() -> None:
@@ -312,7 +323,10 @@ def test_malformed_label_container_is_partial_not_empty() -> None:
     assert result["truth_state"] == "partial"
     assert result["classification_complete"] is False
     assert result["records"][0]["classifications"] == []
-    assert any(error["code"] == "AUTHORIZED_CARD_SNAPSHOT_PARTIAL" for error in result["errors"])
+    assert any(
+        error["code"] == "AUTHORIZED_CARD_SNAPSHOT_PARTIAL"
+        for error in result["errors"]
+    )
 
 
 def test_empty_and_protected_only_stores_are_byte_identical_without_fold() -> None:
@@ -397,7 +411,9 @@ def test_reader_source_has_no_enumeration_private_event_or_mutation_call() -> No
         assert forbidden not in source
 
 
-def test_real_card_store_snapshot_read_changes_no_source_bytes_or_mtimes(tmp_path: Path) -> None:
+def test_real_card_store_snapshot_read_changes_no_source_bytes_or_mtimes(
+    tmp_path: Path,
+) -> None:
     store = CardStore(tmp_path)
     store.create(CardCore(id="visible", title="Setup", created_by="fixture"))
     before = {
@@ -433,7 +449,9 @@ def test_field_mask_is_enforced_before_derived_evidence() -> None:
         visible=("source", "target"),
         field_mask=(),
         semantic_classes=(),
-        resource_id=authorized_card_resource_id(("source", "target"), (), (), scope=SCOPE),
+        resource_id=authorized_card_resource_id(
+            ("source", "target"), (), (), scope=SCOPE
+        ),
     )
     result, _store, _factory = _read([source, target], decision)
     assert result["dependency_edges"] == []
@@ -472,7 +490,8 @@ def test_cycle_claim_conflict_stale_future_and_milestone_paths_are_distinct() ->
         "milestone_path",
     } <= set(edge["conditions"])
     assert any(
-        "dependency_cycle" in finding["conditions"] for finding in result["dependency_edges"]
+        "dependency_cycle" in finding["conditions"]
+        for finding in result["dependency_edges"]
     )
     future = next(
         finding

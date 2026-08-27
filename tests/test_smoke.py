@@ -69,7 +69,9 @@ def test_itil_incident_roundtrip(tmp_path):
     assert reassigned.created_by == "service_health"
     assert any(e["action"] == "managed_by:lumina->jarvis" for e in reassigned.timeline)
     core = json.loads(
-        (tmp_path / "coordination" / "itil" / "incidents" / inc.id / "core.json").read_text()
+        (
+            tmp_path / "coordination" / "itil" / "incidents" / inc.id / "core.json"
+        ).read_text()
     )
     assert core["managed_by"] == "lumina"
 
@@ -95,7 +97,9 @@ def test_recurring_auto_incident_reopens_append_only(tmp_path):
     assert reopened.id == inc.id
     assert reopened.status.value == "investigating"
     assert reopened.resolution_summary is None
-    assert any(item["action"] == "status:resolved->investigating" for item in reopened.timeline)
+    assert any(
+        item["action"] == "status:resolved->investigating" for item in reopened.timeline
+    )
 
 
 def test_kanban_render_html(tmp_path):

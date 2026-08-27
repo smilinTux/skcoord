@@ -86,7 +86,11 @@ def canonical_sha256(value: Any) -> str:
 
 def _require_sorted_unique(values: tuple[str, ...], field_name: str) -> None:
     normalized = tuple(unicodedata.normalize("NFC", item) for item in values)
-    if normalized != values or tuple(sorted(values)) != values or len(set(values)) != len(values):
+    if (
+        normalized != values
+        or tuple(sorted(values)) != values
+        or len(set(values)) != len(values)
+    ):
         raise ValueError(f"{field_name} must be sorted and unique")
 
 
@@ -122,7 +126,10 @@ class PortfolioPolicy(ContractModel):
         if len(self.class_order) != len(classes) or set(self.class_order) != classes:
             raise ValueError("class_order must contain every class exactly once")
         priorities = {"critical", "high", "medium", "low"}
-        if len(self.priority_order) != len(priorities) or set(self.priority_order) != priorities:
+        if (
+            len(self.priority_order) != len(priorities)
+            or set(self.priority_order) != priorities
+        ):
             raise ValueError("priority_order must contain every priority exactly once")
         _require_sorted_unique(self.eligible_states, "eligible_states")
         _require_sorted_unique(self.excluded_labels, "excluded_labels")
@@ -163,7 +170,9 @@ class ServiceProfileV1(ContractModel):
         if self.profile_kind == "service" and (
             self.selectable or self.fallback_eligible or self.default_tools
         ):
-            raise ValueError("service profiles are nonselectable and have zero default tools")
+            raise ValueError(
+                "service profiles are nonselectable and have zero default tools"
+            )
         return self
 
 

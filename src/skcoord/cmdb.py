@@ -128,7 +128,8 @@ def _validate_attribute_write(value: object, *, ci_id: str, agent: str) -> None:
         ",".join(findings),
     )
     raise SecretAttributeKeyError(
-        "CMDB attributes contain forbidden secret-looking key(s): " + ", ".join(findings)
+        "CMDB attributes contain forbidden secret-looking key(s): "
+        + ", ".join(findings)
     )
 
 
@@ -271,9 +272,18 @@ class CMDBManager:
     def add_relationship(
         self, ci_id: str, agent: str, rel_type: str, target: str, authority: str = ""
     ) -> None:
-        self._append(ci_id, agent, "relate", rel_type=rel_type, target=target, authority=authority)
+        self._append(
+            ci_id,
+            agent,
+            "relate",
+            rel_type=rel_type,
+            target=target,
+            authority=authority,
+        )
 
-    def remove_relationship(self, ci_id: str, agent: str, rel_type: str, target: str) -> None:
+    def remove_relationship(
+        self, ci_id: str, agent: str, rel_type: str, target: str
+    ) -> None:
         self._append(ci_id, agent, "unrelate", rel_type=rel_type, target=target)
 
     def set_metadata(self, ci_id: str, agent: str, key: str, value: str) -> None:
@@ -357,14 +367,19 @@ class CMDBManager:
                     ci.relationships = [
                         current
                         for current in ci.relationships
-                        if not (current.rel_type == rel.rel_type and current.target == rel.target)
+                        if not (
+                            current.rel_type == rel.rel_type
+                            and current.target == rel.target
+                        )
                     ]
                     ci.relationships.append(rel)
             elif act == "unrelate":
                 ci.relationships = [
                     r
                     for r in ci.relationships
-                    if not (r.rel_type == e.get("rel_type") and r.target == e.get("target"))
+                    if not (
+                        r.rel_type == e.get("rel_type") and r.target == e.get("target")
+                    )
                 ]
             elif act == "metadata" and e.get("key") in {
                 "name",
@@ -381,7 +396,9 @@ class CMDBManager:
                     ci.tag_authorities[tag] = str(e["authority"])
             elif act == "untag" and e.get("tag"):
                 tag = str(e["tag"])
-                if not e.get("authority") or ci.tag_authorities.get(tag) == e.get("authority"):
+                if not e.get("authority") or ci.tag_authorities.get(tag) == e.get(
+                    "authority"
+                ):
                     ci.tags = [item for item in ci.tags if item != tag]
                     ci.tag_authorities.pop(tag, None)
             ci.updated_at = e.get("ts", ci.updated_at)
@@ -450,8 +467,13 @@ class CMDBManager:
 
         parent = self.cmdb_dir.parent
         parent.mkdir(parents=True, exist_ok=True)
-        backup = Path(backup_path).expanduser() if backup_path else parent / (
-            f"cmdb.backup-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ')}"
+        backup = (
+            Path(backup_path).expanduser()
+            if backup_path
+            else parent
+            / (
+                f"cmdb.backup-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ')}"
+            )
         )
         if backup.parent != parent:
             raise ValueError("backup_path must share the CMDB parent filesystem")
@@ -523,7 +545,9 @@ class CMDBManager:
                 for path in sorted(event_dir.glob("*.jsonl")):
                     if path.is_symlink():
                         raise ValueError(f"refusing symlinked CMDB event: {path}")
-                    for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                    for number, line in enumerate(
+                        path.read_text(encoding="utf-8").splitlines(), 1
+                    ):
                         if not line.strip():
                             continue
                         event = json.loads(line)
@@ -552,7 +576,9 @@ class CMDBManager:
             core = json.loads(core_path.read_text(encoding="utf-8"))
             if int(core.get("schema_version", 1)) < CMDB_CORE_SCHEMA_VERSION:
                 core["schema_version"] = CMDB_CORE_SCHEMA_VERSION
-                core_path.write_text(json.dumps(core, indent=2, default=str) + "\n", encoding="utf-8")
+                core_path.write_text(
+                    json.dumps(core, indent=2, default=str) + "\n", encoding="utf-8"
+                )
             event_dir = record / "events"
             if not event_dir.exists():
                 continue
@@ -599,7 +625,9 @@ class CMDBManager:
         from .discovery import reconcile, scan
 
         discovered = scan(self.home, runners=(), include_declared=True)
-        report = reconcile(self, discovered, agent=agent, apply=True, scan_complete=False)
+        report = reconcile(
+            self, discovered, agent=agent, apply=True, scan_complete=False
+        )
         result = report.as_dict()
         result.update(
             {
@@ -649,7 +677,11 @@ class CMDBManager:
                     )
         except Exception:  # noqa: BLE001
             pass
-        return {"ci": ci.model_dump(), "dependents": dependents, "open_incidents": incidents}
+        return {
+            "ci": ci.model_dump(),
+            "dependents": dependents,
+            "open_incidents": incidents,
+        }
 
     def audit_relationships(self) -> list[dict[str, Any]]:
         """Return deterministic relationship-integrity findings without writing."""
@@ -657,9 +689,15 @@ class CMDBManager:
         findings: list[dict[str, Any]] = []
         for source_id in sorted(cis):
             source = cis[source_id]
-            for rel in sorted(source.relationships, key=lambda r: (r.rel_type, r.target)):
+            for rel in sorted(
+                source.relationships, key=lambda r: (r.rel_type, r.target)
+            ):
                 target = cis.get(rel.target)
-                base = {"source": source_id, "relationship": rel.rel_type, "target": rel.target}
+                base = {
+                    "source": source_id,
+                    "relationship": rel.rel_type,
+                    "target": rel.target,
+                }
                 if target is None:
                     findings.append({"kind": "dangling_target", **base})
                     continue
@@ -670,11 +708,17 @@ class CMDBManager:
                     findings.append({"kind": "unknown_relationship", **base})
                 elif target.ci_type not in allowed:
                     findings.append(
-                        {"kind": "invalid_target_type", **base, "target_type": target.ci_type}
+                        {
+                            "kind": "invalid_target_type",
+                            **base,
+                            "target_type": target.ci_type,
+                        }
                     )
         return findings
 
-    def impact_graph(self, ci_id: str, max_depth: int = 8, max_nodes: int = 1000) -> dict:
+    def impact_graph(
+        self, ci_id: str, max_depth: int = 8, max_nodes: int = 1000
+    ) -> dict:
         """Return transitive dependents with cycle and fan-out protection."""
         if max_depth < 0 or max_nodes < 1:
             raise ValueError("max_depth must be >= 0 and max_nodes must be >= 1")

@@ -42,6 +42,8 @@ from .discovery import (
 )
 
 _SCHEMA = "skcoord.cmdb.reconcile-run/v1"
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -120,7 +122,9 @@ class ScanResult:
             "targets_complete": sum(item.complete for item in self.targets),
             "collectors_expected": expected,
             "collectors_complete": completed,
-            "collectors_partial": sum(record.status == "partial" for record in coverage),
+            "collectors_partial": sum(
+                record.status == "partial" for record in coverage
+            ),
             "collectors_unavailable": sum(
                 record.status == "unavailable" for record in coverage
             ),
@@ -160,7 +164,9 @@ class OrchestrationConfig:
         if min(self.global_concurrency, self.per_host_concurrency) < 1:
             raise ValueError("concurrency limits must be positive")
         if self.deadline_seconds <= 0 or self.failure_budget < 0:
-            raise ValueError("deadline must be positive and failure_budget non-negative")
+            raise ValueError(
+                "deadline must be positive and failure_budget non-negative"
+            )
 
 
 @dataclass
@@ -226,7 +232,8 @@ def resolve_targets(
             if str(host).strip():
                 sources.setdefault(str(host).strip(), set()).add(f"approved:{source}")
     return [
-        Target(host, tuple(sorted(provenance))) for host, provenance in sorted(sources.items())
+        Target(host, tuple(sorted(provenance)))
+        for host, provenance in sorted(sources.items())
     ]
 
 
@@ -248,11 +255,14 @@ def scan_network(
             declared_failures.append(f"{collector.__name__}:{type(exc).__name__}")
 
     results = {
-        target.host: TargetResult(target.host, target.provenance, len(OBSERVED_COLLECTORS))
+        target.host: TargetResult(
+            target.host, target.provenance, len(OBSERVED_COLLECTORS)
+        )
         for target in targets
     }
     semaphores = {
-        target.host: threading.BoundedSemaphore(config.per_host_concurrency) for target in targets
+        target.host: threading.BoundedSemaphore(config.per_host_concurrency)
+        for target in targets
     }
     started = time.monotonic()
 
@@ -274,8 +284,12 @@ def scan_network(
                     )
                     for item in observer(covered)
                 ]
-                return host, observer.__name__, items, "", covered.record(
-                    observer.__name__, len(items)
+                return (
+                    host,
+                    observer.__name__,
+                    items,
+                    "",
+                    covered.record(observer.__name__, len(items)),
                 )
             except Exception as exc:  # noqa: BLE001
                 return host, observer.__name__, [], type(exc).__name__, None
@@ -286,7 +300,10 @@ def scan_network(
     futures: dict[Future, tuple[str, str]] = {}
     for target in targets:
         for observer in OBSERVED_COLLECTORS:
-            futures[pool.submit(invoke, target.host, observer)] = (target.host, observer.__name__)
+            futures[pool.submit(invoke, target.host, observer)] = (
+                target.host,
+                observer.__name__,
+            )
     deadline_exceeded = False
     try:
         remaining = max(0.0, config.deadline_seconds - (time.monotonic() - started))
@@ -312,7 +329,9 @@ def scan_network(
         result.duration_seconds = round(time.monotonic() - started, 6)
         result.coverage.sort(key=lambda record: record.collector)
         found.extend(result.findings)
-    failures = len(declared_failures) + sum(len(item.failures) for item in results.values())
+    failures = len(declared_failures) + sum(
+        len(item.failures) for item in results.values()
+    )
     return ScanResult(
         merge(found),
         list(results.values()),
@@ -383,10 +402,14 @@ def normalize_drift(
             complete,
             evidence,
         )
-    return sorted(deduped.values(), key=lambda item: (item.severity, item.ci_id, item.kind))
+    return sorted(
+        deduped.values(), key=lambda item: (item.severity, item.ci_id, item.kind)
+    )
 
 
-def scan_health_events(result: ScanResult, scan_id: str, evidence: str) -> list[ScanHealthEvent]:
+def scan_health_events(
+    result: ScanResult, scan_id: str, evidence: str
+) -> list[ScanHealthEvent]:
     """Translate collector failures into a normalized health-event seam."""
     failures: list[tuple[str, str, str]] = []
     failures.extend(
@@ -402,7 +425,9 @@ def scan_health_events(result: ScanResult, scan_id: str, evidence: str) -> list[
         events[key] = ScanHealthEvent(
             "cmdb.scan_health", key, scan_id, target, collector, failure, evidence
         )
-    return sorted(events.values(), key=lambda item: (item.target, item.collector, item.failure))
+    return sorted(
+        events.values(), key=lambda item: (item.target, item.collector, item.failure)
+    )
 
 
 def apply_retirement_lifecycle(
@@ -431,9 +456,15 @@ def apply_retirement_lifecycle(
             continue
         previous = int(ci.attributes.get(key, 0) or 0)
         misses = 0 if ci_id in seen else previous + 1
-        action = "reset" if ci_id in seen and previous else "miss" if ci_id not in seen else "seen"
+        action = (
+            "reset"
+            if ci_id in seen and previous
+            else "miss" if ci_id not in seen else "seen"
+        )
         dependents = (
-            mgr.impact_analysis(ci_id).get("dependents", []) if misses >= threshold else []
+            mgr.impact_analysis(ci_id).get("dependents", [])
+            if misses >= threshold
+            else []
         )
         retire = misses >= threshold and ci.status != CIStatus.RETIRED.value
         actions.append(
@@ -519,7 +550,9 @@ def read_verified_run_artifacts(home: Path) -> list[dict]:
     for path in directory.glob("*.json"):
         try:
             payload = path.read_bytes()
-            expected = path.with_suffix(".sha256").read_text(encoding="utf-8").split()[0]
+            expected = (
+                path.with_suffix(".sha256").read_text(encoding="utf-8").split()[0]
+            )
             if hashlib.sha256(payload).hexdigest() != expected:
                 continue
             value = json.loads(payload)
@@ -527,12 +560,18 @@ def read_verified_run_artifacts(home: Path) -> list[dict]:
                 verified.append((path.stat().st_mtime, value))
         except (OSError, ValueError, IndexError, json.JSONDecodeError):
             continue
-    return [value for _, value in sorted(verified, key=lambda item: item[0], reverse=True)]
+    return [
+        value for _, value in sorted(verified, key=lambda item: item[0], reverse=True)
+    ]
 
 
-def freshness_status(last_success: datetime | None, now: datetime, slo: timedelta) -> dict:
+def freshness_status(
+    last_success: datetime | None, now: datetime, slo: timedelta
+) -> dict:
     """Evaluate the testable freshness primitive used by timer/source alerts."""
-    age = None if last_success is None else max(0.0, (now - last_success).total_seconds())
+    age = (
+        None if last_success is None else max(0.0, (now - last_success).total_seconds())
+    )
     return {
         "fresh": age is not None and age <= slo.total_seconds(),
         "age_seconds": age,
@@ -544,7 +583,9 @@ def operator_summary(artifacts: Sequence[dict], now: datetime, slo: timedelta) -
     """Build the small stable read model used by CLI/dashboard surfaces."""
     ordered = sorted(artifacts, key=lambda item: item.get("ended_at", ""), reverse=True)
     latest = ordered[0] if ordered else None
-    successes = [item for item in ordered if item.get("completeness", {}).get("complete")]
+    successes = [
+        item for item in ordered if item.get("completeness", {}).get("complete")
+    ]
     last_success = None
     if successes:
         try:
@@ -558,7 +599,8 @@ def operator_summary(artifacts: Sequence[dict], now: datetime, slo: timedelta) -
         "latest_drift": drift_summary,
         "freshness": freshness_status(last_success, now, slo),
         "recent_failed_or_partial": sum(
-            not item.get("completeness", {}).get("complete", False) for item in ordered[:10]
+            not item.get("completeness", {}).get("complete", False)
+            for item in ordered[:10]
         ),
     }
 
@@ -594,12 +636,15 @@ def run_reconcile(
         drift(scoped_discovered, mgr), scan_id, scan_result.complete, evidence
     )
     ended = _now()
-    retired = sorted(item["ci_id"] for item in lifecycle_actions if item.get("action") == "retire")
+    retired = sorted(
+        item["ci_id"] for item in lifecycle_actions if item.get("action") == "retire"
+    )
     report_data = report.as_dict()
     report_data["retired"] = retired
     report_data["counts"]["retired"] = len(retired)
     scan_validation_failures = [
-        {"scope": "declared", "reason": failure} for failure in scan_result.declared_failures
+        {"scope": "declared", "reason": failure}
+        for failure in scan_result.declared_failures
     ]
     scan_validation_failures.extend(
         {"scope": target.host, "reason": failure}
@@ -648,14 +693,19 @@ def run_reconcile(
             "event_count": len(scan_health_events(scan_result, scan_id, evidence)),
             "declared_failures": scan_result.declared_failures,
             "targets": [
-                {**asdict(item), "findings": len(item.findings), "complete": item.complete}
+                {
+                    **asdict(item),
+                    "findings": len(item.findings),
+                    "complete": item.complete,
+                }
                 for item in scan_result.targets
             ],
         },
         "events": {
             "drift": [asdict(item) for item in normalized],
             "scan_health": [
-                asdict(item) for item in scan_health_events(scan_result, scan_id, evidence)
+                asdict(item)
+                for item in scan_health_events(scan_result, scan_id, evidence)
             ],
         },
     }

@@ -151,7 +151,9 @@ def test_set_grade_rejects_invalid_pool(tmp_path, bad_pool):
     tid = _card(board)
 
     with pytest.raises(ValueError):
-        board.set_grade(tid, sensitivity="internal", size="M", risk="low", pool=bad_pool)
+        board.set_grade(
+            tid, sensitivity="internal", size="M", risk="low", pool=bad_pool
+        )
 
 
 def test_set_grade_accepts_both_valid_pool_values(tmp_path):

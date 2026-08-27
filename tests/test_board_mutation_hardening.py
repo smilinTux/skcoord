@@ -57,7 +57,9 @@ def _hold_board_lock(home: str, ready: Event) -> None:
 def _recovery_records(home) -> list[dict]:
     records: list[dict] = []
     for path in sorted((home / "coordination" / "recovery").glob("*.jsonl")):
-        records.extend(json.loads(line) for line in path.read_text(encoding="utf-8").splitlines())
+        records.extend(
+            json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()
+        )
     return records
 
 
@@ -68,23 +70,31 @@ def _create_claimed(board: Board, task_id: str = "hard0001") -> Task:
     return task
 
 
-def test_same_owner_different_card_releases_keep_both_projection_updates(tmp_path) -> None:
+def test_same_owner_different_card_releases_keep_both_projection_updates(
+    tmp_path,
+) -> None:
     board = Board(tmp_path)
     first = _create_claimed(board, "hard0001")
     second = _create_claimed(board, "hard0002")
 
     with ProcessPoolExecutor(max_workers=2) as pool:
         results = list(
-            pool.map(_release_one, [str(tmp_path), str(tmp_path)], [first.id, second.id])
+            pool.map(
+                _release_one, [str(tmp_path), str(tmp_path)], [first.id, second.id]
+            )
         )
 
     assert results == [True, True]
     agent = board.load_agent("owner")
-    assert agent is not None and agent.claimed_tasks == [] and agent.current_task is None
+    assert (
+        agent is not None and agent.claimed_tasks == [] and agent.current_task is None
+    )
     assert audit_lifecycle(tmp_path).clean is True
 
 
-def test_forced_claim_release_interleaving_preserves_one_consistent_projection(tmp_path) -> None:
+def test_forced_claim_release_interleaving_preserves_one_consistent_projection(
+    tmp_path,
+) -> None:
     board = Board(tmp_path)
     task = _create_claimed(board)
 
@@ -92,7 +102,10 @@ def test_forced_claim_release_interleaving_preserves_one_consistent_projection(t
         outcomes = list(
             pool.map(
                 _run_race_item,
-                [("force_claim", str(tmp_path), task.id), ("release", str(tmp_path), task.id)],
+                [
+                    ("force_claim", str(tmp_path), task.id),
+                    ("release", str(tmp_path), task.id),
+                ],
             )
         )
 
@@ -108,7 +121,10 @@ def test_complete_release_interleaving_converges_to_done(tmp_path) -> None:
         outcomes = list(
             pool.map(
                 _run_race_item,
-                [("complete", str(tmp_path), task.id), ("release", str(tmp_path), task.id)],
+                [
+                    ("complete", str(tmp_path), task.id),
+                    ("release", str(tmp_path), task.id),
+                ],
             )
         )
 
@@ -118,7 +134,9 @@ def test_complete_release_interleaving_converges_to_done(tmp_path) -> None:
     assert audit_lifecycle(tmp_path).clean is True
 
 
-def test_lifecycle_transition_release_interleaving_uses_shared_board_lock(tmp_path) -> None:
+def test_lifecycle_transition_release_interleaving_uses_shared_board_lock(
+    tmp_path,
+) -> None:
     board = Board(tmp_path)
     task = _create_claimed(board)
 
@@ -151,8 +169,12 @@ def test_board_lock_times_out_when_another_process_holds_it(tmp_path) -> None:
     assert process.exitcode == 0
 
 
-@pytest.mark.parametrize("task_id", ["../escape", "bad\x00id", "bad\ncontrol", "x" * 129])
-def test_invalid_identifier_is_rejected_before_any_lock_path_is_opened(tmp_path, task_id) -> None:
+@pytest.mark.parametrize(
+    "task_id", ["../escape", "bad\x00id", "bad\ncontrol", "x" * 129]
+)
+def test_invalid_identifier_is_rejected_before_any_lock_path_is_opened(
+    tmp_path, task_id
+) -> None:
     home = tmp_path / "new-home"
     with pytest.raises(ValueError, match="non-path"):
         Board(home).claim_task("owner", task_id)
@@ -231,7 +253,9 @@ def test_agent_parent_and_recovery_symlinks_never_redirect_mutation_io(
     assert list(outside.iterdir()) == []
 
 
-def test_hardlinked_agent_projection_is_rejected_before_release_mutates(tmp_path) -> None:
+def test_hardlinked_agent_projection_is_rejected_before_release_mutates(
+    tmp_path,
+) -> None:
     board = Board(tmp_path)
     task = _create_claimed(board)
     projection = board.agent_projection_path("owner")
@@ -248,7 +272,9 @@ def test_release_event_requires_matching_owner_and_claim_revision(tmp_path) -> N
     task = Task(id="hard0001", title="revision")
     board.create_task(task)
     store = CardStore(tmp_path)
-    store.append_event(task.id, "claim", "first", owner="first", claim_revision="rev-first")
+    store.append_event(
+        task.id, "claim", "first", owner="first", claim_revision="rev-first"
+    )
     store.append_event(
         task.id,
         "release_claim",
@@ -256,7 +282,9 @@ def test_release_event_requires_matching_owner_and_claim_revision(tmp_path) -> N
         released_owner="first",
         expected_claim_revision="rev-first",
     )
-    store.append_event(task.id, "claim", "second", owner="second", claim_revision="rev-second")
+    store.append_event(
+        task.id, "claim", "second", owner="second", claim_revision="rev-second"
+    )
     store.append_event(
         task.id,
         "release_claim",
@@ -267,7 +295,10 @@ def test_release_event_requires_matching_owner_and_claim_revision(tmp_path) -> N
 
     card = store.fold(task.id)
     assert card is not None and card.owner == "second" and card.status == Column.DOING
-    assert card.meta["release_conflicts"][0]["reason"] == "claim precondition did not match"
+    assert (
+        card.meta["release_conflicts"][0]["reason"]
+        == "claim precondition did not match"
+    )
 
 
 def test_release_write_then_error_keeps_durable_transition_as_success(
@@ -349,11 +380,17 @@ def test_claim_and_complete_write_then_error_keep_applied_transition_as_success(
         expected_status = Column.DONE
         expected_owner = None
     card = CardStore(tmp_path).fold(task.id)
-    assert card is not None and card.status == expected_status and card.owner == expected_owner
+    assert (
+        card is not None
+        and card.status == expected_status
+        and card.owner == expected_owner
+    )
     assert _recovery_records(tmp_path) == []
 
 
-def test_remove_label_mirror_failure_restores_task_and_propagates(tmp_path, monkeypatch) -> None:
+def test_remove_label_mirror_failure_restores_task_and_propagates(
+    tmp_path, monkeypatch
+) -> None:
     board = Board(tmp_path)
     task = Task(id="hard0001", title="label", tags=["autopilot-staged"])
     path = board.create_task(task)
@@ -371,7 +408,10 @@ def test_remove_label_mirror_failure_restores_task_and_propagates(tmp_path, monk
     assert path.read_bytes() == original_bytes
     card = CardStore(tmp_path).fold(task.id)
     assert card is not None and "autopilot-staged" in card.labels
-    assert any(record["phase"] == "legacy_task_restored" for record in _recovery_records(tmp_path))
+    assert any(
+        record["phase"] == "legacy_task_restored"
+        for record in _recovery_records(tmp_path)
+    )
 
 
 def test_remove_label_write_then_error_keeps_durable_label_transition(
@@ -389,7 +429,9 @@ def test_remove_label_write_then_error_keeps_durable_label_transition(
 
     monkeypatch.setattr(CardStore, "append_event", append_then_raise)
     board.update_task(task.id, remove_tags=["autopilot-staged"])
-    assert "autopilot-staged" not in json.loads(path.read_text(encoding="utf-8"))["tags"]
+    assert (
+        "autopilot-staged" not in json.loads(path.read_text(encoding="utf-8"))["tags"]
+    )
     card = CardStore(tmp_path).fold(task.id)
     assert card is not None and "autopilot-staged" not in card.labels
     assert _recovery_records(tmp_path) == []
@@ -442,7 +484,9 @@ def test_claim_and_complete_store_failures_restore_raw_projection_and_record_rec
     monkeypatch.setattr(
         board,
         "_mirror_card_store",
-        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("complete mirror failed")),
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            OSError("complete mirror failed")
+        ),
     )
     with pytest.raises(OSError, match="complete mirror failed"):
         board.complete_task("owner", task.id)
@@ -492,7 +536,9 @@ def test_staged_label_add_remove_parity_in_every_projection_mode(
     original_core = core_path.read_bytes() if core_path.exists() else None
     board.update_task(task.id, add_tags=["released"], remove_tags=["autopilot-staged"])
 
-    legacy = next(view for view in board._legacy_task_views() if view.task.id == task.id)
+    legacy = next(
+        view for view in board._legacy_task_views() if view.task.id == task.id
+    )
     assert "autopilot-staged" not in legacy.task.tags
     assert "released" in legacy.task.tags
     assert task.id in board.unblocked_task_ids()
@@ -503,12 +549,16 @@ def test_staged_label_add_remove_parity_in_every_projection_mode(
             and "autopilot-staged" not in card.labels
             and "released" in card.labels
         )
-        actions = [event["action"] for event in CardStore(tmp_path)._read_events(task.id)]
+        actions = [
+            event["action"] for event in CardStore(tmp_path)._read_events(task.id)
+        ]
         assert "remove_label" in actions and "add_label" in actions
         assert core_path.read_bytes() == original_core
 
 
-def test_stale_release_uses_locked_preconditioned_card_store_transition(tmp_path) -> None:
+def test_stale_release_uses_locked_preconditioned_card_store_transition(
+    tmp_path,
+) -> None:
     board = Board(tmp_path)
     task = _create_claimed(board)
     path = board.agent_projection_path("owner")
@@ -608,7 +658,9 @@ def test_durable_complete_after_error_mints_once_and_retry_mints_nothing(
     assert card is not None and card.status == Column.DONE and card.owner is None
 
 
-def test_cardstore_read_paths_reject_symlinked_or_hardlinked_external_content(tmp_path) -> None:
+def test_cardstore_read_paths_reject_symlinked_or_hardlinked_external_content(
+    tmp_path,
+) -> None:
     store = CardStore(tmp_path)
     store.create(CardCore(id="hard0001", kind=Kind.TASK.value, title="safe reads"))
     store.append_event("hard0001", "claim", "owner", owner="owner")
@@ -638,7 +690,9 @@ def test_cardstore_read_paths_reject_symlinked_or_hardlinked_external_content(tm
         store._read_events("hard0001")
 
 
-def test_cardstore_listing_and_card_event_reads_reject_symlinked_content(tmp_path) -> None:
+def test_cardstore_listing_and_card_event_reads_reject_symlinked_content(
+    tmp_path,
+) -> None:
     store = CardStore(tmp_path)
     store.create(CardCore(id="hard0001", kind=Kind.TASK.value, title="safe listing"))
     outside = tmp_path / "outside"
@@ -653,7 +707,9 @@ def test_cardstore_listing_and_card_event_reads_reject_symlinked_content(tmp_pat
     events.append(CardEvent(card_id="hard0002", action="move"))
     event_file = next((tmp_path / "coordination" / "card_events").glob("*.jsonl"))
     external_event = outside / "card-events.jsonl"
-    external_event.write_text('{"card_id":"external","action":"move"}\n', encoding="utf-8")
+    external_event.write_text(
+        '{"card_id":"external","action":"move"}\n', encoding="utf-8"
+    )
     event_file.unlink()
     event_file.symlink_to(external_event)
     with pytest.raises(ValueError, match="unsafe"):

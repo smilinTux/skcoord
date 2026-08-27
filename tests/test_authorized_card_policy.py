@@ -76,14 +76,19 @@ class Signer:
         return signature
 
     def verify(self, token) -> bool:
-        return self.values.get(token.signature or "") == token.payload.model_dump_json().encode()
+        return (
+            self.values.get(token.signature or "")
+            == token.payload.model_dump_json().encode()
+        )
 
 
 class Store:
     def __init__(self, cards=()) -> None:
         self.cards = {card.id: card for card in cards}
         self.fold_calls = []
-        self.list_card_ids = Mock(side_effect=AssertionError("identifier enumeration called"))
+        self.list_card_ids = Mock(
+            side_effect=AssertionError("identifier enumeration called")
+        )
         self.list_cards = Mock(side_effect=AssertionError("record enumeration called"))
         self.create = Mock(side_effect=AssertionError("mutation called"))
         self.append_event = Mock(side_effect=AssertionError("mutation called"))
@@ -131,7 +136,9 @@ def entry(**changes) -> AuthorizedCardPolicyEntryV1:
     return AuthorizedCardPolicyEntryV1.issue(**values)
 
 
-def policy_selection(policy: AuthorizedCardPolicyEntryV1) -> AuthorizedCardPolicySelectionV1:
+def policy_selection(
+    policy: AuthorizedCardPolicyEntryV1,
+) -> AuthorizedCardPolicySelectionV1:
     return AuthorizedCardPolicySelectionV1(
         subject=policy.subject,
         acting_principal_id=policy.acting_principal_id,
@@ -148,7 +155,9 @@ def write_policy(path: Path, *entries: AuthorizedCardPolicyEntryV1) -> None:
 
 
 class Rig:
-    def __init__(self, policy_entry=None, *, store=None, backend=None, principal=None) -> None:
+    def __init__(
+        self, policy_entry=None, *, store=None, backend=None, principal=None
+    ) -> None:
         self.clock = Clock()
         self.entry = policy_entry or entry()
         self.backend = backend or StaticAuthorizedCardPolicyBackend((self.entry,))
@@ -266,11 +275,15 @@ def test_hidden_record_and_missing_record_are_byte_identical() -> None:
     public = card("source", dependencies=("hidden",), labels=("project",))
     missing = Rig(store=Store((public,)))
     decision_id = "00000000-0000-0000-0000-000000000001"
-    missing_context, missing_verifier = current_authority(missing, decision_id=decision_id)
+    missing_context, missing_verifier = current_authority(
+        missing, decision_id=decision_id
+    )
     protected = AuthorizedCardPolicyProvider(
         missing.backend,
         clock=missing.clock,
-        store_factory=Mock(return_value=Store((public, card("hidden", labels=("human-gate",))))),
+        store_factory=Mock(
+            return_value=Store((public, card("hidden", labels=("human-gate",))))
+        ),
     )
 
     one = missing.provider.read(
@@ -280,7 +293,9 @@ def test_hidden_record_and_missing_record_are_byte_identical() -> None:
         currentness_verifier=missing_verifier,
         now=NOW,
     )
-    protected_context, protected_verifier = current_authority(missing, decision_id=decision_id)
+    protected_context, protected_verifier = current_authority(
+        missing, decision_id=decision_id
+    )
     two = protected.read(
         protected_context,
         SCOPE,
@@ -311,7 +326,9 @@ def test_empty_and_protected_only_store_are_byte_identical() -> None:
         currentness_verifier=verifier,
         now=NOW,
     )
-    protected_context, protected_verifier = current_authority(empty, decision_id=decision_id)
+    protected_context, protected_verifier = current_authority(
+        empty, decision_id=decision_id
+    )
     two = protected.read(
         protected_context,
         SCOPE,
@@ -367,7 +384,9 @@ def test_policy_entry_rejects_oversize_population() -> None:
         entry(visible_card_ids=tuple(f"card-{index:04d}" for index in range(2001)))
 
 
-@pytest.mark.parametrize("card_id", ("../protected", "nested/card", "bad\nvalue", "x" * 129))
+@pytest.mark.parametrize(
+    "card_id", ("../protected", "nested/card", "bad\nvalue", "x" * 129)
+)
 def test_policy_entry_rejects_malformed_identifiers(card_id) -> None:
     with pytest.raises(ValidationError):
         entry(visible_card_ids=(card_id,))
@@ -442,7 +461,9 @@ def test_scope_and_attempt_tampering_fail_before_store() -> None:
     )
     attempt_two = context.model_copy(
         update={
-            "capauth_decision": context.capauth_decision.model_copy(update={"attempt_sequence": 2})
+            "capauth_decision": context.capauth_decision.model_copy(
+                update={"attempt_sequence": 2}
+            )
         }
     )
 
@@ -759,7 +780,9 @@ def test_concurrent_principals_remain_isolated() -> None:
             args=(
                 "project",
                 entry(),
-                Principal(principal_id="human-1", subject="human@example.test", kind="human"),
+                Principal(
+                    principal_id="human-1", subject="human@example.test", kind="human"
+                ),
             ),
         ),
         Thread(
@@ -824,10 +847,15 @@ def test_file_policy_backend_loads_exact_immutable_selection(tmp_path) -> None:
         selected.subject = "changed"  # type: ignore[misc]
 
 
-def test_file_policy_backend_rejects_duplicate_and_scope_tampered_documents(tmp_path) -> None:
+def test_file_policy_backend_rejects_duplicate_and_scope_tampered_documents(
+    tmp_path,
+) -> None:
     policy = entry()
     path = tmp_path / "owner-policy.json"
-    duplicate = {"schema_version": "1.0.0", "entries": [policy.model_dump(mode="json")] * 2}
+    duplicate = {
+        "schema_version": "1.0.0",
+        "entries": [policy.model_dump(mode="json")] * 2,
+    }
     atomic_write_text(path, json.dumps(duplicate))
     path.chmod(0o600)
     backend = FileAuthorizedCardPolicyBackend(path, clock=lambda: NOW)
@@ -836,7 +864,9 @@ def test_file_policy_backend_rejects_duplicate_and_scope_tampered_documents(tmp_
 
     tampered = policy.model_dump(mode="json")
     tampered["scope"]["role"] = "architect"
-    atomic_write_text(path, json.dumps({"schema_version": "1.0.0", "entries": [tampered]}))
+    atomic_write_text(
+        path, json.dumps({"schema_version": "1.0.0", "entries": [tampered]})
+    )
     path.chmod(0o600)
 
     assert backend.snapshot(policy_selection(policy)) is None
@@ -857,7 +887,9 @@ def test_file_policy_backend_rejects_duplicate_json_members(tmp_path, payload) -
     path.chmod(0o600)
 
     assert (
-        FileAuthorizedCardPolicyBackend(path, clock=lambda: NOW).snapshot(policy_selection(policy))
+        FileAuthorizedCardPolicyBackend(path, clock=lambda: NOW).snapshot(
+            policy_selection(policy)
+        )
         is None
     )
 
@@ -877,7 +909,9 @@ def test_file_policy_backend_storage_failures_return_no_value(tmp_path, state) -
         path.chmod(0o640)
 
     assert (
-        FileAuthorizedCardPolicyBackend(path, clock=lambda: NOW).snapshot(policy_selection(policy))
+        FileAuthorizedCardPolicyBackend(path, clock=lambda: NOW).snapshot(
+            policy_selection(policy)
+        )
         is None
     )
 
@@ -894,8 +928,14 @@ def test_file_policy_backend_rejects_symlink_hardlink_wrong_owner_and_unsafe_par
     symlink.symlink_to(target)
     hardlink = tmp_path / "hardlink.json"
     os.link(target, hardlink)
-    assert FileAuthorizedCardPolicyBackend(symlink, clock=lambda: NOW).snapshot(selection) is None
-    assert FileAuthorizedCardPolicyBackend(hardlink, clock=lambda: NOW).snapshot(selection) is None
+    assert (
+        FileAuthorizedCardPolicyBackend(symlink, clock=lambda: NOW).snapshot(selection)
+        is None
+    )
+    assert (
+        FileAuthorizedCardPolicyBackend(hardlink, clock=lambda: NOW).snapshot(selection)
+        is None
+    )
     assert (
         FileAuthorizedCardPolicyBackend(
             target, expected_uid=os.geteuid() + 1, clock=lambda: NOW
@@ -908,7 +948,10 @@ def test_file_policy_backend_rejects_symlink_hardlink_wrong_owner_and_unsafe_par
     tmp_path.chmod(0o770)
     try:
         assert (
-            FileAuthorizedCardPolicyBackend(target, clock=lambda: NOW).snapshot(selection) is None
+            FileAuthorizedCardPolicyBackend(target, clock=lambda: NOW).snapshot(
+                selection
+            )
+            is None
         )
     finally:
         tmp_path.chmod(0o700)
@@ -939,13 +982,17 @@ def test_file_policy_backend_expired_and_stale_revisions_fail_closed(tmp_path) -
     assert backend.snapshot(policy_selection(expired)) is None
     assert (
         backend.read_if_current(
-            policy_selection(expired), expired.owner_policy_revision, lambda _: {"secret": True}
+            policy_selection(expired),
+            expired.owner_policy_revision,
+            lambda _: {"secret": True},
         )
         is None
     )
 
 
-def test_file_policy_backend_revision_change_during_read_suppresses_result(tmp_path) -> None:
+def test_file_policy_backend_revision_change_during_read_suppresses_result(
+    tmp_path,
+) -> None:
     initial = entry()
     changed = entry(expires_at=NOW + timedelta(minutes=4))
     path = tmp_path / "owner-policy.json"
@@ -975,7 +1022,9 @@ def test_file_policy_backend_unchanged_read_returns_result(tmp_path) -> None:
     ) == {"ok": True}
 
 
-def test_file_policy_backend_drives_bounded_provider_without_enumeration(tmp_path) -> None:
+def test_file_policy_backend_drives_bounded_provider_without_enumeration(
+    tmp_path,
+) -> None:
     policy = entry()
     path = tmp_path / "owner-policy.json"
     write_policy(path, policy)

@@ -125,7 +125,9 @@ def _lifecycle_lock(home: Path, *, exclusive: bool) -> Iterator[None]:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
-def _audit_lifecycle_unlocked(home: Path, *, task_ids: set[str] | None = None) -> LifecycleAudit:
+def _audit_lifecycle_unlocked(
+    home: Path, *, task_ids: set[str] | None = None
+) -> LifecycleAudit:
     """Compare card state with agent projections while the caller holds a lock."""
     board = Board(home)
     cards = {
@@ -155,12 +157,17 @@ def _audit_lifecycle_unlocked(home: Path, *, task_ids: set[str] | None = None) -
             card = cards.get(task_id)
             if card is None:
                 issues.append(
-                    LifecycleIssue("orphan_claim", task_id, agent.agent, "claimed card is missing")
+                    LifecycleIssue(
+                        "orphan_claim", task_id, agent.agent, "claimed card is missing"
+                    )
                 )
             elif card.status == Column.DONE:
                 issues.append(
                     LifecycleIssue(
-                        "done_still_claimed", task_id, agent.agent, "done card remains claimed"
+                        "done_still_claimed",
+                        task_id,
+                        agent.agent,
+                        "done card remains claimed",
                     )
                 )
             elif card.status == Column.BACKLOG:
@@ -252,7 +259,9 @@ def _audit_lifecycle_unlocked(home: Path, *, task_ids: set[str] | None = None) -
                     )
                 )
 
-    ordered = tuple(sorted(issues, key=lambda item: (item.task_id, item.code, item.agent or "")))
+    ordered = tuple(
+        sorted(issues, key=lambda item: (item.task_id, item.code, item.agent or ""))
+    )
     return LifecycleAudit(len(cards), len(agents), ordered)
 
 
@@ -283,7 +292,9 @@ def _assert_no_active_conflicts(
                 )
         if issue.code == "multiple_claimants":
             for agent in agents.values():
-                if issue.task_id in agent.claimed_tasks and _is_active(agent, stale_after_seconds):
+                if issue.task_id in agent.claimed_tasks and _is_active(
+                    agent, stale_after_seconds
+                ):
                     by_task.setdefault(issue.task_id, set()).add(agent.agent)
     for task_id, owners in by_task.items():
         if len(owners) > 1:
@@ -305,9 +316,9 @@ def _append_receipt(home: Path, actor: str, payload: dict) -> Path:
     if coordination.is_symlink() or directory.is_symlink():
         raise LifecycleConflictError("reconciliation receipt path contains a symlink")
     directory.mkdir(parents=True, exist_ok=True)
-    if not directory.is_dir() or directory.resolve(strict=True).parent != coordination.resolve(
+    if not directory.is_dir() or directory.resolve(
         strict=True
-    ):
+    ).parent != coordination.resolve(strict=True):
         raise LifecycleConflictError("reconciliation receipt path escapes coordination")
     path = directory / f"{_safe_actor(actor)}@{socket.gethostname()}.jsonl"
     flags = os.O_CREAT | os.O_APPEND | os.O_RDWR
@@ -316,7 +327,9 @@ def _append_receipt(home: Path, actor: str, payload: dict) -> Path:
     try:
         descriptor = os.open(path, flags, 0o600)
     except OSError as exc:
-        raise LifecycleConflictError("reconciliation receipt destination is unsafe") from exc
+        raise LifecycleConflictError(
+            "reconciliation receipt destination is unsafe"
+        ) from exc
     receipt_stat = os.fstat(descriptor)
     if not stat.S_ISREG(receipt_stat.st_mode) or receipt_stat.st_nlink != 1:
         os.close(descriptor)
@@ -356,7 +369,9 @@ def _unresolved_receipt_ids(
         try:
             descriptor = os.open(path, flags)
         except OSError as exc:
-            raise LifecycleConflictError("reconciliation receipt source is unsafe") from exc
+            raise LifecycleConflictError(
+                "reconciliation receipt source is unsafe"
+            ) from exc
         receipt_stat = os.fstat(descriptor)
         if not stat.S_ISREG(receipt_stat.st_mode) or receipt_stat.st_nlink != 1:
             os.close(descriptor)
@@ -372,7 +387,9 @@ def _unresolved_receipt_ids(
             try:
                 payload = json.loads(line)
             except (json.JSONDecodeError, TypeError) as exc:
-                raise LifecycleConflictError("reconciliation receipt source is invalid") from exc
+                raise LifecycleConflictError(
+                    "reconciliation receipt source is invalid"
+                ) from exc
             if not isinstance(payload, dict):
                 raise LifecycleConflictError("reconciliation receipt source is invalid")
             receipt_id = payload.get("receipt_id")
@@ -396,9 +413,13 @@ def _unresolved_receipt_ids(
                 ):
                     scope = frozenset(raw_scope)
                 else:
-                    raise LifecycleConflictError("reconciliation receipt scope is invalid")
+                    raise LifecycleConflictError(
+                        "reconciliation receipt scope is invalid"
+                    )
                 if receipt_id in scopes and scopes[receipt_id] != scope:
-                    raise LifecycleConflictError("reconciliation receipt scope is inconsistent")
+                    raise LifecycleConflictError(
+                        "reconciliation receipt scope is inconsistent"
+                    )
                 scopes[receipt_id] = scope
     terminal = {"committed", "rolled_back", "recovered", "legacy_committed"}
     return tuple(
@@ -506,7 +527,9 @@ def _repair_lifecycle_unlocked(
                     else:
                         actions.append(f"release orphan {task_id} from {agent.agent}")
                 elif card.status in (Column.BACKLOG, Column.DONE):
-                    actions.append(f"release {card.status.value} {task_id} from {agent.agent}")
+                    actions.append(
+                        f"release {card.status.value} {task_id} from {agent.agent}"
+                    )
                 elif card.owner and card.owner != agent.agent:
                     actions.append(f"release non-owner {task_id} from {agent.agent}")
                 else:
@@ -535,16 +558,22 @@ def _repair_lifecycle_unlocked(
             ]
             if reopened:
                 agent.completed_tasks = [
-                    task_id for task_id in agent.completed_tasks if task_id not in reopened
+                    task_id
+                    for task_id in agent.completed_tasks
+                    if task_id not in reopened
                 ]
-                actions.extend(f"reopen {task_id} for {agent.agent}" for task_id in reopened)
+                actions.extend(
+                    f"reopen {task_id} for {agent.agent}" for task_id in reopened
+                )
             if agent.model_dump() != original:
                 stage(agent)
 
         for card in cards.values():
             if not card.owner:
                 continue
-            owner = agents.get(card.owner) or AgentFile(agent=card.owner, state=AgentState.OFFLINE)
+            owner = agents.get(card.owner) or AgentFile(
+                agent=card.owner, state=AgentState.OFFLINE
+            )
             original = owner.model_dump()
             if card.status == Column.DONE:
                 if card.id not in owner.completed_tasks:
@@ -580,7 +609,9 @@ def _repair_lifecycle_unlocked(
             _save_projection(board, agent)
         after = _audit_lifecycle_unlocked(home, task_ids=task_ids)
         if not after.clean:
-            raise LifecycleConflictError("repair did not converge; rerun audit for details")
+            raise LifecycleConflictError(
+                "repair did not converge; rerun audit for details"
+            )
         payload = {
             "receipt_id": receipt_id,
             "phase": "committed",
@@ -609,7 +640,9 @@ def _repair_lifecycle_unlocked(
                     "repaired_at": repaired_at,
                     "recovered_by": receipt_id,
                     "task_ids": (
-                        sorted(unresolved_scope) if unresolved_scope is not None else None
+                        sorted(unresolved_scope)
+                        if unresolved_scope is not None
+                        else None
                     ),
                     "after": after.to_dict(),
                 },
@@ -670,7 +703,9 @@ def transition_task(
         card_mutation_lock(root, task_id),
         _lifecycle_lock(root, exclusive=True),
     ):
-        cards = {card.id: card for card in KanbanBoard(root).cards(include_archived=True)}
+        cards = {
+            card.id: card for card in KanbanBoard(root).cards(include_archived=True)
+        }
         current = cards.get(task_id)
         if current is None:
             raise ValueError(f"Task {task_id} not found")

@@ -345,7 +345,11 @@ def test_conflicting_duplicate_card_ids_abstain_without_guessing() -> None:
             "lease_active",
         ),
         ({"ready_at": None}, {}, "ready_time_missing"),
-        ({}, {"active_wip": 2, "active_card_ids": ("card-1", "card-2")}, "wip_exhausted"),
+        (
+            {},
+            {"active_wip": 2, "active_card_ids": ("card-1", "card-2")},
+            "wip_exhausted",
+        ),
         ({}, {"active_card_ids": ("already-active",)}, "capacity_conflict"),
         ({}, {"expires_at": AS_OF}, "capacity_stale"),
         ({}, {"capability_state": "unauthorized"}, "executor_capability_unauthorized"),

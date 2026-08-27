@@ -15,6 +15,7 @@ from .discovery_systemd import _FALLBACK_EPHEMERAL, _PROC_RE, _SS_RE
 
 logger = logging.getLogger("skcoord.discovery")
 
+
 def _ephemeral_range(runner: CommandRunner) -> tuple[int, int]:
     """The host's ephemeral port range, read from the host itself.
 
@@ -85,7 +86,9 @@ def collect_listening_ports(runner: CommandRunner) -> list[DiscoveredCI]:
                 node=runner.host,
                 attributes=attributes,
                 tags=("port", DISCOVERED_TAG),
-                relationships=(("runs_on", make_ci_id(CIType.HOST.value, runner.host)),),
+                relationships=(
+                    ("runs_on", make_ci_id(CIType.HOST.value, runner.host)),
+                ),
             )
         )
     if skipped:
@@ -128,7 +131,9 @@ def collect_host_facts(runner: CommandRunner) -> list[DiscoveredCI]:
     if lscpu:
         try:
             rows = json.loads(lscpu).get("lscpu", [])
-            cpu = {str(row.get("field", "")).rstrip(":"): row.get("data") for row in rows}
+            cpu = {
+                str(row.get("field", "")).rstrip(":"): row.get("data") for row in rows
+            }
             for source, target in (
                 ("Socket(s)", "cpu_sockets"),
                 ("Core(s) per socket", "cpu_cores_per_socket"),
@@ -318,11 +323,15 @@ def collect_cron_jobs(runner: CommandRunner) -> list[DiscoveredCI]:
     for scope, text, system in sources:
         if not text:
             continue
-        for schedule, principal, command_name, cron_run_name in _cron_rows(text, system=system):
+        for schedule, principal, command_name, cron_run_name in _cron_rows(
+            text, system=system
+        ):
             fingerprint_parts = [scope, schedule, principal, command_name]
             if cron_run_name:
                 fingerprint_parts.append(cron_run_name)
-            fingerprint = hashlib.sha256("\0".join(fingerprint_parts).encode()).hexdigest()[:16]
+            fingerprint = hashlib.sha256(
+                "\0".join(fingerprint_parts).encode()
+            ).hexdigest()[:16]
             attributes: dict[str, Any] = {
                 "schedule": schedule,
                 "principal": principal,
@@ -343,7 +352,9 @@ def collect_cron_jobs(runner: CommandRunner) -> list[DiscoveredCI]:
                     attributes=attributes,
                     tags=("cronjob", "scheduler", DISCOVERED_TAG),
                     aliases=aliases,
-                    relationships=(("runs_on", make_ci_id(CIType.HOST.value, runner.host)),),
+                    relationships=(
+                        ("runs_on", make_ci_id(CIType.HOST.value, runner.host)),
+                    ),
                 )
             )
     return out
@@ -390,7 +401,9 @@ def collect_network_interfaces(runner: CommandRunner) -> list[DiscoveredCI]:
                 node=runner.host,
                 attributes=attributes,
                 tags=("network-interface", DISCOVERED_TAG),
-                relationships=(("runs_on", make_ci_id(CIType.HOST.value, runner.host)),),
+                relationships=(
+                    ("runs_on", make_ci_id(CIType.HOST.value, runner.host)),
+                ),
             )
         )
     return out

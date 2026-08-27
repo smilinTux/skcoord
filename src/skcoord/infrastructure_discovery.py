@@ -37,16 +37,24 @@ class ProbeTransport(Protocol):
 def normalize_host(value: str) -> str:
     """Return a canonical IP/hostname, rejecting SSH options and ambiguous input."""
     host = value.strip()
-    if not host or host.startswith("-") or any(ord(char) < 33 or ord(char) == 127 for char in host):
+    if (
+        not host
+        or host.startswith("-")
+        or any(ord(char) < 33 or ord(char) == 127 for char in host)
+    ):
         raise ValueError("invalid host")
     try:
         return str(ipaddress.ip_address(host))
     except ValueError:
         host = host.rstrip(".").lower()
         labels = host.split(".")
-        if not labels or len(host) > 253 or any(
-            not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label)
-            for label in labels
+        if (
+            not labels
+            or len(host) > 253
+            or any(
+                not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label)
+                for label in labels
+            )
         ):
             raise ValueError("invalid host") from None
         return host
@@ -86,11 +94,15 @@ def collect_network_fingerprints(
         raise ValueError("discovery limits must be positive (workers <= 64)")
     targets = _network_targets(networks, max_hosts)
     unique_ports = sorted(set(ports))
-    if len(unique_ports) > max_ports or any(not 1 <= port <= 65535 for port in unique_ports):
+    if len(unique_ports) > max_ports or any(
+        not 1 <= port <= 65535 for port in unique_ports
+    ):
         raise ValueError("port scope is invalid or exceeds max_ports")
 
     observations: list[tuple[str, int, ProbeResult]] = []
-    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="cmdb-probe") as pool:
+    with ThreadPoolExecutor(
+        max_workers=workers, thread_name_prefix="cmdb-probe"
+    ) as pool:
         futures = {
             pool.submit(transport.probe, host, port, timeout): (host, port)
             for host in targets
@@ -110,7 +122,9 @@ def collect_network_fingerprints(
         banner = result.banner[:4096]
         attributes: dict[str, Any] = {"port": port, "proto": "tcp", "probe": "connect"}
         if result.service:
-            service = "".join(char for char in result.service if char.isprintable()).strip()
+            service = "".join(
+                char for char in result.service if char.isprintable()
+            ).strip()
             if service:
                 attributes["service_hint"] = service[:80]
         if banner:
@@ -180,7 +194,8 @@ def collect_proxmox_inventory(transport: ProxmoxAPITransport) -> list[Discovered
         raise TypeError("Proxmox transport must expose ProxmoxTransportPolicy")
     out: list[DiscoveredCI] = []
     nodes = sorted(
-        _rows(transport.get("/nodes"), policy.max_rows), key=lambda row: str(row.get("node", ""))
+        _rows(transport.get("/nodes"), policy.max_rows),
+        key=lambda row: str(row.get("node", "")),
     )
     for node in nodes:
         raw_name = str(node.get("node", "")).strip()
@@ -199,13 +214,17 @@ def collect_proxmox_inventory(transport: ProxmoxAPITransport) -> list[Discovered
                 observed=True,
                 node=name,
                 attributes={
-                    k: node[k] for k in ("status", "cpu", "maxcpu", "mem", "maxmem") if k in node
+                    k: node[k]
+                    for k in ("status", "cpu", "maxcpu", "mem", "maxmem")
+                    if k in node
                 },
                 tags=("proxmox", "hypervisor", DISCOVERED_TAG),
             )
         )
         for kind, endpoint in (("qemu", "qemu"), ("lxc", "lxc")):
-            guests = _rows(transport.get(f"/nodes/{node_path}/{endpoint}"), policy.max_rows)
+            guests = _rows(
+                transport.get(f"/nodes/{node_path}/{endpoint}"), policy.max_rows
+            )
             for guest in sorted(guests, key=lambda row: str(row.get("vmid", ""))):
                 vmid = guest.get("vmid")
                 if vmid is None:
@@ -229,7 +248,9 @@ def collect_proxmox_inventory(transport: ProxmoxAPITransport) -> list[Discovered
                         relationships=(("runs_on", node_id),),
                     )
                 )
-        for storage in _rows(transport.get(f"/nodes/{node_path}/storage"), policy.max_rows):
+        for storage in _rows(
+            transport.get(f"/nodes/{node_path}/storage"), policy.max_rows
+        ):
             storage_name = str(storage.get("storage", "")).strip()
             if storage_name:
                 out.append(
@@ -288,7 +309,9 @@ class SKVaultCredentialResolver:
         identity = Path(str(record.get("identity_file", ""))).expanduser()
         known_hosts = Path(str(record.get("known_hosts_file", ""))).expanduser()
         hostname = (
-            normalize_host(str(record["hostname"])) if str(record.get("hostname", "")).strip() else ""
+            normalize_host(str(record["hostname"]))
+            if str(record.get("hostname", "")).strip()
+            else ""
         )
         try:
             port = int(record.get("port", 22))
@@ -302,7 +325,9 @@ class SKVaultCredentialResolver:
             raise ValueError("SSH credential paths must be absolute")
         for path, label in ((identity, "identity"), (known_hosts, "known_hosts")):
             if path.is_symlink() or not path.is_file():
-                raise ValueError(f"SSH {label} must be an existing regular non-symlink file")
+                raise ValueError(
+                    f"SSH {label} must be an existing regular non-symlink file"
+                )
             stat = path.stat()
             if stat.st_uid != os.geteuid():
                 raise ValueError(f"SSH {label} must be owned by the current user")

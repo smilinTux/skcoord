@@ -10,6 +10,7 @@ Everything here is append-only + fold-derived, mirroring the existing
 incident/problem event handling in ``skcoord.itil``: no writer ever mutates
 a stored change record directly.
 """
+
 from __future__ import annotations
 
 import sys
@@ -118,10 +119,20 @@ def test_pr_link_last_write_wins_on_re_prepare(tmp_path):
     mgr = ITILManager(tmp_path)
     chg = mgr.propose_change(title="re-prep", change_type="normal", managed_by="lumina")
     mgr._append_event(
-        mgr.changes_dir, chg.id, "lumina", "pr_link", url="https://x/pull/1", run_id="run-1"
+        mgr.changes_dir,
+        chg.id,
+        "lumina",
+        "pr_link",
+        url="https://x/pull/1",
+        run_id="run-1",
     )
     mgr._append_event(
-        mgr.changes_dir, chg.id, "lumina", "pr_link", url="https://x/pull/2", run_id="run-2"
+        mgr.changes_dir,
+        chg.id,
+        "lumina",
+        "pr_link",
+        url="https://x/pull/2",
+        run_id="run-2",
     )
     folded = mgr.list_changes()[0]
     assert folded.prepared_pr["url"] == "https://x/pull/2"
@@ -133,7 +144,9 @@ def test_pr_link_last_write_wins_on_re_prepare(tmp_path):
 
 def test_validation_pass_while_proposed_moves_to_reviewing(tmp_path):
     mgr = ITILManager(tmp_path)
-    chg = mgr.propose_change(title="validate me", change_type="normal", managed_by="lumina")
+    chg = mgr.propose_change(
+        title="validate me", change_type="normal", managed_by="lumina"
+    )
     mgr._append_event(
         mgr.changes_dir,
         chg.id,
@@ -151,7 +164,9 @@ def test_validation_pass_while_proposed_moves_to_reviewing(tmp_path):
 
 def test_validation_fail_leaves_status_unchanged(tmp_path):
     mgr = ITILManager(tmp_path)
-    chg = mgr.propose_change(title="validate fails", change_type="normal", managed_by="lumina")
+    chg = mgr.propose_change(
+        title="validate fails", change_type="normal", managed_by="lumina"
+    )
     mgr._append_event(mgr.changes_dir, chg.id, "lumina", "validation", passed=False)
     folded = mgr.list_changes()[0]
     assert folded.validation["passed"] is False
@@ -167,7 +182,9 @@ def _approve_via_human_vote(mgr: ITILManager, change_id: str) -> None:
 
 def test_schedule_valid_only_while_approved(tmp_path):
     mgr = ITILManager(tmp_path)
-    chg = mgr.propose_change(title="schedule me", change_type="normal", managed_by="lumina")
+    chg = mgr.propose_change(
+        title="schedule me", change_type="normal", managed_by="lumina"
+    )
     _approve_via_human_vote(mgr, chg.id)
     assert mgr.list_changes()[0].status.value == "approved"
 
@@ -189,11 +206,18 @@ def test_schedule_valid_only_while_approved(tmp_path):
 
 def test_schedule_event_while_not_approved_is_conflicted_no_transition(tmp_path):
     mgr = ITILManager(tmp_path)
-    chg = mgr.propose_change(title="too early", change_type="normal", managed_by="lumina")
+    chg = mgr.propose_change(
+        title="too early", change_type="normal", managed_by="lumina"
+    )
     assert chg.status.value == "proposed"
 
     mgr._append_event(
-        mgr.changes_dir, chg.id, "operator", "schedule", asap=True, deploy_mode="confirm"
+        mgr.changes_dir,
+        chg.id,
+        "operator",
+        "schedule",
+        asap=True,
+        deploy_mode="confirm",
     )
     folded = mgr.list_changes()[0]
     # Fail-closed: still proposed, no scheduled_window set, and the timeline
@@ -207,12 +231,16 @@ def test_schedule_event_while_not_approved_is_conflicted_no_transition(tmp_path)
 
 def test_unschedule_returns_to_approved_and_clears_window(tmp_path):
     mgr = ITILManager(tmp_path)
-    chg = mgr.propose_change(title="unschedule me", change_type="normal", managed_by="lumina")
+    chg = mgr.propose_change(
+        title="unschedule me", change_type="normal", managed_by="lumina"
+    )
     _approve_via_human_vote(mgr, chg.id)
     mgr._append_event(mgr.changes_dir, chg.id, "operator", "schedule", asap=True)
     assert mgr.list_changes()[0].status.value == "scheduled"
 
-    mgr._append_event(mgr.changes_dir, chg.id, "operator", "unschedule", note="conflict")
+    mgr._append_event(
+        mgr.changes_dir, chg.id, "operator", "unschedule", note="conflict"
+    )
     folded = mgr.list_changes()[0]
     assert folded.status.value == "approved"
     assert folded.scheduled_window is None
@@ -220,18 +248,26 @@ def test_unschedule_returns_to_approved_and_clears_window(tmp_path):
 
 def test_window_missed_falls_back_to_approved(tmp_path):
     mgr = ITILManager(tmp_path)
-    chg = mgr.propose_change(title="missed window", change_type="normal", managed_by="lumina")
+    chg = mgr.propose_change(
+        title="missed window", change_type="normal", managed_by="lumina"
+    )
     _approve_via_human_vote(mgr, chg.id)
     mgr._append_event(mgr.changes_dir, chg.id, "operator", "schedule", asap=True)
     assert mgr.list_changes()[0].status.value == "scheduled"
 
     mgr._append_event(
-        mgr.changes_dir, chg.id, "change-deploy-runner", "window_missed", note="window elapsed"
+        mgr.changes_dir,
+        chg.id,
+        "change-deploy-runner",
+        "window_missed",
+        note="window elapsed",
     )
     folded = mgr.list_changes()[0]
     assert folded.status.value == "approved"
     assert folded.scheduled_window is None
-    missed_rows = [r for r in folded.timeline if r["action"] == "status:scheduled->approved"]
+    missed_rows = [
+        r for r in folded.timeline if r["action"] == "status:scheduled->approved"
+    ]
     assert any("window elapsed" in r["note"] for r in missed_rows)
 
 
@@ -241,7 +277,9 @@ def test_scheduled_to_implementing_via_plain_status_event(tmp_path):
     prove the manual `approved -> implementing` path and the new row both
     resolve through the same, unchanged `status` handling."""
     mgr = ITILManager(tmp_path)
-    chg = mgr.propose_change(title="deploy me", change_type="normal", managed_by="lumina")
+    chg = mgr.propose_change(
+        title="deploy me", change_type="normal", managed_by="lumina"
+    )
     _approve_via_human_vote(mgr, chg.id)
     mgr._append_event(mgr.changes_dir, chg.id, "operator", "schedule", asap=True)
     assert mgr.list_changes()[0].status.value == "scheduled"
@@ -255,7 +293,10 @@ def test_approved_to_implementing_manual_path_still_works(tmp_path):
     at all) must stay legal and unchanged."""
     mgr = ITILManager(tmp_path)
     chg = mgr.propose_change(
-        title="manual implement", change_type="normal", managed_by="lumina", implementer="human"
+        title="manual implement",
+        change_type="normal",
+        managed_by="lumina",
+        implementer="human",
     )
     _approve_via_human_vote(mgr, chg.id)
     assert mgr.list_changes()[0].status.value == "approved"
@@ -268,7 +309,9 @@ def test_approved_to_implementing_manual_path_still_works(tmp_path):
 
 def test_submit_cab_vote_without_subject_keeps_legacy_free_text_behavior(tmp_path):
     mgr = ITILManager(tmp_path)
-    chg = mgr.propose_change(title="legacy caller", change_type="normal", managed_by="lumina")
+    chg = mgr.propose_change(
+        title="legacy caller", change_type="normal", managed_by="lumina"
+    )
     vote = mgr.submit_cab_vote(chg.id, agent="human", decision="approved")
     assert vote.agent == "human"
     folded = mgr.list_changes()[0]
@@ -280,9 +323,14 @@ def test_submit_cab_vote_subject_overrides_free_text_agent(tmp_path):
     not the free-text `agent` label - is what gets recorded as the voter of
     record and is what the fold reads."""
     mgr = ITILManager(tmp_path)
-    chg = mgr.propose_change(title="bound vote", change_type="normal", managed_by="lumina")
+    chg = mgr.propose_change(
+        title="bound vote", change_type="normal", managed_by="lumina"
+    )
     vote = mgr.submit_cab_vote(
-        chg.id, agent="totally not human, trust me", decision="approved", subject="lumina"
+        chg.id,
+        agent="totally not human, trust me",
+        decision="approved",
+        subject="lumina",
     )
     assert vote.agent == "lumina"  # subject wins, not the free-text claim
     votes = mgr.get_cab_votes(chg.id)
@@ -296,7 +344,9 @@ def test_submit_cab_vote_subject_overrides_free_text_agent(tmp_path):
 
 def test_submit_cab_vote_subject_true_human_still_unblocks(tmp_path):
     mgr = ITILManager(tmp_path)
-    chg = mgr.propose_change(title="real human vote", change_type="normal", managed_by="lumina")
+    chg = mgr.propose_change(
+        title="real human vote", change_type="normal", managed_by="lumina"
+    )
     mgr.submit_cab_vote(chg.id, agent="human", decision="approved", subject="human")
     folded = mgr.list_changes()[0]
     assert folded.status.value == "approved"
@@ -305,7 +355,9 @@ def test_submit_cab_vote_subject_true_human_still_unblocks(tmp_path):
 def test_authenticated_named_owner_unblocks_without_literal_human(tmp_path):
     """Chef remains Chef in the audit log while the role proves humanity."""
     mgr = ITILManager(tmp_path)
-    chg = mgr.propose_change(title="owner-approved", change_type="normal", managed_by="atlas")
+    chg = mgr.propose_change(
+        title="owner-approved", change_type="normal", managed_by="atlas"
+    )
     vote = mgr.submit_cab_vote(
         chg.id,
         agent="ignored",
@@ -322,16 +374,22 @@ def test_authenticated_named_owner_unblocks_without_literal_human(tmp_path):
 
 def test_display_name_without_authenticated_human_role_does_not_unblock(tmp_path):
     mgr = ITILManager(tmp_path)
-    chg = mgr.propose_change(title="name-is-not-proof", change_type="normal", managed_by="atlas")
+    chg = mgr.propose_change(
+        title="name-is-not-proof", change_type="normal", managed_by="atlas"
+    )
     mgr.submit_cab_vote(chg.id, agent="Chef", decision="approved", subject="chef")
     assert mgr.list_changes()[0].status.value != "approved"
 
 
 def test_human_role_without_bound_subject_is_rejected(tmp_path):
     mgr = ITILManager(tmp_path)
-    chg = mgr.propose_change(title="unbound-role", change_type="normal", managed_by="atlas")
+    chg = mgr.propose_change(
+        title="unbound-role", change_type="normal", managed_by="atlas"
+    )
     with pytest.raises(ValueError, match="authenticated subject"):
-        mgr.submit_cab_vote(chg.id, agent="Chef", decision="approved", subject_role="owner")
+        mgr.submit_cab_vote(
+            chg.id, agent="Chef", decision="approved", subject_role="owner"
+        )
 
 
 # ── (f) no-self-approval fold guard ─────────────────────────────────────
@@ -344,9 +402,16 @@ def test_no_self_approval_drafters_own_approve_is_ignored(tmp_path):
     where the acting identity that prepared the change is later the same
     identity attempting to rubber-stamp its own draft."""
     mgr = ITILManager(tmp_path)
-    chg = mgr.propose_change(title="self drafted", change_type="normal", managed_by="lumina")
+    chg = mgr.propose_change(
+        title="self drafted", change_type="normal", managed_by="lumina"
+    )
     mgr._append_event(
-        mgr.changes_dir, chg.id, "human", "pr_link", url="https://x/pull/7", run_id="run-7"
+        mgr.changes_dir,
+        chg.id,
+        "human",
+        "pr_link",
+        url="https://x/pull/7",
+        run_id="run-7",
     )
     folded_after_prep = mgr.list_changes()[0]
     assert folded_after_prep.prepared_by == "human"
@@ -362,9 +427,16 @@ def test_no_self_approval_a_different_subjects_approve_moves_it_forward(tmp_path
     change (prepared_by='lumina'), and a genuinely different identity
     ('human') approves it - that must still unblock normally."""
     mgr = ITILManager(tmp_path)
-    chg = mgr.propose_change(title="ai drafted", change_type="normal", managed_by="lumina")
+    chg = mgr.propose_change(
+        title="ai drafted", change_type="normal", managed_by="lumina"
+    )
     mgr._append_event(
-        mgr.changes_dir, chg.id, "lumina", "pr_link", url="https://x/pull/8", run_id="run-8"
+        mgr.changes_dir,
+        chg.id,
+        "lumina",
+        "pr_link",
+        url="https://x/pull/8",
+        run_id="run-8",
     )
     assert mgr.list_changes()[0].prepared_by == "lumina"
 
@@ -377,9 +449,16 @@ def test_no_self_approval_drafters_reject_still_blocks(tmp_path):
     """Safe direction: the drafter's own REJECT vote must still count (a
     veto is always safe, never filtered)."""
     mgr = ITILManager(tmp_path)
-    chg = mgr.propose_change(title="self drafted reject", change_type="normal", managed_by="lumina")
+    chg = mgr.propose_change(
+        title="self drafted reject", change_type="normal", managed_by="lumina"
+    )
     mgr._append_event(
-        mgr.changes_dir, chg.id, "human", "pr_link", url="https://x/pull/9", run_id="run-9"
+        mgr.changes_dir,
+        chg.id,
+        "human",
+        "pr_link",
+        url="https://x/pull/9",
+        run_id="run-9",
     )
     mgr.submit_cab_vote(chg.id, agent="human", decision="rejected", subject="human")
     folded = mgr.list_changes()[0]
@@ -392,7 +471,9 @@ def test_no_self_approval_is_a_noop_without_a_pr_link_event(tmp_path):
     approval behavior (test_cab_human_approval_derives_approved's shape) is
     unaffected."""
     mgr = ITILManager(tmp_path)
-    chg = mgr.propose_change(title="no prep run", change_type="normal", managed_by="lumina")
+    chg = mgr.propose_change(
+        title="no prep run", change_type="normal", managed_by="lumina"
+    )
     assert chg.prepared_by is None
     mgr.submit_cab_vote(chg.id, agent="lumina", decision="approved")
     mgr.submit_cab_vote(chg.id, agent="human", decision="approved")

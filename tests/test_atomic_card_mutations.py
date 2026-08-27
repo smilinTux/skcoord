@@ -11,7 +11,9 @@ from skcoord.coordination import Board, Task
 
 
 def _add(home: str) -> bool:
-    return add_dependency(home, "a1e20001", "b2e20002", agent="worker", reason="concurrency test")
+    return add_dependency(
+        home, "a1e20001", "b2e20002", agent="worker", reason="concurrency test"
+    )
 
 
 def _release(home: str) -> bool:
@@ -48,7 +50,9 @@ def test_eight_identical_releases_append_one_transition(tmp_path) -> None:
     assert [e["action"] for e in events] == ["release_claim"]
 
 
-def test_release_store_failure_restores_legacy_projection(tmp_path, monkeypatch) -> None:
+def test_release_store_failure_restores_legacy_projection(
+    tmp_path, monkeypatch
+) -> None:
     board = Board(tmp_path)
     board.create_task(Task(id="a1e40001", title="target"))
     board.claim_task("probe", "a1e40001")
@@ -62,7 +66,9 @@ def test_release_store_failure_restores_legacy_projection(tmp_path, monkeypatch)
     assert "a1e40001" in board.load_agent("probe").claimed_tasks
 
 
-def test_release_legacy_failure_writes_no_store_transition(tmp_path, monkeypatch) -> None:
+def test_release_legacy_failure_writes_no_store_transition(
+    tmp_path, monkeypatch
+) -> None:
     board = Board(tmp_path)
     board.create_task(Task(id="a1e50001", title="target"))
     board.claim_task("probe", "a1e50001")
@@ -78,4 +84,8 @@ def test_release_legacy_failure_writes_no_store_transition(tmp_path, monkeypatch
     monkeypatch.setattr(board, "save_agent", fail_release)
     with pytest.raises(OSError, match="legacy failed"):
         board.release_claim("probe", "a1e50001", actor="repair")
-    assert not [e for e in CardStore(tmp_path)._read_events("a1e50001") if e.get("released_owner")]
+    assert not [
+        e
+        for e in CardStore(tmp_path)._read_events("a1e50001")
+        if e.get("released_owner")
+    ]

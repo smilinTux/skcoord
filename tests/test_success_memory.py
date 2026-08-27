@@ -8,6 +8,7 @@ and wipes ``meta.autopilot.attempts[]`` wholesale, so successes cannot live ther
 This file proves ``record_success`` writes to the sibling key ``successes[]`` and
 that ``clear_attempts`` never touches it.
 """
+
 from __future__ import annotations
 
 from skcoord.coordination import Board, Task
@@ -33,10 +34,15 @@ def test_record_success_appends_the_distilled_entry(tmp_path):
     board = Board(tmp_path)
     tid = _card(board)
 
-    board.record_success(tid, run_id="r1", round=2, outcome="pass",
-                         tried="rewrote the parser",
-                         why_succeeded="twin gate closed: CI green, coverage 0.95",
-                         approach_hint="raise in the empty branch")
+    board.record_success(
+        tid,
+        run_id="r1",
+        round=2,
+        outcome="pass",
+        tried="rewrote the parser",
+        why_succeeded="twin gate closed: CI green, coverage 0.95",
+        approach_hint="raise in the empty branch",
+    )
 
     (entry,) = _successes(board, tid)
     assert entry["run_id"] == "r1"
@@ -52,8 +58,14 @@ def test_record_success_defaults_approach_hint_to_empty(tmp_path):
     board = Board(tmp_path)
     tid = _card(board)
 
-    board.record_success(tid, run_id="r1", round=1, outcome="pass",
-                         tried="something", why_succeeded="twin gate closed")
+    board.record_success(
+        tid,
+        run_id="r1",
+        round=1,
+        outcome="pass",
+        tried="something",
+        why_succeeded="twin gate closed",
+    )
 
     assert _successes(board, tid)[0]["approach_hint"] == ""
 
@@ -62,10 +74,22 @@ def test_record_success_replaces_in_place_on_same_run_and_outcome(tmp_path):
     board = Board(tmp_path)
     tid = _card(board)
 
-    board.record_success(tid, run_id="r1", round=1, outcome="pass",
-                         tried="first", why_succeeded="first reason")
-    board.record_success(tid, run_id="r1", round=2, outcome="pass",
-                         tried="second", why_succeeded="second reason")
+    board.record_success(
+        tid,
+        run_id="r1",
+        round=1,
+        outcome="pass",
+        tried="first",
+        why_succeeded="first reason",
+    )
+    board.record_success(
+        tid,
+        run_id="r1",
+        round=2,
+        outcome="pass",
+        tried="second",
+        why_succeeded="second reason",
+    )
 
     entries = _successes(board, tid)
     assert len(entries) == 1
@@ -77,10 +101,12 @@ def test_record_success_appends_on_a_distinct_key(tmp_path):
     board = Board(tmp_path)
     tid = _card(board)
 
-    board.record_success(tid, run_id="r1", round=1, outcome="pass",
-                         tried="a", why_succeeded="a")
-    board.record_success(tid, run_id="r2", round=1, outcome="pass",
-                         tried="c", why_succeeded="c")        # other run, same outcome
+    board.record_success(
+        tid, run_id="r1", round=1, outcome="pass", tried="a", why_succeeded="a"
+    )
+    board.record_success(
+        tid, run_id="r2", round=1, outcome="pass", tried="c", why_succeeded="c"
+    )  # other run, same outcome
 
     assert len(_successes(board, tid)) == 2
 
@@ -91,12 +117,18 @@ def test_record_success_caps_storage_at_ten_keeping_newest(tmp_path):
     tid = _card(board)
 
     for i in range(12):
-        board.record_success(tid, run_id=f"r{i}", round=1, outcome="pass",
-                             tried=f"try {i}", why_succeeded=f"reason {i}")
+        board.record_success(
+            tid,
+            run_id=f"r{i}",
+            round=1,
+            outcome="pass",
+            tried=f"try {i}",
+            why_succeeded=f"reason {i}",
+        )
 
     entries = _successes(board, tid)
     assert len(entries) == 10
-    assert entries[0]["why_succeeded"] == "reason 2"      # oldest two dropped
+    assert entries[0]["why_succeeded"] == "reason 2"  # oldest two dropped
     assert entries[-1]["why_succeeded"] == "reason 11"
 
 
@@ -106,8 +138,14 @@ def test_record_success_builds_the_meta_chain_on_a_thin_card(tmp_path):
     tid = _card(board)
     board._write_task_raw(tid, lambda d: d.pop("meta", None))
 
-    board.record_success(tid, run_id="r1", round=1, outcome="pass",
-                         tried="one round", why_succeeded="twin gate closed")
+    board.record_success(
+        tid,
+        run_id="r1",
+        round=1,
+        outcome="pass",
+        tried="one round",
+        why_succeeded="twin gate closed",
+    )
 
     assert len(_successes(board, tid)) == 1
 
@@ -117,11 +155,13 @@ def test_record_success_does_not_clobber_sibling_autopilot_keys(tmp_path):
     board = Board(tmp_path)
     tid = _card(board)
     board.score_task(tid, round=1, score=5, notes="done", harness="claude")
-    board.record_attempt(tid, run_id="r0", round=1, outcome="ci_red",
-                         tried="a", why_failed="b")
+    board.record_attempt(
+        tid, run_id="r0", round=1, outcome="ci_red", tried="a", why_failed="b"
+    )
 
-    board.record_success(tid, run_id="r1", round=2, outcome="pass",
-                         tried="c", why_succeeded="d")
+    board.record_success(
+        tid, run_id="r1", round=2, outcome="pass", tried="c", why_succeeded="d"
+    )
 
     task = next(t for t in board.load_tasks() if t.id == tid)
     ap = (task.meta or {})["autopilot"]
@@ -132,6 +172,7 @@ def test_record_success_does_not_clobber_sibling_autopilot_keys(tmp_path):
 
 # -- the load-bearing property: clear_attempts must NEVER touch successes[] ---
 
+
 def test_clear_attempts_does_not_destroy_a_recorded_success(tmp_path):
     """THE TRAP. A success recorded in the same breath as a pass must survive the
     clear_attempts call that same pass triggers (EngineeringExecutor._archive_attempts
@@ -139,24 +180,39 @@ def test_clear_attempts_does_not_destroy_a_recorded_success(tmp_path):
     this would be destroyed by the very event that created it."""
     board = Board(tmp_path)
     tid = _card(board)
-    board.record_attempt(tid, run_id="r0", round=1, outcome="ci_red",
-                         tried="a", why_failed="stale failure")
-    board.record_success(tid, run_id="r1", round=2, outcome="pass",
-                         tried="rewrote the parser", why_succeeded="twin gate closed")
+    board.record_attempt(
+        tid,
+        run_id="r0",
+        round=1,
+        outcome="ci_red",
+        tried="a",
+        why_failed="stale failure",
+    )
+    board.record_success(
+        tid,
+        run_id="r1",
+        round=2,
+        outcome="pass",
+        tried="rewrote the parser",
+        why_succeeded="twin gate closed",
+    )
 
     removed = board.clear_attempts(tid)
 
     assert [e["why_failed"] for e in removed] == ["stale failure"]
-    assert _attempts(board, tid) == []                      # attempts cleared, as before
-    assert len(_successes(board, tid)) == 1                 # success SURVIVES
+    assert _attempts(board, tid) == []  # attempts cleared, as before
+    assert len(_successes(board, tid)) == 1  # success SURVIVES
     assert _successes(board, tid)[0]["why_succeeded"] == "twin gate closed"
 
 
-def test_clear_attempts_on_a_card_with_no_attempts_still_returns_empty_with_a_success_present(tmp_path):
+def test_clear_attempts_on_a_card_with_no_attempts_still_returns_empty_with_a_success_present(
+    tmp_path,
+):
     board = Board(tmp_path)
     tid = _card(board)
-    board.record_success(tid, run_id="r1", round=1, outcome="pass",
-                         tried="a", why_succeeded="b")
+    board.record_success(
+        tid, run_id="r1", round=1, outcome="pass", tried="a", why_succeeded="b"
+    )
 
     assert board.clear_attempts(tid) == []
     assert len(_successes(board, tid)) == 1

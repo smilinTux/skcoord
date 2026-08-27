@@ -76,8 +76,14 @@ def _entry_facts(values: dict) -> dict:
         "acting_principal_id": values["acting_principal_id"],
         "node_id": values["node_id"],
         "scope": values["scope"].model_dump(mode="json"),
-        "valid_from": values["valid_from"].astimezone(UTC).isoformat().replace("+00:00", "Z"),
-        "expires_at": values["expires_at"].astimezone(UTC).isoformat().replace("+00:00", "Z"),
+        "valid_from": values["valid_from"]
+        .astimezone(UTC)
+        .isoformat()
+        .replace("+00:00", "Z"),
+        "expires_at": values["expires_at"]
+        .astimezone(UTC)
+        .isoformat()
+        .replace("+00:00", "Z"),
         "visible_card_ids": list(values["visible_card_ids"]),
         "visible_absent_ids": list(values["visible_absent_ids"]),
         "field_mask": list(values["field_mask"]),
@@ -105,7 +111,9 @@ class AuthorizedCardPolicyEntryV1(_Contract):
     @field_validator("visible_card_ids", "visible_absent_ids")
     @classmethod
     def canonical_ids(cls, values: tuple[str, ...]) -> tuple[str, ...]:
-        if tuple(sorted(set(values))) != values or any(not _identifier(value) for value in values):
+        if tuple(sorted(set(values))) != values or any(
+            not _identifier(value) for value in values
+        ):
             raise ValueError("policy identifiers must be sorted and unique")
         return values
 
@@ -119,7 +127,9 @@ class AuthorizedCardPolicyEntryV1(_Contract):
     @field_validator("field_mask")
     @classmethod
     def canonical_mask(cls, values: tuple[str, ...]) -> tuple[str, ...]:
-        if tuple(sorted(set(values))) != values or not set(values) <= set(FIELD_MASK_VALUES):
+        if tuple(sorted(set(values))) != values or not set(values) <= set(
+            FIELD_MASK_VALUES
+        ):
             raise ValueError("policy field mask is not canonical")
         return values
 
@@ -132,13 +142,20 @@ class AuthorizedCardPolicyEntryV1(_Contract):
 
     @model_validator(mode="after")
     def exact_bindings(self) -> "AuthorizedCardPolicyEntryV1":
-        if self.valid_from.tzinfo is None or self.valid_from.utcoffset() != timedelta(0):
+        if self.valid_from.tzinfo is None or self.valid_from.utcoffset() != timedelta(
+            0
+        ):
             raise ValueError("policy valid_from must use UTC offset zero")
-        if self.expires_at.tzinfo is None or self.expires_at.utcoffset() != timedelta(0):
+        if self.expires_at.tzinfo is None or self.expires_at.utcoffset() != timedelta(
+            0
+        ):
             raise ValueError("policy expires_at must use UTC offset zero")
         if self.valid_from >= self.expires_at:
             raise ValueError("policy validity interval is empty")
-        if len(self.visible_card_ids) + len(self.visible_absent_ids) > MAX_VISIBLE_RECORDS:
+        if (
+            len(self.visible_card_ids) + len(self.visible_absent_ids)
+            > MAX_VISIBLE_RECORDS
+        ):
             raise ValueError("policy population exceeds the safe cap")
         if set(self.visible_card_ids) & set(self.visible_absent_ids):
             raise ValueError("visible and absent policy identifiers overlap")
@@ -294,7 +311,9 @@ class AuthorizedCardPolicyDocumentV1(_Contract):
     """Bounded durable owner-policy document loaded as one immutable value."""
 
     schema_version: Literal["1.0.0"] = "1.0.0"
-    entries: tuple[AuthorizedCardPolicyEntryV1, ...] = Field(max_length=MAX_POLICY_ENTRIES)
+    entries: tuple[AuthorizedCardPolicyEntryV1, ...] = Field(
+        max_length=MAX_POLICY_ENTRIES
+    )
 
     @model_validator(mode="after")
     def unique_selections(self) -> "AuthorizedCardPolicyDocumentV1":
@@ -434,7 +453,9 @@ class FileAuthorizedCardPolicyBackend:
             ):
                 raise ValueError("owner policy directory is unsafe")
             listed = os.stat(path.name, dir_fd=directory_fd, follow_symlinks=False)
-            descriptor = os.open(path.name, os.O_RDONLY | no_follow, dir_fd=directory_fd)
+            descriptor = os.open(
+                path.name, os.O_RDONLY | no_follow, dir_fd=directory_fd
+            )
             opened = os.fstat(descriptor)
             identity = _safe_policy_identity(listed, opened, self._expected_uid)
             if opened.st_size > MAX_POLICY_DOCUMENT_BYTES:
@@ -456,7 +477,9 @@ class FileAuthorizedCardPolicyBackend:
             ):
                 raise ValueError("owner policy changed during load")
             parsed = json.loads(bytes(payload), object_pairs_hook=_unique_json_object)
-            document = AuthorizedCardPolicyDocumentV1.model_validate_json(_canonical_bytes(parsed))
+            document = AuthorizedCardPolicyDocumentV1.model_validate_json(
+                _canonical_bytes(parsed)
+            )
             return document, identity
         finally:
             if descriptor >= 0:
@@ -558,7 +581,10 @@ class AuthorizedCardPolicyProvider:
             )
             if validated != context:
                 return denied
-            if currentness_verifier.check_before_owner_read(context) is not DecisionState.ALLOW:
+            if (
+                currentness_verifier.check_before_owner_read(context)
+                is not DecisionState.ALLOW
+            ):
                 return denied
             binding = context.binding
             capauth = context.capauth_decision
@@ -620,7 +646,9 @@ class AuthorizedCardPolicyProvider:
                     return denied
                 reader = AuthorizedCardSnapshotReader(
                     Path(home),
-                    lambda candidate: decision if candidate == request else (_raise_policy()),
+                    lambda candidate: (
+                        decision if candidate == request else (_raise_policy())
+                    ),
                     store_factory=self._store_factory,
                 )
                 result = reader.read(request, now=before_read)
@@ -636,7 +664,10 @@ class AuthorizedCardPolicyProvider:
                 entry.owner_policy_revision,
                 read_current,
             )
-            if currentness_verifier.check_after_owner_read(context) is not DecisionState.ALLOW:
+            if (
+                currentness_verifier.check_after_owner_read(context)
+                is not DecisionState.ALLOW
+            ):
                 return denied
             return result if isinstance(result, dict) else denied
         except Exception:

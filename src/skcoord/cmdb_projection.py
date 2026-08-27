@@ -36,7 +36,9 @@ class ProjectionSink(Protocol):
 class ProjectionCheckpointStore(Protocol):
     """Durable record of the last snapshot accepted by the complete pipeline."""
 
-    def commit(self, checkpoint: str, item_count: int, sinks: Sequence[str]) -> None: ...
+    def commit(
+        self, checkpoint: str, item_count: int, sinks: Sequence[str]
+    ) -> None: ...
 
 
 @dataclass(frozen=True)
@@ -59,7 +61,8 @@ class JsonProjectionSink:
         }
         atomic_write_text(
             self.path,
-            json.dumps(document, indent=2, sort_keys=True, separators=(",", ": ")) + "\n",
+            json.dumps(document, indent=2, sort_keys=True, separators=(",", ": "))
+            + "\n",
         )
 
 
@@ -77,7 +80,9 @@ class JsonCheckpointStore:
             "item_count": item_count,
             "sinks": list(sinks),
         }
-        atomic_write_text(self.path, json.dumps(document, indent=2, sort_keys=True) + "\n")
+        atomic_write_text(
+            self.path, json.dumps(document, indent=2, sort_keys=True) + "\n"
+        )
 
     def load(self) -> dict[str, Any] | None:
         """Return the committed checkpoint, or ``None`` before the first run."""
@@ -114,7 +119,8 @@ class AgeProjectionSink:
 def build_snapshot(manager: CMDBManager) -> ProjectionSnapshot:
     """Build a deterministic, JSON-safe snapshot from the canonical fold."""
     items = tuple(
-        ci.model_dump(mode="json") for ci in sorted(manager.list_cis(), key=lambda item: item.id)
+        ci.model_dump(mode="json")
+        for ci in sorted(manager.list_cis(), key=lambda item: item.id)
     )
     payload = json.dumps(items, sort_keys=True, separators=(",", ":"))
     return ProjectionSnapshot(
@@ -147,10 +153,15 @@ def project(
             committed_checkpoint = snapshot.checkpoint
         else:
             try:
-                checkpoint_store.commit(snapshot.checkpoint, len(snapshot.items), completed)
+                checkpoint_store.commit(
+                    snapshot.checkpoint, len(snapshot.items), completed
+                )
             except Exception as exc:
                 failures.append(
-                    {"sink": type(checkpoint_store).__name__, "error": type(exc).__name__}
+                    {
+                        "sink": type(checkpoint_store).__name__,
+                        "error": type(exc).__name__,
+                    }
                 )
             else:
                 committed_checkpoint = snapshot.checkpoint

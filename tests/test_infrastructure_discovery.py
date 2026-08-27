@@ -26,7 +26,9 @@ class FixtureProbe:
         with self.lock:
             self.calls.append((host, port, timeout))
         if (host, port) == ("192.0.2.1", 22):
-            return ProbeResult(banner=b"SSH-2.0-fixture-secret-looking-banner", service="ssh\nspoof")
+            return ProbeResult(
+                banner=b"SSH-2.0-fixture-secret-looking-banner", service="ssh\nspoof"
+            )
         if port == 443:
             return ProbeResult(service="tls")
         return None
@@ -38,11 +40,17 @@ def test_network_collector_is_bounded_deterministic_and_drops_raw_banners() -> N
         ["192.0.2.0/30"], [443, 22, 443], transport, workers=2, timeout=0.25
     )
 
-    assert [ci.name for ci in found] == ["192.0.2.1:22", "192.0.2.1:443", "192.0.2.2:443"]
+    assert [ci.name for ci in found] == [
+        "192.0.2.1:22",
+        "192.0.2.1:443",
+        "192.0.2.2:443",
+    ]
     assert len(transport.calls) == 4
     ssh = found[0]
     assert ssh.observed and ssh.attributes["service_hint"] == "sshspoof"
-    assert ssh.attributes["banner_bytes"] == len(b"SSH-2.0-fixture-secret-looking-banner")
+    assert ssh.attributes["banner_bytes"] == len(
+        b"SSH-2.0-fixture-secret-looking-banner"
+    )
     assert ssh.attributes["banner_bytes_hashed"] == ssh.attributes["banner_bytes"]
     assert not ssh.attributes["banner_truncated"]
     assert "banner" not in ssh.attributes
@@ -61,7 +69,9 @@ def test_network_collector_rejects_bad_limits_and_ports() -> None:
     with pytest.raises(ValueError):
         collect_network_fingerprints(["192.0.2.1/32"], [0], transport)
     with pytest.raises(ValueError):
-        collect_network_fingerprints(["192.0.2.1/32"], range(1, 40), transport, max_ports=4)
+        collect_network_fingerprints(
+            ["192.0.2.1/32"], range(1, 40), transport, max_ports=4
+        )
     assert transport.calls == []
 
 
@@ -71,8 +81,12 @@ class FixtureProxmox:
         self.calls: list[str] = []
         self.data = {
             "/nodes": {"data": [{"node": "pve1", "status": "online", "maxcpu": 16}]},
-            "/nodes/pve1/qemu": {"data": [{"vmid": 101, "name": "api-vm", "status": "running"}]},
-            "/nodes/pve1/lxc": {"data": [{"vmid": 202, "name": "worker-ct", "status": "stopped"}]},
+            "/nodes/pve1/qemu": {
+                "data": [{"vmid": 101, "name": "api-vm", "status": "running"}]
+            },
+            "/nodes/pve1/lxc": {
+                "data": [{"vmid": 202, "name": "worker-ct", "status": "stopped"}]
+            },
             "/nodes/pve1/storage": {
                 "data": [{"storage": "local-zfs", "type": "zfspool", "active": 1}]
             },
@@ -87,7 +101,12 @@ def test_proxmox_collector_uses_injected_transport_and_builds_relationships() ->
     api = FixtureProxmox()
     found = collect_proxmox_inventory(api)
 
-    assert api.calls == ["/nodes", "/nodes/pve1/qemu", "/nodes/pve1/lxc", "/nodes/pve1/storage"]
+    assert api.calls == [
+        "/nodes",
+        "/nodes/pve1/qemu",
+        "/nodes/pve1/lxc",
+        "/nodes/pve1/storage",
+    ]
     assert {(ci.ci_type, ci.name) for ci in found} == {
         (CIType.HOST.value, "pve1"),
         (CIType.HOST.value, "api-vm"),
@@ -95,8 +114,13 @@ def test_proxmox_collector_uses_injected_transport_and_builds_relationships() ->
         (CIType.DATASTORE.value, "pve1:local-zfs"),
     }
     parent = make_ci_id(CIType.HOST.value, "pve1")
-    assert all(("runs_on", parent) in ci.relationships for ci in found if ci.name != "pve1")
-    assert next(ci for ci in found if ci.name == "api-vm").attributes["virtualization"] == "qemu"
+    assert all(
+        ("runs_on", parent) in ci.relationships for ci in found if ci.name != "pve1"
+    )
+    assert (
+        next(ci for ci in found if ci.name == "api-vm").attributes["virtualization"]
+        == "qemu"
+    )
 
 
 def test_proxmox_collector_requires_policy_and_bounds_responses() -> None:
@@ -109,7 +133,9 @@ def test_proxmox_collector_requires_policy_and_bounds_responses() -> None:
         ProxmoxTransportPolicy(tls_verified=False)
 
 
-@pytest.mark.parametrize("value", ["-oProxyCommand=evil", "bad host", "host\nname", "a..b"])
+@pytest.mark.parametrize(
+    "value", ["-oProxyCommand=evil", "bad host", "host\nname", "a..b"]
+)
 def test_normalize_host_rejects_ambiguous_or_option_values(value: str) -> None:
     with pytest.raises(ValueError, match="host"):
         normalize_host(value)
@@ -196,7 +222,9 @@ def test_vault_resolver_rejects_inline_secrets_and_unsafe_metadata(record) -> No
         SKVaultCredentialResolver(FixtureVault(record)).resolve("skvault://cmdb/test")
 
 
-def test_vault_resolver_rejects_non_vault_references_without_calling_transport() -> None:
+def test_vault_resolver_rejects_non_vault_references_without_calling_transport() -> (
+    None
+):
     vault = FixtureVault({})
     with pytest.raises(ValueError, match="skvault"):
         SKVaultCredentialResolver(vault).resolve("env://PASSWORD")
@@ -222,7 +250,9 @@ def test_ssh_runner_rejects_host_option_injection(tmp_path: Path) -> None:
         SecureSSHRunner("-oProxyCommand=evil", credential)
 
 
-def test_vault_resolver_rejects_symlink_and_writable_known_hosts(tmp_path: Path) -> None:
+def test_vault_resolver_rejects_symlink_and_writable_known_hosts(
+    tmp_path: Path,
+) -> None:
     identity = tmp_path / "id"
     identity.touch(mode=0o600)
     real_known_hosts = tmp_path / "known_hosts.real"

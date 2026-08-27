@@ -33,7 +33,10 @@ class ObservationState(str, Enum):
 
 
 def observation_state(
-    observed_at: str, *, now: Optional[datetime] = None, max_age: timedelta = timedelta(hours=6)
+    observed_at: str,
+    *,
+    now: Optional[datetime] = None,
+    max_age: timedelta = timedelta(hours=6),
 ) -> ObservationState:
     if not observed_at:
         return ObservationState.UNKNOWN
@@ -42,11 +45,18 @@ def observation_state(
     except ValueError:
         return ObservationState.UNKNOWN
     current = now or datetime.now(timezone.utc)
-    return ObservationState.FRESH if current - timestamp <= max_age else ObservationState.STALE
+    return (
+        ObservationState.FRESH
+        if current - timestamp <= max_age
+        else ObservationState.STALE
+    )
 
 
 def ci_observation_state(
-    ci: object, *, now: Optional[datetime] = None, max_age: timedelta = timedelta(hours=6)
+    ci: object,
+    *,
+    now: Optional[datetime] = None,
+    max_age: timedelta = timedelta(hours=6),
 ) -> ObservationState:
     """Derive current evidence freshness from a folded CI's timestamp.
 
@@ -54,7 +64,9 @@ def ci_observation_state(
     attribute: elapsed wall time can make that value false without a new event.
     """
     attributes = getattr(ci, "attributes", {})
-    observed_at = attributes.get("observed_at", "") if isinstance(attributes, dict) else ""
+    observed_at = (
+        attributes.get("observed_at", "") if isinstance(attributes, dict) else ""
+    )
     return observation_state(str(observed_at), now=now, max_age=max_age)
 
 
@@ -121,7 +133,11 @@ class DiscoveredCI:
         else:
             canonical_name = min(
                 filter(
-                    None, (self.canonical_name or self.name, other.canonical_name or other.name)
+                    None,
+                    (
+                        self.canonical_name or self.name,
+                        other.canonical_name or other.name,
+                    ),
                 )
             )
         attributes = {**secondary.attributes, **primary.attributes}
@@ -141,7 +157,9 @@ class DiscoveredCI:
             observed_at=max(self.observed_at, other.observed_at),
             scan_id=primary.scan_id or secondary.scan_id,
             authority=(
-                AUTHORITY_OBSERVED if self.observed or other.observed else AUTHORITY_DECLARED
+                AUTHORITY_OBSERVED
+                if self.observed or other.observed
+                else AUTHORITY_DECLARED
             ),
             lifecycle_scope=primary.lifecycle_scope or secondary.lifecycle_scope,
         )
@@ -220,7 +238,9 @@ class SSHRunner:
 
 def _exec(argv: list[str], timeout: int) -> Optional[str]:
     try:
-        proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, check=False)
+        proc = subprocess.run(
+            argv, capture_output=True, text=True, timeout=timeout, check=False
+        )
     except (OSError, subprocess.SubprocessError) as exc:
         logger.debug("command failed: %s (%s)", argv[0], exc)
         return None

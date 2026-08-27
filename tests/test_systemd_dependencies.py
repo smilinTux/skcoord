@@ -59,7 +59,9 @@ def _depends_on(ci) -> set[str]:
     return {target for rel_type, target in ci.relationships if rel_type == "depends_on"}
 
 
-def _collect(runner: FakeRunner, scopes=("--user",), kinds=("service",)) -> list[DiscoveredCI]:
+def _collect(
+    runner: FakeRunner, scopes=("--user",), kinds=("service",)
+) -> list[DiscoveredCI]:
     """Collect with the authority scan() would stamp, so reconcile converges edges."""
     host = DiscoveredCI(
         ci_type=CIType.HOST.value,
@@ -79,7 +81,9 @@ def _collect(runner: FakeRunner, scopes=("--user",), kinds=("service",)) -> list
 
 
 def test_requires_and_wants_become_depends_on_edges() -> None:
-    runner = FakeRunner(answers={"--type=service": SYSTEMD_OUTPUT, "Requires": DEPS_OUTPUT})
+    runner = FakeRunner(
+        answers={"--type=service": SYSTEMD_OUTPUT, "Requires": DEPS_OUTPUT}
+    )
     found = collect_systemd_units(runner, scopes=("--user",), kinds=("service",))
 
     by_name = {c.name: c for c in found}
@@ -97,7 +101,9 @@ def test_requires_and_wants_become_depends_on_edges() -> None:
 
 
 def test_dependency_edges_survive_reconcile_and_are_idempotent(tmp_path: Path) -> None:
-    runner = FakeRunner(answers={"--type=service": SYSTEMD_OUTPUT, "Requires": DEPS_OUTPUT})
+    runner = FakeRunner(
+        answers={"--type=service": SYSTEMD_OUTPUT, "Requires": DEPS_OUTPUT}
+    )
     found = _collect(runner)
     mgr = CMDBManager(tmp_path)
 
@@ -111,12 +117,16 @@ def test_dependency_edges_survive_reconcile_and_are_idempotent(tmp_path: Path) -
     }
 
     second = reconcile(mgr, _collect(runner), apply=True)
-    assert gateway_id in second.unchanged, "a rescan of the same deps must not rewrite edges"
+    assert (
+        gateway_id in second.unchanged
+    ), "a rescan of the same deps must not rewrite edges"
 
 
 def test_removed_dependency_is_converged_on_rescan(tmp_path: Path) -> None:
     mgr = CMDBManager(tmp_path)
-    with_deps = FakeRunner(answers={"--type=service": SYSTEMD_OUTPUT, "Requires": DEPS_OUTPUT})
+    with_deps = FakeRunner(
+        answers={"--type=service": SYSTEMD_OUTPUT, "Requires": DEPS_OUTPUT}
+    )
     reconcile(mgr, _collect(with_deps), apply=True)
 
     without = DEPS_OUTPUT.replace("Requires=skchat-daemon.service", "Requires=")
@@ -136,7 +146,9 @@ def test_removed_dependency_is_converged_on_rescan(tmp_path: Path) -> None:
 
 def test_edges_to_unobserved_units_are_dropped() -> None:
     """network.target is a real dep but not a CI; self-deps are meaningless."""
-    runner = FakeRunner(answers={"--type=service": SYSTEMD_OUTPUT, "Requires": DEPS_OUTPUT})
+    runner = FakeRunner(
+        answers={"--type=service": SYSTEMD_OUTPUT, "Requires": DEPS_OUTPUT}
+    )
     found = collect_systemd_units(runner, scopes=("--user",), kinds=("service",))
 
     by_name = {c.name: c for c in found}
@@ -159,7 +171,11 @@ def test_edges_never_cross_scopes() -> None:
     )
     found = collect_systemd_units(runner, kinds=("service",))
 
-    gateway = next(c for c in found if c.name == "skgateway" and c.attributes["systemd_scope"] == "user")
+    gateway = next(
+        c
+        for c in found
+        if c.name == "skgateway" and c.attributes["systemd_scope"] == "user"
+    )
     assert _depends_on(gateway) == set(), "the user scope never saw postgresql"
 
 
@@ -180,9 +196,7 @@ def test_failed_dependency_lookup_keeps_the_units() -> None:
 
 def test_malformed_dependency_output_yields_no_edges() -> None:
     garbage = "this is not systemctl output\n\x00binary\xff\n= orphaned\n"
-    runner = FakeRunner(
-        answers={"--type=service": SYSTEMD_OUTPUT, "Requires": garbage}
-    )
+    runner = FakeRunner(answers={"--type=service": SYSTEMD_OUTPUT, "Requires": garbage})
     found = collect_systemd_units(runner, scopes=("--user",), kinds=("service",))
 
     assert len(found) == 3
@@ -190,7 +204,9 @@ def test_malformed_dependency_output_yields_no_edges() -> None:
 
 
 def test_dependency_lookup_names_units_explicitly_instead_of_globbing() -> None:
-    runner = FakeRunner(answers={"--type=service": SYSTEMD_OUTPUT, "Requires": DEPS_OUTPUT})
+    runner = FakeRunner(
+        answers={"--type=service": SYSTEMD_OUTPUT, "Requires": DEPS_OUTPUT}
+    )
     collect_systemd_units(runner, scopes=("--user",), kinds=("service",))
 
     dep_calls = [c for c in runner.calls if "Requires" in c]
@@ -230,7 +246,9 @@ def test_timer_does_not_depend_on_its_own_same_named_service() -> None:
             "Requires": TIMER_DEPS_OUTPUT,
         }
     )
-    found = collect_systemd_units(runner, scopes=("--user",), kinds=("timer", "service"))
+    found = collect_systemd_units(
+        runner, scopes=("--user",), kinds=("timer", "service")
+    )
 
     self_id = make_ci_id(CIType.SERVICE.value, "nextcloud-cbrd21-sync")
     for ci in found:

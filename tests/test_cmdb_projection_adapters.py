@@ -44,7 +44,9 @@ def test_failed_pipeline_does_not_advance_persistent_checkpoint(tmp_path: Path) 
             raise RuntimeError("AGE unavailable")
 
     mgr.create_ci("worker", "service")
-    failed = project(mgr, [JsonProjectionSink(tmp_path / "index.json"), FailingSink()], store)
+    failed = project(
+        mgr, [JsonProjectionSink(tmp_path / "index.json"), FailingSink()], store
+    )
 
     assert failed["complete"] is False
     assert failed["committed_checkpoint"] is None
@@ -63,9 +65,7 @@ def test_checkpoint_write_failure_is_reported_as_projection_lag(tmp_path: Path) 
 
     assert result["complete"] is False
     assert result["committed_checkpoint"] is None
-    assert result["failed_sinks"] == [
-        {"sink": "FailingCheckpoint", "error": "OSError"}
-    ]
+    assert result["failed_sinks"] == [{"sink": "FailingCheckpoint", "error": "OSError"}]
 
 
 def test_age_sink_is_injected_and_receives_only_detached_data(tmp_path: Path) -> None:

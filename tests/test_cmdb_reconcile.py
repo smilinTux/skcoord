@@ -26,7 +26,12 @@ from skcoord.cmdb_reconcile import (
     scan_network,
     write_run_artifact,
 )
-from skcoord.discovery import DISCOVERED_TAG, OBSERVED_COLLECTORS, DiscoveredCI, DriftFinding
+from skcoord.discovery import (
+    DISCOVERED_TAG,
+    OBSERVED_COLLECTORS,
+    DiscoveredCI,
+    DriftFinding,
+)
 
 
 class CannedRunner:
@@ -61,7 +66,9 @@ def test_network_scan_reports_complete_target_accounting(tmp_path: Path) -> None
         tmp_path,
         [Target("nor.local", ("fleet:node:nor",))],
         CannedRunner,
-        OrchestrationConfig(global_concurrency=2, per_host_concurrency=1, deadline_seconds=2),
+        OrchestrationConfig(
+            global_concurrency=2, per_host_concurrency=1, deadline_seconds=2
+        ),
     )
     assert result.complete
     assert result.completeness()["collectors_expected"] == len(OBSERVED_COLLECTORS)
@@ -97,10 +104,14 @@ def test_transport_failure_cannot_be_a_complete_empty_scan(tmp_path: Path) -> No
         def run(self, _argv):
             return None
 
-    result = scan_network(tmp_path, [Target("dead", ("fleet",))], lambda _host: DeadRunner())
+    result = scan_network(
+        tmp_path, [Target("dead", ("fleet",))], lambda _host: DeadRunner()
+    )
     assert not result.complete
     assert result.completeness()["targets_complete"] == 0
-    assert all("transport_unavailable" in failure for failure in result.targets[0].failures)
+    assert all(
+        "transport_unavailable" in failure for failure in result.targets[0].failures
+    )
 
 
 def test_tool_gaps_are_explicit_coverage_without_command_text(
@@ -122,7 +133,9 @@ def test_tool_gaps_are_explicit_coverage_without_command_text(
         return []
 
     monkeypatch.setattr(module, "OBSERVED_COLLECTORS", (mixed,))
-    result = scan_network(tmp_path, [Target("mixed", ("fleet",))], lambda _host: MixedRunner())
+    result = scan_network(
+        tmp_path, [Target("mixed", ("fleet",))], lambda _host: MixedRunner()
+    )
 
     assert result.complete
     assert result.completeness()["collectors_partial"] == 1
@@ -177,7 +190,9 @@ def test_partial_scan_suppresses_absence_drift_and_deduplicates() -> None:
 
 
 def test_scan_failure_is_health_not_asset_drift() -> None:
-    scan = ScanResult([], [TargetResult("nor", ("fleet",), 1, failures=["ssh:timeout"])])
+    scan = ScanResult(
+        [], [TargetResult("nor", ("fleet",), 1, failures=["ssh:timeout"])]
+    )
     assert not scan.complete
     assert (
         normalize_drift(
@@ -200,13 +215,18 @@ def _owned_ci(mgr: CMDBManager, name: str = "gone") -> str:
     return ci_id
 
 
-def test_lifecycle_requires_complete_pass_and_retires_at_threshold(tmp_path: Path) -> None:
+def test_lifecycle_requires_complete_pass_and_retires_at_threshold(
+    tmp_path: Path,
+) -> None:
     mgr = CMDBManager(tmp_path)
     ci_id = _owned_ci(mgr)
     scope = "a" * 64
-    assert apply_retirement_lifecycle(
-        mgr, "systemd:nor", scope, [], [ci_id], False, apply=True
-    ) == []
+    assert (
+        apply_retirement_lifecycle(
+            mgr, "systemd:nor", scope, [], [ci_id], False, apply=True
+        )
+        == []
+    )
     assert "discovery_misses:systemd:nor" not in mgr.get_ci(ci_id).attributes
     apply_retirement_lifecycle(
         mgr, "systemd:nor", scope, [], [ci_id], True, threshold=2, apply=True
@@ -275,14 +295,18 @@ def test_verified_artifact_reader_ignores_tampering(tmp_path: Path) -> None:
     tampered.write_text('{"scan_id":"tampered"}\n')
     tampered.with_suffix(".sha256").write_text("0" * 64 + "  tampered.json\n")
 
-    assert [item["scan_id"] for item in read_verified_run_artifacts(tmp_path)] == ["valid"]
+    assert [item["scan_id"] for item in read_verified_run_artifacts(tmp_path)] == [
+        "valid"
+    ]
 
 
 def test_freshness_slo_handles_missing_fresh_and_stale() -> None:
     now = datetime(2026, 8, 20, tzinfo=timezone.utc)
     assert not freshness_status(None, now, timedelta(hours=4))["fresh"]
     assert freshness_status(now - timedelta(hours=3), now, timedelta(hours=4))["fresh"]
-    assert not freshness_status(now - timedelta(hours=5), now, timedelta(hours=4))["fresh"]
+    assert not freshness_status(now - timedelta(hours=5), now, timedelta(hours=4))[
+        "fresh"
+    ]
 
 
 def test_operator_summary_surfaces_drift_partial_runs_and_freshness() -> None:
@@ -336,7 +360,9 @@ def test_partial_run_never_reports_orphans(tmp_path: Path) -> None:
 def test_applied_reconcile_enrolls_ci_in_exact_lifecycle_scope(tmp_path: Path) -> None:
     mgr = CMDBManager(tmp_path)
     item = DiscoveredCI("host", "nor", "ssh", observed=True, authority="network:nor")
-    scan = ScanResult([item], [TargetResult("nor", ("fleet",), 1, completed_collectors=1)])
+    scan = ScanResult(
+        [item], [TargetResult("nor", ("fleet",), 1, completed_collectors=1)]
+    )
 
     artifact, _ = run_reconcile(mgr, scan, apply=True)
 

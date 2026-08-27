@@ -13,7 +13,7 @@ from .discovery_base import DISCOVERED_TAG, CommandRunner, DiscoveredCI
 
 IDENTITY_EVIDENCE_MAX_AGE = timedelta(hours=24)
 
-_IDENTITY_INVENTORY_SCRIPT = r'''# skcoord-identity-estate-v1
+_IDENTITY_INVENTORY_SCRIPT = r"""# skcoord-identity-estate-v1
 import json
 import os
 import xml.etree.ElementTree as ET
@@ -121,7 +121,7 @@ print(json.dumps({
         "material_locations": profile_locations,
     },
 }))
-'''
+"""
 
 
 def _strings(value: object) -> list[str]:
@@ -163,7 +163,10 @@ def _parse_inventory(stdout: str) -> dict[str, Any] | None:
         payload = json.loads(stdout)
     except (TypeError, ValueError):
         return None
-    if not isinstance(payload, dict) or payload.get("schema") != "skcoord-identity-estate-v1":
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schema") != "skcoord-identity-estate-v1"
+    ):
         return None
     return payload
 
@@ -177,10 +180,16 @@ def collect_identity_estate(runner: CommandRunner) -> list[DiscoveredCI]:
 
     user_home = str(payload.get("user_home") or "")
     capauth_home = str(payload.get("capauth_home") or "")
-    evidence = payload.get("evidence") if isinstance(payload.get("evidence"), dict) else {}
+    evidence = (
+        payload.get("evidence") if isinstance(payload.get("evidence"), dict) else {}
+    )
     root_rows = evidence.get("roots") if isinstance(evidence.get("roots"), list) else []
     identity_roots = sorted(
-        {str(row.get("path")) for row in root_rows if isinstance(row, dict) and row.get("path")}
+        {
+            str(row.get("path"))
+            for row in root_rows
+            if isinstance(row, dict) and row.get("path")
+        }
     )
     stale_roots = sorted(
         {
@@ -239,9 +248,16 @@ def collect_identity_estate(runner: CommandRunner) -> list[DiscoveredCI]:
             continue
         code = str(finding.get("code") or "")
         path = str(finding.get("path") or "")
-        if path and code in {"public_key", "secret_placement", "retired_key", "unmanifested_key"}:
+        if path and code in {
+            "public_key",
+            "secret_placement",
+            "retired_key",
+            "unmanifested_key",
+        }:
             access = "public" if code == "public_key" else "restricted"
-            locations.setdefault(fingerprint, []).append({"access": access, "path": path})
+            locations.setdefault(fingerprint, []).append(
+                {"access": access, "path": path}
+            )
         if code:
             flags.setdefault(fingerprint, set()).add(code)
 
@@ -258,10 +274,14 @@ def collect_identity_estate(runner: CommandRunner) -> list[DiscoveredCI]:
         policy = policies.get(fingerprint, {})
         role = str(policy.get("identity_type") or "")
         unique_locations = sorted(
-            {(
-                str(item.get("access") or ""),
-                str(item.get("path") or ""),
-            ) for item in locations.get(fingerprint, []) if item.get("path")}
+            {
+                (
+                    str(item.get("access") or ""),
+                    str(item.get("path") or ""),
+                )
+                for item in locations.get(fingerprint, [])
+                if item.get("path")
+            }
         )
         material_locations = [
             {"access": access, "path": path} for access, path in unique_locations
@@ -271,7 +291,11 @@ def collect_identity_estate(runner: CommandRunner) -> list[DiscoveredCI]:
                 expected
                 for item in material_locations
                 if item["access"] == "restricted"
-                and (expected := _expected_role_for_path(item["path"], runner.host, capauth_home))
+                and (
+                    expected := _expected_role_for_path(
+                        item["path"], runner.host, capauth_home
+                    )
+                )
                 and role
                 and expected != role
             }
@@ -283,7 +307,8 @@ def collect_identity_estate(runner: CommandRunner) -> list[DiscoveredCI]:
             "material_locations": material_locations,
             "last_verified_at": str(evidence.get("generated_at") or ""),
             "evidence_status": str(evidence.get("overall") or ""),
-            "duplicate_restricted_material": "duplicate_secret" in flags.get(fingerprint, set()),
+            "duplicate_restricted_material": "duplicate_secret"
+            in flags.get(fingerprint, set()),
             "signer_role_mismatches": mismatches,
         }
         out.append(
@@ -295,7 +320,9 @@ def collect_identity_estate(runner: CommandRunner) -> list[DiscoveredCI]:
                 node=runner.host,
                 attributes=attributes,
                 tags=("capauth", "identity-placement", DISCOVERED_TAG),
-                relationships=(("runs_on", make_ci_id(CIType.HOST.value, runner.host)),),
+                relationships=(
+                    ("runs_on", make_ci_id(CIType.HOST.value, runner.host)),
+                ),
             )
         )
     return out
@@ -309,11 +336,21 @@ def identity_estate_drift(discovered: list[DiscoveredCI]) -> list[tuple[str, str
         attributes = item.attributes
         if item.ci_type == CIType.HOST.value:
             for home in attributes.get("alternate_user_homes", []):
-                findings.append((item.ci_id, "alternate_home", f"identity root uses {home}"))
+                findings.append(
+                    (item.ci_id, "alternate_home", f"identity root uses {home}")
+                )
             for root in attributes.get("stale_identity_roots", []):
-                findings.append((item.ci_id, "stale_identity_root", f"missing root {root}"))
+                findings.append(
+                    (item.ci_id, "stale_identity_root", f"missing root {root}")
+                )
             if attributes.get("windows_era_layout"):
-                findings.append((item.ci_id, "windows_era_node", "identity root uses Windows layout"))
+                findings.append(
+                    (
+                        item.ci_id,
+                        "windows_era_node",
+                        "identity root uses Windows layout",
+                    )
+                )
             verified = str(attributes.get("identity_last_verified_at") or "")
             try:
                 timestamp = datetime.fromisoformat(verified.replace("Z", "+00:00"))
@@ -321,12 +358,20 @@ def identity_estate_drift(discovered: list[DiscoveredCI]) -> list[tuple[str, str
                 timestamp = None
             if timestamp is None or now - timestamp > IDENTITY_EVIDENCE_MAX_AGE:
                 findings.append(
-                    (item.ci_id, "stale_identity_root", "identity estate verification is stale")
+                    (
+                        item.ci_id,
+                        "stale_identity_root",
+                        "identity estate verification is stale",
+                    )
                 )
         elif item.ci_type == CIType.CREDENTIAL.value:
             if attributes.get("duplicate_restricted_material"):
                 findings.append(
-                    (item.ci_id, "duplicate_private_key", "restricted material has duplicate placements")
+                    (
+                        item.ci_id,
+                        "duplicate_private_key",
+                        "restricted material has duplicate placements",
+                    )
                 )
             mismatches = attributes.get("signer_role_mismatches", [])
             if mismatches:
@@ -334,7 +379,8 @@ def identity_estate_drift(discovered: list[DiscoveredCI]) -> list[tuple[str, str
                     (
                         item.ci_id,
                         "service_identity_mismatch",
-                        "signer role does not match placement role: " + ", ".join(mismatches),
+                        "signer role does not match placement role: "
+                        + ", ".join(mismatches),
                     )
                 )
     return findings

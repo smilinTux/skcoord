@@ -97,7 +97,9 @@ def atomic_write_text(path: Path, text: str, encoding: str = "utf-8") -> None:
         fd_to_close = temp_fd
         temp_fd = -1
         os.close(fd_to_close)
-        os.replace(temp_name, path.name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+        os.replace(
+            temp_name, path.name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd
+        )
         os.fsync(directory_fd)
     except BaseException:
         if temp_fd >= 0:

@@ -159,7 +159,10 @@ class AuthorizedCardSetDecisionV1(_Contract):
             raise ValueError("non-allow policy decisions cannot carry card ids")
         if self.state != "allow" and self.visible_absent_ids:
             raise ValueError("non-allow policy decisions cannot carry absent card ids")
-        if len(self.visible_card_ids) + len(self.visible_absent_ids) > MAX_VISIBLE_RECORDS:
+        if (
+            len(self.visible_card_ids) + len(self.visible_absent_ids)
+            > MAX_VISIBLE_RECORDS
+        ):
             raise ValueError("authorized card decision exceeds the combined safe cap")
         if set(self.visible_card_ids) & set(self.visible_absent_ids):
             raise ValueError("visible and attested-absent card ids must be disjoint")
@@ -170,7 +173,9 @@ class AuthorizedCardSetDecisionV1(_Contract):
         return self
 
 
-PolicyDecisionValidator = Callable[[AuthorizedCardSnapshotRequestV1], AuthorizedCardSetDecisionV1]
+PolicyDecisionValidator = Callable[
+    [AuthorizedCardSnapshotRequestV1], AuthorizedCardSetDecisionV1
+]
 
 
 def _identifier(value) -> str | None:
@@ -296,7 +301,11 @@ def _owner(value) -> str | None:
     if value is None:
         return None
     text = str(value)
-    return text if 0 < len(text) <= MAX_OWNER_LENGTH and len(text.encode("utf-8")) <= 256 else None
+    return (
+        text
+        if 0 < len(text) <= MAX_OWNER_LENGTH and len(text.encode("utf-8")) <= 256
+        else None
+    )
 
 
 def _classes(card, allowed: frozenset[str]) -> tuple[str, ...]:
@@ -328,7 +337,9 @@ def _safe_visible_dependencies(
     approved_visible = {
         value for value in values if isinstance(value, str) and value in visible_ids
     }
-    approved_absent = {value for value in values if isinstance(value, str) and value in absent_ids}
+    approved_absent = {
+        value for value in values if isinstance(value, str) and value in absent_ids
+    }
     if len(approved_visible) + len(approved_absent) > MAX_DEPENDENCIES:
         return None
     return tuple(sorted(approved_visible)), tuple(sorted(approved_absent))
@@ -374,7 +385,9 @@ def _activity(card) -> datetime | None:
     return _parse_timestamp(card.updated_at) or _parse_timestamp(card.created_at)
 
 
-def _path_nodes(start: str, graph: dict[str, tuple[str, ...]]) -> tuple[list[str], bool]:
+def _path_nodes(
+    start: str, graph: dict[str, tuple[str, ...]]
+) -> tuple[list[str], bool]:
     stack = [(start, 0)]
     seen: set[str] = set()
     ordered: list[str] = []
@@ -392,7 +405,9 @@ def _path_nodes(start: str, graph: dict[str, tuple[str, ...]]) -> tuple[list[str
     return ordered, limited or bool(stack)
 
 
-def _reachable(start: str, wanted: str, graph: dict[str, tuple[str, ...]]) -> tuple[bool, bool]:
+def _reachable(
+    start: str, wanted: str, graph: dict[str, tuple[str, ...]]
+) -> tuple[bool, bool]:
     nodes, limited = _path_nodes(start, graph)
     return wanted in nodes, limited
 
@@ -477,7 +492,8 @@ class AuthorizedCardSnapshotReader:
             and decision.target == request.target
             and decision.resource_type == request.resource_type
             and decision.resource_id == request.resource_id
-            and decision.visible_set_sha256 == visible_set_sha256(decision.visible_card_ids)
+            and decision.visible_set_sha256
+            == visible_set_sha256(decision.visible_card_ids)
             and decision.resource_id
             == authorized_card_resource_id(
                 decision.visible_card_ids,
@@ -533,11 +549,16 @@ class AuthorizedCardSnapshotReader:
             for card_id, value in dependency_map.items()
         }
         attested_absent = {
-            card_id: (value[1] if value is not None and "orphan_evidence" in field_mask else ())
+            card_id: (
+                value[1]
+                if value is not None and "orphan_evidence" in field_mask
+                else ()
+            )
             for card_id, value in dependency_map.items()
         }
         record_pairs = [
-            _record(card, graph[card.id], field_mask, semantic_classes) for card in cards
+            _record(card, graph[card.id], field_mask, semantic_classes)
+            for card in cards
         ]
         invalid_fields = sum(not valid for _record_value, valid in record_pairs)
         safe_records = [value for value, _valid in record_pairs]
@@ -546,7 +567,9 @@ class AuthorizedCardSnapshotReader:
             (source, target) for source, targets in graph.items() for target in targets
         )
         raw_orphan_edges = sorted(
-            (source, target) for source, targets in attested_absent.items() for target in targets
+            (source, target)
+            for source, targets in attested_absent.items()
+            for target in targets
         )
         raw_edges = sorted(
             [(source, target, "visible") for source, target in raw_visible_edges]
@@ -592,11 +615,14 @@ class AuthorizedCardSnapshotReader:
         milestone_cards = [
             card
             for card in cards
-            if "milestone" in field_mask and "milestone" in _classes(card, semantic_classes)
+            if "milestone" in field_mask
+            and "milestone" in _classes(card, semantic_classes)
         ]
         milestones = [
             self._milestone(card, graph, classified, records_by_id, edge_cap)
-            for card in sorted(milestone_cards, key=lambda value: value.id)[:MAX_OUTPUT_MILESTONES]
+            for card in sorted(milestone_cards, key=lambda value: value.id)[
+                :MAX_OUTPUT_MILESTONES
+            ]
         ]
         output_truncated = (
             len(safe_records) > len(records)
@@ -650,7 +676,9 @@ class AuthorizedCardSnapshotReader:
                 "reason": "Owner policy filtered identifiers before CardStore retrieval",
             },
             "truth_state": (
-                "current" if classification_complete and not output_truncated else "partial"
+                "current"
+                if classification_complete and not output_truncated
+                else "partial"
             ),
             "snapshot_consistency": "per_authorized_record_fold",
             "observed_at": (
@@ -758,7 +786,9 @@ class AuthorizedCardSnapshotReader:
         }
 
     @staticmethod
-    def _orphan(source_id: str, target_id: str, by_id, field_mask: frozenset[str]) -> dict:
+    def _orphan(
+        source_id: str, target_id: str, by_id, field_mask: frozenset[str]
+    ) -> dict:
         source = by_id[source_id]
         return {
             "from_record_id": source_id,
@@ -789,14 +819,18 @@ class AuthorizedCardSnapshotReader:
             "archived_target",
             "path_classification_partial",
         )
-        rank = next((index for index, value in enumerate(order) if value in conditions), 9)
+        rank = next(
+            (index for index, value in enumerate(order) if value in conditions), 9
+        )
         return rank, finding["from_record_id"], finding["to_record_id"]
 
     @staticmethod
     def _milestone(card, graph, classified, records_by_id, partial: bool) -> dict:
         nodes, limited = _path_nodes(card.id, graph)
         node_set = set(nodes)
-        paths = [finding for finding in classified if finding["from_record_id"] in node_set]
+        paths = [
+            finding for finding in classified if finding["from_record_id"] in node_set
+        ]
         conditions = {
             condition: sum(condition in finding["conditions"] for finding in paths)
             for condition in (
@@ -824,5 +858,7 @@ class AuthorizedCardSnapshotReader:
     @staticmethod
     def _fit(scope: AuthorizedCardScopeV1, result: dict) -> dict:
         return (
-            result if len(_canonical_bytes(result)) <= MAX_PROJECT_ITEM_BYTES else _no_value(scope)
+            result
+            if len(_canonical_bytes(result)) <= MAX_PROJECT_ITEM_BYTES
+            else _no_value(scope)
         )

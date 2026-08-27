@@ -49,7 +49,9 @@ def drift(
       collector saw this pass. Usually a decommission nobody recorded.
     """
     findings: list[DriftFinding] = []
-    findings.extend(DriftFinding(*finding) for finding in identity_estate_drift(list(discovered)))
+    findings.extend(
+        DriftFinding(*finding) for finding in identity_estate_drift(list(discovered))
+    )
     services = [d for d in discovered if d.ci_type == CIType.SERVICE.value]
 
     # Flags cover the merged case (one CI both declared and observed); the key
@@ -102,13 +104,22 @@ def drift(
 
     if mgr is not None:
         stored = mgr.list_cis()
-        seen = {ci_id for item in discovered for ci_id in _matching_identity_ids(item, stored)}
+        seen = {
+            ci_id
+            for item in discovered
+            for ci_id in _matching_identity_ids(item, stored)
+        }
         for ci in stored:
             if ci.id in seen:
                 continue
-            if DISCOVERED_TAG in (ci.tags or []) and ci.status != CIStatus.RETIRED.value:
+            if (
+                DISCOVERED_TAG in (ci.tags or [])
+                and ci.status != CIStatus.RETIRED.value
+            ):
                 findings.append(
-                    DriftFinding(ci.id, "stored_not_discovered", "in CMDB, not seen this scan")
+                    DriftFinding(
+                        ci.id, "stored_not_discovered", "in CMDB, not seen this scan"
+                    )
                 )
 
     return findings

@@ -63,13 +63,21 @@ def collect_fleet_objects(home: Path) -> list[DiscoveredCI]:
                 canonical_name=hostname,
                 aliases=tuple(
                     str(v)
-                    for v in (obj.get("name"), address.get("ip"), address.get("ssh_alias"))
+                    for v in (
+                        obj.get("name"),
+                        address.get("ip"),
+                        address.get("ssh_alias"),
+                    )
                     if v
                 ),
             )
         )
 
-    for kind, tag in (("service", "service"), ("cronjob", "cronjob"), ("operatorapp", "app")):
+    for kind, tag in (
+        ("service", "service"),
+        ("cronjob", "cronjob"),
+        ("operatorapp", "app"),
+    ):
         for path in sorted((root / kind).glob("*.json")):
             obj = _read_json(path)
             if not obj:

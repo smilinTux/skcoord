@@ -50,7 +50,9 @@ def _deployed_change(mgr: ITILManager, title: str):
     mgr.submit_cab_vote(chg.id, agent="human", decision="approved")
     assert mgr.list_changes()[0].status.value == "approved"
     mgr.update_change(chg.id, "lumina", new_status="implementing")
-    mgr.update_change(chg.id, "lumina", new_status="deployed", note="deploy step reported success")
+    mgr.update_change(
+        chg.id, "lumina", new_status="deployed", note="deploy step reported success"
+    )
     assert mgr.list_changes()[0].status.value == "deployed"
     return chg
 
@@ -65,7 +67,9 @@ def _failed_change(mgr: ITILManager, title: str):
     )
     mgr.submit_cab_vote(chg.id, agent="human", decision="approved")
     mgr.update_change(chg.id, "lumina", new_status="implementing")
-    mgr.update_change(chg.id, "lumina", new_status="failed", note="deploy step errored out")
+    mgr.update_change(
+        chg.id, "lumina", new_status="failed", note="deploy step errored out"
+    )
     assert mgr.list_changes()[0].status.value == "failed"
     return chg
 
@@ -94,7 +98,10 @@ def test_verified_with_note_transitions_cleanly(tmp_path):
     chg = _deployed_change(mgr, "verify me, with note")
 
     mgr.update_change(
-        chg.id, "lumina", new_status="verified", note="smoke checks green, latency nominal"
+        chg.id,
+        "lumina",
+        new_status="verified",
+        note="smoke checks green, latency nominal",
     )
     folded = mgr.list_changes()[0]
 
@@ -144,7 +151,10 @@ def test_closed_with_rollback_note_transitions_cleanly(tmp_path):
     chg = _failed_change(mgr, "rollback me, with note")
 
     mgr.update_change(
-        chg.id, "lumina", new_status="closed", note="rolled back via revert commit abc123"
+        chg.id,
+        "lumina",
+        new_status="closed",
+        note="rolled back via revert commit abc123",
     )
     folded = mgr.list_changes()[0]
 
@@ -170,7 +180,9 @@ def test_rejected_to_closed_does_not_require_a_note(tmp_path):
     closed` and is NOT gated by this card - only the rollback-specific edge
     is."""
     mgr = ITILManager(tmp_path)
-    chg = mgr.propose_change(title="reject me", change_type="normal", managed_by="lumina")
+    chg = mgr.propose_change(
+        title="reject me", change_type="normal", managed_by="lumina"
+    )
     mgr.submit_cab_vote(chg.id, agent="human", decision="rejected")
     assert mgr.list_changes()[0].status.value == "rejected"
 
@@ -243,7 +255,9 @@ def test_deployed_to_verified_with_note_is_fold_pure(tmp_path):
     contract this whole store relies on."""
     mgr = ITILManager(tmp_path)
     chg = _deployed_change(mgr, "pir fold purity")
-    mgr.update_change(chg.id, "lumina", new_status="verified", note="smoke checks green")
+    mgr.update_change(
+        chg.id, "lumina", new_status="verified", note="smoke checks green"
+    )
 
     before = mgr.list_changes()[0]
     after = mgr.list_changes()[0]

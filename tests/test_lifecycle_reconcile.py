@@ -153,14 +153,20 @@ def test_fresh_orphan_claim_requires_human_resolution(tmp_path) -> None:
 def test_two_active_agents_claiming_same_card_is_a_conflict(tmp_path) -> None:
     board = Board(tmp_path)
     task = _task(board)
-    board.save_agent(AgentFile(agent="jarvis", current_task=task.id, claimed_tasks=[task.id]))
-    board.save_agent(AgentFile(agent="opus", current_task=task.id, claimed_tasks=[task.id]))
+    board.save_agent(
+        AgentFile(agent="jarvis", current_task=task.id, claimed_tasks=[task.id])
+    )
+    board.save_agent(
+        AgentFile(agent="opus", current_task=task.id, claimed_tasks=[task.id])
+    )
 
     with pytest.raises(LifecycleConflictError, match="multiple active owners"):
         repair_lifecycle(tmp_path, actor="operator")
 
 
-def test_stale_non_owner_claim_is_released_without_restamping_liveness(tmp_path) -> None:
+def test_stale_non_owner_claim_is_released_without_restamping_liveness(
+    tmp_path,
+) -> None:
     board = Board(tmp_path)
     task = _task(board)
     board.claim_task("owner", task.id)
@@ -190,7 +196,9 @@ def test_active_non_owner_claim_requires_human_resolution(tmp_path) -> None:
     board = Board(tmp_path)
     task = _task(board)
     board.claim_task("owner", task.id)
-    board.save_agent(AgentFile(agent="other", current_task=task.id, claimed_tasks=[task.id]))
+    board.save_agent(
+        AgentFile(agent="other", current_task=task.id, claimed_tasks=[task.id])
+    )
 
     with pytest.raises(LifecycleConflictError, match="active non-owner claim"):
         repair_lifecycle(tmp_path, actor="operator", stale_after_seconds=3600)
@@ -215,7 +223,9 @@ def test_transition_task_moves_and_reconciles_before_return(tmp_path) -> None:
     task = _task(board)
     board.claim_task("jarvis", task.id)
 
-    receipt = transition_task(tmp_path, task_id=task.id, column="review", actor="operator")
+    receipt = transition_task(
+        tmp_path, task_id=task.id, column="review", actor="operator"
+    )
 
     card = CardStore(tmp_path).fold(task.id)
     agent = board.load_agent("jarvis")
@@ -229,7 +239,9 @@ def test_transition_rejects_active_conflict_before_moving(tmp_path) -> None:
     board = Board(tmp_path)
     task = _task(board)
     board.claim_task("owner", task.id)
-    board.save_agent(AgentFile(agent="other", current_task=task.id, claimed_tasks=[task.id]))
+    board.save_agent(
+        AgentFile(agent="other", current_task=task.id, claimed_tasks=[task.id])
+    )
 
     with pytest.raises(LifecycleConflictError, match="active non-owner claim"):
         transition_task(tmp_path, task_id=task.id, column="review", actor="operator")
@@ -244,7 +256,9 @@ def test_transition_supports_legacy_only_rollback_mode(tmp_path, monkeypatch) ->
     task = _task(board)
     board.claim_task("jarvis", task.id)
 
-    receipt = transition_task(tmp_path, task_id=task.id, column="review", actor="operator")
+    receipt = transition_task(
+        tmp_path, task_id=task.id, column="review", actor="operator"
+    )
 
     card = next(item for item in KanbanBoard(tmp_path).cards() if item.id == task.id)
     agent = board.load_agent("jarvis")
@@ -253,7 +267,9 @@ def test_transition_supports_legacy_only_rollback_mode(tmp_path, monkeypatch) ->
     assert receipt.after.clean is True
 
 
-def test_transition_compensates_when_projection_write_fails(tmp_path, monkeypatch) -> None:
+def test_transition_compensates_when_projection_write_fails(
+    tmp_path, monkeypatch
+) -> None:
     board = Board(tmp_path)
     task = _task(board)
     board.claim_task("jarvis", task.id)
@@ -303,7 +319,9 @@ def test_transition_compensates_when_store_mirror_fails(tmp_path, monkeypatch) -
     assert agent is not None and agent.current_task == task.id
 
 
-def test_repair_rejects_untrusted_agent_payload_identity_and_cannot_escape(tmp_path) -> None:
+def test_repair_rejects_untrusted_agent_payload_identity_and_cannot_escape(
+    tmp_path,
+) -> None:
     board = Board(tmp_path)
     board.ensure_dirs()
     outside = tmp_path / "outside.json"
@@ -342,7 +360,9 @@ def test_agent_projection_directory_symlink_is_rejected(tmp_path) -> None:
     assert list(outside.iterdir()) == []
 
 
-def test_repair_restores_projection_when_receipt_append_fails(tmp_path, monkeypatch) -> None:
+def test_repair_restores_projection_when_receipt_append_fails(
+    tmp_path, monkeypatch
+) -> None:
     board = Board(tmp_path)
     task = _task(board)
     board.claim_task("jarvis", task.id)
@@ -410,7 +430,8 @@ def test_repair_journals_intent_before_committed_projection_receipt(tmp_path) ->
 
     receipt = repair_lifecycle(tmp_path, actor="operator")
     events = [
-        json.loads(line) for line in receipt.receipt_path.read_text(encoding="utf-8").splitlines()
+        json.loads(line)
+        for line in receipt.receipt_path.read_text(encoding="utf-8").splitlines()
     ]
 
     assert [event["phase"] for event in events] == ["intent", "committed"]
@@ -418,7 +439,9 @@ def test_repair_journals_intent_before_committed_projection_receipt(tmp_path) ->
     assert events[0]["projection_agents"] == ["jarvis"]
 
 
-def test_repair_recovers_unpaired_intent_after_process_death(tmp_path, monkeypatch) -> None:
+def test_repair_recovers_unpaired_intent_after_process_death(
+    tmp_path, monkeypatch
+) -> None:
     board = Board(tmp_path)
     task = _task(board)
     board.claim_task("jarvis", task.id)
@@ -438,11 +461,16 @@ def test_repair_recovers_unpaired_intent_after_process_death(tmp_path, monkeypat
     assert audit_lifecycle(tmp_path).clean is True
     repair_lifecycle(tmp_path, actor="operator")
     receipt_path = (
-        tmp_path / "coordination" / "reconciliation" / f"operator@{socket.gethostname()}.jsonl"
+        tmp_path
+        / "coordination"
+        / "reconciliation"
+        / f"operator@{socket.gethostname()}.jsonl"
     )
     events = [json.loads(line) for line in receipt_path.read_text().splitlines()]
     first_id = events[0]["receipt_id"]
-    first_phases = [event["phase"] for event in events if event["receipt_id"] == first_id]
+    first_phases = [
+        event["phase"] for event in events if event["receipt_id"] == first_id
+    ]
     recovered = next(event for event in events if event["phase"] == "recovered")
 
     assert first_phases == ["intent", "recovered"]
@@ -450,7 +478,9 @@ def test_repair_recovers_unpaired_intent_after_process_death(tmp_path, monkeypat
     assert recovered["after"]["clean"] is True
 
 
-def test_scoped_repair_does_not_recover_unrelated_global_intent(tmp_path, monkeypatch) -> None:
+def test_scoped_repair_does_not_recover_unrelated_global_intent(
+    tmp_path, monkeypatch
+) -> None:
     board = Board(tmp_path)
     first = _task(board, "task0001")
     second = _task(board, "task0002")
@@ -471,21 +501,26 @@ def test_scoped_repair_does_not_recover_unrelated_global_intent(tmp_path, monkey
     monkeypatch.setattr(lifecycle_module, "_append_receipt", original_append)
 
     receipt_path = (
-        tmp_path / "coordination" / "reconciliation" / f"operator@{socket.gethostname()}.jsonl"
+        tmp_path
+        / "coordination"
+        / "reconciliation"
+        / f"operator@{socket.gethostname()}.jsonl"
     )
     abandoned_id = json.loads(receipt_path.read_text().splitlines()[0])["receipt_id"]
     repair_lifecycle(tmp_path, actor="operator", task_ids={second.id})
     scoped_events = [json.loads(line) for line in receipt_path.read_text().splitlines()]
 
     assert audit_lifecycle(tmp_path).clean is False
-    assert [event["phase"] for event in scoped_events if event["receipt_id"] == abandoned_id] == [
-        "intent"
-    ]
+    assert [
+        event["phase"] for event in scoped_events if event["receipt_id"] == abandoned_id
+    ] == ["intent"]
 
     repair_lifecycle(tmp_path, actor="operator")
     full_events = [json.loads(line) for line in receipt_path.read_text().splitlines()]
     assert audit_lifecycle(tmp_path).clean is True
-    assert [event["phase"] for event in full_events if event["receipt_id"] == abandoned_id] == [
+    assert [
+        event["phase"] for event in full_events if event["receipt_id"] == abandoned_id
+    ] == [
         "intent",
         "recovered",
     ]

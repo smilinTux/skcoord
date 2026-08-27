@@ -27,7 +27,9 @@ from skcoord.coordination import Board, Task
 
 
 def _core_on_disk(store: CardStore, card_id: str) -> dict:
-    return json.loads((store.cards_dir / card_id / "core.json").read_text(encoding="utf-8"))
+    return json.loads(
+        (store.cards_dir / card_id / "core.json").read_text(encoding="utf-8")
+    )
 
 
 def test_describe_event_updates_folded_description(tmp_path):
@@ -115,20 +117,26 @@ def test_fold_overlay_collects_describe_patch():
             writer="a",
             ts="2026-01-01",
         ),
-        CardEvent(card_id="d9", action="describe", title="two", writer="a", ts="2026-01-02"),
+        CardEvent(
+            card_id="d9", action="describe", title="two", writer="a", ts="2026-01-02"
+        ),
     ]
     patch = fold_overlay(events)["d9"]
     assert patch["description"] == "one"
     assert patch["title"] == "two"
 
 
-def test_kanban_board_applies_describe_overlay_to_legacy_projection(tmp_path, monkeypatch):
+def test_kanban_board_applies_describe_overlay_to_legacy_projection(
+    tmp_path, monkeypatch
+):
     """The legacy (store-disabled) projection honours describe too."""
     monkeypatch.setenv("SKCOORD_CARD_STORE", "0")
     Board(tmp_path).create_task(Task(id="d10", title="Card", description="original"))
     CardStore(tmp_path).create(CardCore(id="d10", title="Card", description="original"))
     CardEventLog(tmp_path).append(
-        CardEvent(card_id="d10", action="describe", description="patched", writer="lumina")
+        CardEvent(
+            card_id="d10", action="describe", description="patched", writer="lumina"
+        )
     )
     card = next(c for c in KanbanBoard(tmp_path).cards() if c.id == "d10")
     assert card.description == "patched"

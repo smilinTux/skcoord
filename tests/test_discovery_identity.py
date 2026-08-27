@@ -18,7 +18,9 @@ class IdentityRunner:
 
     def run(self, argv):
         self.calls.append(list(argv))
-        return self.payload if isinstance(self.payload, str) else json.dumps(self.payload)
+        return (
+            self.payload if isinstance(self.payload, str) else json.dumps(self.payload)
+        )
 
 
 def _payload() -> dict:
@@ -105,7 +107,10 @@ def test_collect_identity_estate_emits_secret_free_host_and_placement_assets() -
     placement = next(item for item in found if item.ci_type == CIType.CREDENTIAL.value)
     assert host.attributes["actual_user_home"] == "/mnt/c/Users/Alice"
     assert host.attributes["canonical_capauth_home"].endswith("/.skcapstone/capauth")
-    assert host.attributes["compatibility_target"] == host.attributes["canonical_capauth_home"]
+    assert (
+        host.attributes["compatibility_target"]
+        == host.attributes["canonical_capauth_home"]
+    )
     assert host.attributes["syncthing_roots"] == ["/mnt/c/Users/Alice/.skcapstone"]
     assert host.attributes["alternate_user_homes"] == ["/home/legacy"]
     assert placement.attributes["fingerprint"] == "A" * 40
@@ -127,7 +132,10 @@ def test_collect_identity_estate_emits_secret_free_host_and_placement_assets() -
 
 
 def test_identity_estate_drift_reports_requested_mismatch_classes() -> None:
-    kinds = {finding.kind for finding in drift(collect_identity_estate(IdentityRunner(_payload())))}
+    kinds = {
+        finding.kind
+        for finding in drift(collect_identity_estate(IdentityRunner(_payload())))
+    }
 
     assert {
         "alternate_home",
@@ -147,9 +155,14 @@ def test_identity_estate_reconciles_without_secret_redactions(tmp_path: Path) ->
     assert report.validation_failures == []
     assert report.secret_redaction_findings == []
     assert len(report.created) == 2
-    placement = next(ci for ci in mgr.list_cis() if ci.ci_type == CIType.CREDENTIAL.value)
+    placement = next(
+        ci for ci in mgr.list_cis() if ci.ci_type == CIType.CREDENTIAL.value
+    )
     assert placement.attributes["fingerprint"] == "A" * 40
-    assert placement.attributes["material_locations"][0]["access"] in {"public", "restricted"}
+    assert placement.attributes["material_locations"][0]["access"] in {
+        "public",
+        "restricted",
+    }
 
 
 def test_collect_identity_estate_ignores_malformed_or_wrong_schema() -> None:

@@ -31,7 +31,9 @@ def _core_bytes(home, card_id: str) -> bytes:
     return (CardStore(home).cards_dir / card_id / "core.json").read_bytes()
 
 
-def test_added_dependency_blocks_claim_until_synthetic_gate_completion(tmp_path) -> None:
+def test_added_dependency_blocks_claim_until_synthetic_gate_completion(
+    tmp_path,
+) -> None:
     """An appended review dependency is enforced at normal claim time."""
     board = Board(tmp_path)
     _seed(board)
@@ -66,7 +68,10 @@ def test_added_dependency_blocks_claim_until_synthetic_gate_completion(tmp_path)
     assert len(additions) == 1
     assert additions[0]["dependency"] == "gate0001"
     assert additions[0]["writer"] == "reviewer"
-    assert additions[0]["reason"] == "independent review is a mandatory implementation gate"
+    assert (
+        additions[0]["reason"]
+        == "independent review is a mandatory implementation gate"
+    )
 
 
 def test_dependency_removal_is_append_only_reversible_and_survives_legacy_rollback(
@@ -112,7 +117,9 @@ def test_dependency_removal_is_append_only_reversible_and_survives_legacy_rollba
     ]
 
 
-def test_dependency_amendment_rejects_unknown_or_self_referential_cards(tmp_path) -> None:
+def test_dependency_amendment_rejects_unknown_or_self_referential_cards(
+    tmp_path,
+) -> None:
     """Dependency amendments fail closed before adding an impossible gate."""
     board = Board(tmp_path)
     _seed(board)

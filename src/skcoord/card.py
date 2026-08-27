@@ -605,7 +605,9 @@ class KanbanBoard:
         if card_store_read_enabled():
             from .card_store import CardStore
 
-            store_cards = CardStore(self.home).list_cards(include_archived=include_archived)
+            store_cards = CardStore(self.home).list_cards(
+                include_archived=include_archived
+            )
             # Catastrophe guard: never silently empty the board if the store is
             # behind. Fall back to the legacy projection when the store is empty
             # but legacy task files exist.
@@ -838,7 +840,9 @@ def _render_card(c: Card) -> str:
             f'<span class="ava">{initial}</span>{_clean(c.owner)}</span></div>'
         )
     elif c.labels:
-        foot = f'<div class="cfoot"><span class="tag">{_clean(c.labels[0])}</span></div>'
+        foot = (
+            f'<div class="cfoot"><span class="tag">{_clean(c.labels[0])}</span></div>'
+        )
     stripe_style = ""
     if c.kind == Kind.INCIDENT:
         stripe_style = ' style="--stripe:var(--incident)"'

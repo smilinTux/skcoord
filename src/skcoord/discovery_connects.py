@@ -65,7 +65,9 @@ _SS_PROC_RE = re.compile(r'users:\(\("(?P<proc>[^"]+)"(?:,pid=(?P<pid>\d+))?')
 _SERVICE_UNIT_RE = re.compile(r"^(?!user@\d+\.service$)(?P<unit>[^/]+)\.service$")
 
 #: Container scopes written by docker, containerd and podman(libpod).
-_CONTAINER_SCOPE_RE = re.compile(r"(?:docker|containerd|libpod)-(?P<cid>[0-9a-f]{12,64})\.scope$")
+_CONTAINER_SCOPE_RE = re.compile(
+    r"(?:docker|containerd|libpod)-(?P<cid>[0-9a-f]{12,64})\.scope$"
+)
 
 
 def _cgroup_paths(text: str) -> list[str]:
@@ -117,7 +119,9 @@ def _observed_service_units(runner: CommandRunner) -> set[str]:
         if stdout is None:
             continue
         for line in stdout.splitlines():
-            match = re.match(r"^(?P<unit>[\w@:.\-]+)\.service\s+\S+\s+\S+\s+\S+", line.strip())
+            match = re.match(
+                r"^(?P<unit>[\w@:.\-]+)\.service\s+\S+\s+\S+\s+\S+", line.strip()
+            )
             if match and match.group("unit"):
                 units.add(match.group("unit"))
     return units
@@ -137,7 +141,9 @@ def _observed_container_names(runner: CommandRunner) -> dict[str, str]:
     return names
 
 
-def _container_for_cgroup_id(cgroup_id: str, containers: dict[str, str]) -> Optional[str]:
+def _container_for_cgroup_id(
+    cgroup_id: str, containers: dict[str, str]
+) -> Optional[str]:
     """The container name whose short id prefixes the cgroup's full id, or None."""
     for short_id, name in containers.items():
         if cgroup_id.startswith(short_id):
@@ -261,7 +267,9 @@ def collect_container_networks(runner: CommandRunner) -> list[DiscoveredCI]:
         try:
             document = json.loads(inspected)
         except ValueError:
-            logger.info("%s: %s network inspect returned malformed JSON", runner.host, runtime)
+            logger.info(
+                "%s: %s network inspect returned malformed JSON", runner.host, runtime
+            )
             continue
         if not isinstance(document, list):
             continue
@@ -289,7 +297,9 @@ def collect_container_networks(runner: CommandRunner) -> list[DiscoveredCI]:
                         "origin": "container-network",
                     },
                     tags=("network", runtime, DISCOVERED_TAG),
-                    relationships=(("runs_on", make_ci_id(CIType.HOST.value, runner.host)),),
+                    relationships=(
+                        ("runs_on", make_ci_id(CIType.HOST.value, runner.host)),
+                    ),
                 )
             )
             containers = entry.get("Containers") or entry.get("containers") or {}

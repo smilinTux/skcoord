@@ -72,7 +72,9 @@ class IncidentStatus(str, Enum):
 # The statuses an incident holds while it is still live work. Used both to find
 # the open incident for a service and to gate the auto-created GTD item: we only
 # mirror an incident into GTD once it has actually persisted as an open record.
-OPEN_INCIDENT_STATUSES = frozenset({"detected", "acknowledged", "investigating", "escalated"})
+OPEN_INCIDENT_STATUSES = frozenset(
+    {"detected", "acknowledged", "investigating", "escalated"}
+)
 
 
 class ProblemStatus(str, Enum):
@@ -143,7 +145,9 @@ _INCIDENT_TRANSITIONS: dict[str, set[str]] = {
     "acknowledged": {"investigating", "escalated", "resolved"},
     "investigating": {"escalated", "resolved"},
     "escalated": {"investigating", "resolved"},
-    "resolved": {"closed"},  # reopen (resolved->investigating) is fold-only, see note above
+    "resolved": {
+        "closed"
+    },  # reopen (resolved->investigating) is fold-only, see note above
     "closed": set(),
 }
 
@@ -207,7 +211,9 @@ class Incident(BaseModel):
     impact: str = ""
     managed_by: str = ""
     created_by: str = ""
-    detected_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    detected_at: str = Field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
     acknowledged_at: Optional[str] = None
     resolved_at: Optional[str] = None
     closed_at: Optional[str] = None
@@ -227,7 +233,9 @@ class Problem(BaseModel):
     workaround: Optional[str] = None
     managed_by: str = ""
     created_by: str = ""
-    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    created_at: str = Field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
     related_incident_ids: list[str] = Field(default_factory=list)
     related_change_id: Optional[str] = None
     kedb_id: Optional[str] = None
@@ -249,7 +257,9 @@ class Change(BaseModel):
     created_by: str = ""
     implementer: Optional[str] = None
     cab_required: bool = True
-    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    created_at: str = Field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
     related_problem_id: Optional[str] = None
     gtd_item_ids: list[str] = Field(default_factory=list)
     timeline: list[dict[str, Any]] = Field(default_factory=list)
@@ -274,7 +284,9 @@ class KEDBEntry(BaseModel):
     permanent_fix_change_id: Optional[str] = None
     related_problem_id: Optional[str] = None
     managed_by: str = ""
-    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    created_at: str = Field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
     tags: list[str] = Field(default_factory=list)
 
 
@@ -286,7 +298,9 @@ class CABDecision(BaseModel):
     authorization_id: str = ""
     decision: CABDecisionValue = CABDecisionValue.ABSTAIN
     conditions: str = ""
-    decided_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    decided_at: str = Field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
 
 
 # ── CAB provenance compatibility (terminal-lifecycle preservation) ─────────
@@ -454,7 +468,9 @@ def _cab_resolved_status(
     if rejections:
         return "rejected"
     approvals = [
-        v for v in votes if v.decision == CABDecisionValue.APPROVED and v.agent != prepared_by
+        v
+        for v in votes
+        if v.decision == CABDecisionValue.APPROVED and v.agent != prepared_by
     ]
     if any(_is_human_approval(v) for v in approvals):
         return "approved"
@@ -639,7 +655,9 @@ class ITILManager:
         rid = self._resolve_id(directory, record_id)
         return (directory / rid / "core.json").exists()
 
-    def _writer_has_kind(self, directory: Path, record_id: str, agent: str, kind: str) -> bool:
+    def _writer_has_kind(
+        self, directory: Path, record_id: str, agent: str, kind: str
+    ) -> bool:
         """True if *agent*'s own writer file already holds an event of *kind*.
 
         Reads only this writer's own file (cheap, no sync lag).  Replaces the
@@ -699,7 +717,9 @@ class ITILManager:
             redirect = rec_dir / "redirect.json"
             if redirect.exists():
                 try:
-                    target = json.loads(redirect.read_text(encoding="utf-8"))["canonical"]
+                    target = json.loads(redirect.read_text(encoding="utf-8"))[
+                        "canonical"
+                    ]
                     if target != record_id:
                         return self._fold_record(directory, target, model_class)
                 except Exception:  # noqa: BLE001
@@ -744,7 +764,9 @@ class ITILManager:
                 if seen_created:
                     continue
                 seen_created = True
-                timeline.append({"ts": ts, "agent": agent, "action": "created", "note": note})
+                timeline.append(
+                    {"ts": ts, "agent": agent, "action": "created", "note": note}
+                )
             elif kind == "status":
                 to = e.get("to")
                 if to in _INCIDENT_TRANSITIONS.get(status, set()):
@@ -813,7 +835,9 @@ class ITILManager:
             elif kind == "ack":
                 if not acknowledged_at:
                     acknowledged_at = ts
-                timeline.append({"ts": ts, "agent": agent, "action": "acknowledged", "note": note})
+                timeline.append(
+                    {"ts": ts, "agent": agent, "action": "acknowledged", "note": note}
+                )
             elif kind == "resolution":
                 if e.get("resolution_summary"):
                     resolution_summary = e["resolution_summary"]
@@ -824,7 +848,12 @@ class ITILManager:
                 if e.get("text"):
                     title = e["text"]
                 timeline.append(
-                    {"ts": ts, "agent": agent, "action": "title", "note": e.get("text", "")}
+                    {
+                        "ts": ts,
+                        "agent": agent,
+                        "action": "title",
+                        "note": e.get("text", ""),
+                    }
                 )
             elif kind == "assignment":
                 to = e.get("to")
@@ -847,7 +876,9 @@ class ITILManager:
                 if gid and gid not in gtd_ids:
                     gtd_ids.append(gid)
             elif kind in ("note", "recovery"):
-                timeline.append({"ts": ts, "agent": agent, "action": "note", "note": note})
+                timeline.append(
+                    {"ts": ts, "agent": agent, "action": "note", "note": note}
+                )
             # any other kind (gtd_complete, etc.) is timeline-silent
 
         return Incident(
@@ -894,7 +925,9 @@ class ITILManager:
                 if seen_created:
                     continue
                 seen_created = True
-                timeline.append({"ts": ts, "agent": agent, "action": "created", "note": note})
+                timeline.append(
+                    {"ts": ts, "agent": agent, "action": "created", "note": note}
+                )
             elif kind == "status":
                 to = e.get("to")
                 if to in _PROBLEM_TRANSITIONS.get(status, set()):
@@ -933,7 +966,12 @@ class ITILManager:
                 if e.get("text"):
                     title = e["text"]
                 timeline.append(
-                    {"ts": ts, "agent": agent, "action": "title", "note": e.get("text", "")}
+                    {
+                        "ts": ts,
+                        "agent": agent,
+                        "action": "title",
+                        "note": e.get("text", ""),
+                    }
                 )
             elif kind == "tags":
                 for t in e.get("add") or []:
@@ -944,7 +982,9 @@ class ITILManager:
                 if gid and gid not in gtd_ids:
                     gtd_ids.append(gid)
             elif kind == "note":
-                timeline.append({"ts": ts, "agent": agent, "action": "note", "note": note})
+                timeline.append(
+                    {"ts": ts, "agent": agent, "action": "note", "note": note}
+                )
 
         return Problem(
             id=core["id"],
@@ -964,7 +1004,9 @@ class ITILManager:
             tags=tags,
         )
 
-    def _fold_change(self, core: dict, events: list[dict], votes: list["CABDecision"]) -> Change:
+    def _fold_change(
+        self, core: dict, events: list[dict], votes: list["CABDecision"]
+    ) -> Change:
         """Fold a change's event log + CAB votes into a Change.
 
         Standard-change auto-approval and CAB approval/rejection are pure
@@ -998,7 +1040,9 @@ class ITILManager:
                 if seen_created:
                     continue
                 seen_created = True
-                timeline.append({"ts": ts, "agent": agent, "action": "proposed", "note": note})
+                timeline.append(
+                    {"ts": ts, "agent": agent, "action": "proposed", "note": note}
+                )
             elif kind == "status":
                 to = e.get("to")
                 # gate_status resolves a CAB/standard/auto-normal derivation
@@ -1086,7 +1130,9 @@ class ITILManager:
                             "note": note,
                             "conflicted": True,
                             "conflict_reason": (
-                                "PIR note required" if pir_gated else "rollback note required"
+                                "PIR note required"
+                                if pir_gated
+                                else "rollback note required"
                             ),
                         }
                     )
@@ -1107,7 +1153,12 @@ class ITILManager:
                 if e.get("text"):
                     title = e["text"]
                 timeline.append(
-                    {"ts": ts, "agent": agent, "action": "title", "note": e.get("text", "")}
+                    {
+                        "ts": ts,
+                        "agent": agent,
+                        "action": "title",
+                        "note": e.get("text", ""),
+                    }
                 )
             elif kind == "tags":
                 for t in e.get("add") or []:
@@ -1119,7 +1170,9 @@ class ITILManager:
                     gtd_ids.append(gid)
             elif kind in ("note", "auto-approved"):
                 action = "auto-approved" if kind == "auto-approved" else "note"
-                timeline.append({"ts": ts, "agent": agent, "action": action, "note": note})
+                timeline.append(
+                    {"ts": ts, "agent": agent, "action": action, "note": note}
+                )
             elif kind == "pr_link":
                 # Appended by the AI runner when a PREPARE run on this change
                 # finishes with a draft PR. Last-write-wins on re-prepare;
@@ -1133,7 +1186,12 @@ class ITILManager:
                 }
                 prepared_by = agent
                 timeline.append(
-                    {"ts": ts, "agent": agent, "action": "pr_link", "note": e.get("url", "")}
+                    {
+                        "ts": ts,
+                        "agent": agent,
+                        "action": "pr_link",
+                        "note": e.get("url", ""),
+                    }
                 )
             elif kind == "validation":
                 # CI verdict attached to the draft PR. Latest event wins. A
@@ -1177,7 +1235,9 @@ class ITILManager:
                 gate_status = _cab_resolved_status(
                     status, change_type, tags, core, votes, prepared_by
                 )
-                if gate_status == "approved" and to in _CHANGE_TRANSITIONS.get(gate_status, set()):
+                if gate_status == "approved" and to in _CHANGE_TRANSITIONS.get(
+                    gate_status, set()
+                ):
                     scheduled_window = {
                         "window_start": e.get("window_start"),
                         "window_end": e.get("window_end"),
@@ -1189,7 +1249,8 @@ class ITILManager:
                             "ts": ts,
                             "agent": agent,
                             "action": f"status:{gate_status}->{to}",
-                            "note": note or ("ASAP" if scheduled_window["asap"] else ""),
+                            "note": note
+                            or ("ASAP" if scheduled_window["asap"] else ""),
                         }
                     )
                     status = to
@@ -1207,7 +1268,9 @@ class ITILManager:
                 # scheduled -> approved, operator-initiated. Clears the window
                 # so a subsequent `schedule` event is a clean re-schedule.
                 to = "approved"
-                if status == "scheduled" and to in _CHANGE_TRANSITIONS.get(status, set()):
+                if status == "scheduled" and to in _CHANGE_TRANSITIONS.get(
+                    status, set()
+                ):
                     timeline.append(
                         {
                             "ts": ts,
@@ -1237,7 +1300,9 @@ class ITILManager:
                 # unschedule, with the miss called out distinctly on the
                 # timeline and it demands an explicit re-schedule.
                 to = "approved"
-                if status == "scheduled" and to in _CHANGE_TRANSITIONS.get(status, set()):
+                if status == "scheduled" and to in _CHANGE_TRANSITIONS.get(
+                    status, set()
+                ):
                     timeline.append(
                         {
                             "ts": ts,
@@ -1324,7 +1389,8 @@ class ITILManager:
                         "ts": max(v.decided_at for v in rejections),
                         "agent": "cab-system",
                         "action": "status:proposed->rejected",
-                        "note": "Rejected by: " + ", ".join(v.agent for v in rejections),
+                        "note": "Rejected by: "
+                        + ", ".join(v.agent for v in rejections),
                     }
                 )
             elif any(_is_human_approval(v) for v in approvals):
@@ -1455,7 +1521,9 @@ class ITILManager:
         else:
             gtd_id = self._create_gtd_item_for_incident(inc)
             if gtd_id:
-                self._append_event(self.incidents_dir, record_id, agent, "gtd_link", id=gtd_id)
+                self._append_event(
+                    self.incidents_dir, record_id, agent, "gtd_link", id=gtd_id
+                )
 
         self._publish_event(
             "itil.incident.created",
@@ -1501,7 +1569,9 @@ class ITILManager:
                 self._complete_gtd_items(folded.gtd_item_ids)
 
         if severity:
-            self._append_event(self.incidents_dir, rid, agent, "severity", to=severity, note=note)
+            self._append_event(
+                self.incidents_dir, rid, agent, "severity", to=severity, note=note
+            )
             self._publish_event(
                 "itil.incident.escalated",
                 {"id": rid, "new_severity": severity},
@@ -1546,7 +1616,10 @@ class ITILManager:
         re-emit a ``created`` event every health cycle while a service is down.
         """
         for inc in self.list_incidents():
-            if inc.status.value in OPEN_INCIDENT_STATUSES and service in inc.affected_services:
+            if (
+                inc.status.value in OPEN_INCIDENT_STATUSES
+                and service in inc.affected_services
+            ):
                 return inc
         return None
 
@@ -1613,7 +1686,9 @@ class ITILManager:
         else:
             gtd_id = self._create_gtd_project_for_problem(prb)
             if gtd_id:
-                self._append_event(self.problems_dir, record_id, agent, "gtd_link", id=gtd_id)
+                self._append_event(
+                    self.problems_dir, record_id, agent, "gtd_link", id=gtd_id
+                )
 
         self._publish_event(
             "itil.problem.created",
@@ -1642,15 +1717,21 @@ class ITILManager:
             raise ValueError(f"Problem {problem_id} not found")
 
         if new_status:
-            self._append_event(self.problems_dir, rid, agent, "status", to=new_status, note=note)
+            self._append_event(
+                self.problems_dir, rid, agent, "status", to=new_status, note=note
+            )
             if new_status == ProblemStatus.RESOLVED.value:
                 folded = self._fold_record(self.problems_dir, rid, Problem)
                 self._complete_gtd_items(folded.gtd_item_ids)
 
         if root_cause:
-            self._append_event(self.problems_dir, rid, agent, "root_cause", text=root_cause)
+            self._append_event(
+                self.problems_dir, rid, agent, "root_cause", text=root_cause
+            )
         if workaround:
-            self._append_event(self.problems_dir, rid, agent, "workaround", text=workaround)
+            self._append_event(
+                self.problems_dir, rid, agent, "workaround", text=workaround
+            )
 
         if note and not new_status:
             self._append_event(self.problems_dir, rid, agent, "note", note=note)
@@ -1667,7 +1748,9 @@ class ITILManager:
                     related_problem_id=prb.id,
                     managed_by=agent,
                 )
-                self._append_event(self.problems_dir, rid, agent, "link_kedb", id=kedb.id)
+                self._append_event(
+                    self.problems_dir, rid, agent, "link_kedb", id=kedb.id
+                )
 
         return self._fold_record(self.problems_dir, rid, Problem)
 
@@ -1719,7 +1802,9 @@ class ITILManager:
             "tags": tags or [],
         }
         self._write_core(self.changes_dir, record_id, core)
-        self._append_event(self.changes_dir, record_id, agent, "created", note=f"RFC: {title}")
+        self._append_event(
+            self.changes_dir, record_id, agent, "created", note=f"RFC: {title}"
+        )
 
         self._publish_event(
             "itil.change.proposed",
@@ -1751,7 +1836,9 @@ class ITILManager:
             raise ValueError(f"Change {change_id} not found")
 
         if new_status:
-            self._append_event(self.changes_dir, rid, agent, "status", to=new_status, note=note)
+            self._append_event(
+                self.changes_dir, rid, agent, "status", to=new_status, note=note
+            )
             # The outward-facing side effects fire from the FOLD RESULT, never
             # from the requested status. `_fold_change` is where truth is
             # decided - its CAB bypass guard can refuse this very event (a raw
@@ -1796,7 +1883,9 @@ class ITILManager:
                         "high",
                     )
                     if gtd_id:
-                        self._append_event(self.changes_dir, rid, agent, "gtd_link", id=gtd_id)
+                        self._append_event(
+                            self.changes_dir, rid, agent, "gtd_link", id=gtd_id
+                        )
             elif new_status == "deployed" and effective_status == "deployed":
                 self._publish_event(
                     "itil.change.deployed",
@@ -1863,10 +1952,17 @@ class ITILManager:
         """
         self.ensure_dirs()
         voter = subject if subject else agent
-        if subject_role and subject_role not in {"owner", "operator", "approver", "implementer"}:
+        if subject_role and subject_role not in {
+            "owner",
+            "operator",
+            "approver",
+            "implementer",
+        }:
             raise ValueError(f"unsupported CAB subject role: {subject_role!r}")
         if subject_role in {"owner", "approver"} and not subject:
-            raise ValueError("a qualifying human role requires an authenticated subject")
+            raise ValueError(
+                "a qualifying human role requires an authenticated subject"
+            )
         vote = CABDecision(
             change_id=change_id,
             agent=voter,
@@ -1878,7 +1974,9 @@ class ITILManager:
         )
         filename = f"{change_id}-{voter}.json"
         path = self.cab_dir / filename
-        atomic_write_text(path, json.dumps(vote.model_dump(), indent=2, default=str) + "\n")
+        atomic_write_text(
+            path, json.dumps(vote.model_dump(), indent=2, default=str) + "\n"
+        )
         return vote
 
     def get_cab_votes(self, change_id: str) -> list[CABDecision]:
@@ -1929,7 +2027,9 @@ class ITILManager:
             fields["id"] = entry_id
         entry = KEDBEntry(**fields)
         path = self.kedb_dir / f"{entry.id}.json"
-        atomic_write_text(path, json.dumps(entry.model_dump(), indent=2, default=str) + "\n")
+        atomic_write_text(
+            path, json.dumps(entry.model_dump(), indent=2, default=str) + "\n"
+        )
         return entry
 
     def _load_kedb(self) -> list[KEDBEntry]:
@@ -1973,12 +2073,15 @@ class ITILManager:
         changes = self._load_records(self.changes_dir, Change)
         kedb = self._load_kedb()
 
-        open_incidents = [i for i in incidents if i.status.value in OPEN_INCIDENT_STATUSES]
+        open_incidents = [
+            i for i in incidents if i.status.value in OPEN_INCIDENT_STATUSES
+        ]
         active_problems = [p for p in problems if p.status.value != "resolved"]
         pending_changes = [
             c
             for c in changes
-            if c.status.value in ("proposed", "reviewing", "approved", "scheduled", "implementing")
+            if c.status.value
+            in ("proposed", "reviewing", "approved", "scheduled", "implementing")
         ]
 
         return {
@@ -2047,7 +2150,9 @@ class ITILManager:
         for inc in self.list_incidents(status="resolved"):
             if inc.resolved_at:
                 try:
-                    resolved = datetime.fromisoformat(inc.resolved_at.replace("Z", "+00:00"))
+                    resolved = datetime.fromisoformat(
+                        inc.resolved_at.replace("Z", "+00:00")
+                    )
                     hours = (now - resolved).total_seconds() / 3600
                     if hours >= stable_hours:
                         self.update_incident(
@@ -2072,7 +2177,9 @@ class ITILManager:
                 continue
             if inc.status.value == "detected" and inc.detected_at:
                 try:
-                    detected = datetime.fromisoformat(inc.detected_at.replace("Z", "+00:00"))
+                    detected = datetime.fromisoformat(
+                        inc.detected_at.replace("Z", "+00:00")
+                    )
                     elapsed_min = (now - detected).total_seconds() / 60
                     limit = sla_minutes.get(inc.severity.value, 60)
                     if elapsed_min > limit:
@@ -2132,7 +2239,9 @@ class ITILManager:
         lines.append("")
         if prb["active_list"]:
             for p in prb["active_list"]:
-                lines.append(f"- **[{p['id']}]** {p['title']} ({p['status']}) @{p['managed_by']}")
+                lines.append(
+                    f"- **[{p['id']}]** {p['title']} ({p['status']}) @{p['managed_by']}"
+                )
         else:
             lines.append("*No active problems*")
         lines.append("")
@@ -2190,7 +2299,11 @@ class ITILManager:
             )
         except Exception:
             try:
-                from skcapstone.mcp_tools.gtd_tools import _load_list, _make_item, _save_list
+                from skcapstone.mcp_tools.gtd_tools import (
+                    _load_list,
+                    _make_item,
+                    _save_list,
+                )
 
                 list_for = {
                     "next": "next-actions",
@@ -2213,9 +2326,12 @@ class ITILManager:
 
     def _create_gtd_item_for_incident(self, incident: Incident) -> Optional[str]:
         """Auto-create a GTD next-action (sev1/sev2) or inbox item (sev3/sev4)."""
-        priority = {"sev1": "critical", "sev2": "high", "sev3": "medium", "sev4": "low"}.get(
-            incident.severity.value, "medium"
-        )
+        priority = {
+            "sev1": "critical",
+            "sev2": "high",
+            "sev3": "medium",
+            "sev4": "low",
+        }.get(incident.severity.value, "medium")
         status = "next" if incident.severity.value in ("sev1", "sev2") else "inbox"
         return self._gtd_emit(
             f"[ITIL:{incident.id}] {incident.title}", incident.id, status, priority
@@ -2325,7 +2441,9 @@ class ITILManager:
                     # Legacy items (pre-structured-fields) carry the id only in the
                     # ``[ITIL:inc-XXXX]`` text prefix - parse it as a fallback so the
                     # sweep reaps them too.
-                    m = re.search(r"\[ITIL:((?:inc|prb|chg)-[0-9a-f]+)\]", item.get("text", ""))
+                    m = re.search(
+                        r"\[ITIL:((?:inc|prb|chg)-[0-9a-f]+)\]", item.get("text", "")
+                    )
                     if m:
                         itil_id = m.group(1)
                 if (
@@ -2335,7 +2453,9 @@ class ITILManager:
                 ):
                     item["status"] = "dropped"
                     item["completed_at"] = _now_iso()
-                    item["drop_reason"] = "itil-orphan-reconcile: no open incident record"
+                    item["drop_reason"] = (
+                        "itil-orphan-reconcile: no open incident record"
+                    )
                     dropped.append(item)
                     reaped.append(item.get("id"))
                 else:
@@ -2347,11 +2467,15 @@ class ITILManager:
                     _save_archive(archive)
                     _save_list(list_name, keep)
                 except Exception:
-                    logger.warning("Failed to persist ITIL GTD reconcile for %s", list_name)
+                    logger.warning(
+                        "Failed to persist ITIL GTD reconcile for %s", list_name
+                    )
 
         if reaped:
             logger.info(
-                "ITIL GTD reconcile: reaped %d orphan next-action(s): %s", len(reaped), reaped
+                "ITIL GTD reconcile: reaped %d orphan next-action(s): %s",
+                len(reaped),
+                reaped,
             )
         else:
             logger.debug("ITIL GTD reconcile: no orphaned next-actions")
@@ -2376,4 +2500,6 @@ class ITILManager:
 
             activity.push(topic, payload)
         except Exception as exc:
-            logger.warning("Failed to push ITIL event %s to activity bus: %s", topic, exc)
+            logger.warning(
+                "Failed to push ITIL event %s to activity bus: %s", topic, exc
+            )

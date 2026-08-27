@@ -62,7 +62,9 @@ def evaluate_shadow_gate(paths: Sequence[Path], minimum_runs: int = 3) -> Shadow
     scans: list[str] = []
     scopes: list[str] = []
     if len(paths) < minimum_runs:
-        errors.append(f"need at least {minimum_runs} shadow artifacts, got {len(paths)}")
+        errors.append(
+            f"need at least {minimum_runs} shadow artifacts, got {len(paths)}"
+        )
     for path in paths:
         artifact, error = _read_verified_artifact(Path(path))
         if error:
@@ -94,7 +96,9 @@ def evaluate_shadow_gate(paths: Sequence[Path], minimum_runs: int = 3) -> Shadow
 def load_manifest(path: Path) -> list[OwnershipEntry]:
     """Load the deliberately small, human-reviewable ownership manifest."""
     data = json.loads(Path(path).read_text(encoding="utf-8"))
-    if data.get("schema") != _BACKFILL_SCHEMA or not isinstance(data.get("entries"), list):
+    if data.get("schema") != _BACKFILL_SCHEMA or not isinstance(
+        data.get("entries"), list
+    ):
         raise ValueError(f"manifest schema must be {_BACKFILL_SCHEMA}")
     entries = [OwnershipEntry(**item) for item in data["entries"]]
     if len({entry.ci_id for entry in entries}) != len(entries):

@@ -23,7 +23,9 @@ from skcoord.coordination import Board, TaskViewReadBatch, TaskViewReadScope
 class OwnerIndex:
     """Synthetic authorization-owner index with bounded keyset reads."""
 
-    def __init__(self, card_ids: tuple[str, ...], scope: str = "public-synthetic:tenant-a"):
+    def __init__(
+        self, card_ids: tuple[str, ...], scope: str = "public-synthetic:tenant-a"
+    ):
         self.card_ids = card_ids
         self.scope = scope
         self.reads: list[tuple[str | None, int]] = []
@@ -40,7 +42,9 @@ class OwnerIndex:
     def read_page(self, after: str | None, count: int) -> TaskViewReadBatch:
         self.reads.append((after, count))
         start = 0 if after is None else bisect.bisect_right(self.card_ids, after)
-        return TaskViewReadBatch(self.card_ids[start : start + count], self.population_state)
+        return TaskViewReadBatch(
+            self.card_ids[start : start + count], self.population_state
+        )
 
     def read_scope(self) -> TaskViewReadScope:
         return TaskViewReadScope(
@@ -79,7 +83,9 @@ def _card(card_id: str, *, archived: bool = False, kind: Kind = Kind.TASK) -> Ca
     )
 
 
-def test_ten_thousand_record_sentinel_touches_only_two_owner_records(tmp_path: Path) -> None:
+def test_ten_thousand_record_sentinel_touches_only_two_owner_records(
+    tmp_path: Path,
+) -> None:
     owner = TenThousandOwnerIndex()
     scope = TaskViewReadScope(
         authorization_scope="public-synthetic:tenant-a",
@@ -91,14 +97,18 @@ def test_ten_thousand_record_sentinel_touches_only_two_owner_records(tmp_path: P
         folds.append(card_id)
         return _card(card_id)
 
-    with patch.object(CardStore, "fold", fold), patch.object(
-        CardStore,
-        "list_card_ids",
-        side_effect=AssertionError("CardStore enumeration is forbidden"),
-    ), patch.object(
-        CardStore,
-        "list_cards",
-        side_effect=AssertionError("complete CardStore fold is forbidden"),
+    with (
+        patch.object(CardStore, "fold", fold),
+        patch.object(
+            CardStore,
+            "list_card_ids",
+            side_effect=AssertionError("CardStore enumeration is forbidden"),
+        ),
+        patch.object(
+            CardStore,
+            "list_cards",
+            side_effect=AssertionError("complete CardStore fold is forbidden"),
+        ),
     ):
         page = Board(tmp_path).get_task_view_page(scope, limit=1)
 
@@ -198,18 +208,31 @@ def test_cursor_rejects_forgery_malformed_restart_and_rescope(tmp_path: Path) ->
         first = board.get_task_view_page(owner.read_scope(), limit=1)
         assert first.next_cursor and "public-000" not in first.next_cursor
 
-        raw = base64.urlsafe_b64decode(first.next_cursor + "=" * (-len(first.next_cursor) % 4))
+        raw = base64.urlsafe_b64decode(
+            first.next_cursor + "=" * (-len(first.next_cursor) % 4)
+        )
         payload = json.loads(raw[:-32])
         payload["after"] = "public-001"
-        forged_body = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-        forged = base64.urlsafe_b64encode(
-            forged_body + hashlib.sha256(forged_body).digest()
-        ).decode().rstrip("=")
+        forged_body = json.dumps(
+            payload, sort_keys=True, separators=(",", ":")
+        ).encode()
+        forged = (
+            base64.urlsafe_b64encode(forged_body + hashlib.sha256(forged_body).digest())
+            .decode()
+            .rstrip("=")
+        )
         payload["after"] = "public-999"
-        tampered_body = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-        wrong_secret = base64.urlsafe_b64encode(
-            tampered_body + hmac.digest(b"attacker-known-key", tampered_body, "sha256")
-        ).decode().rstrip("=")
+        tampered_body = json.dumps(
+            payload, sort_keys=True, separators=(",", ":")
+        ).encode()
+        wrong_secret = (
+            base64.urlsafe_b64encode(
+                tampered_body
+                + hmac.digest(b"attacker-known-key", tampered_body, "sha256")
+            )
+            .decode()
+            .rstrip("=")
+        )
 
         other_owner = OwnerIndex(owner.card_ids, scope="public-synthetic:tenant-b")
         for scope, cursor, limit in (
@@ -224,7 +247,9 @@ def test_cursor_rejects_forgery_malformed_restart_and_rescope(tmp_path: Path) ->
 
         with patch("skcoord.card_store._TASK_VIEW_CURSOR_SECRET", b"r" * 32):
             with pytest.raises(ValueError, match="cursor"):
-                board.get_task_view_page(owner.read_scope(), limit=1, cursor=first.next_cursor)
+                board.get_task_view_page(
+                    owner.read_scope(), limit=1, cursor=first.next_cursor
+                )
 
 
 @pytest.mark.parametrize(
@@ -250,12 +275,16 @@ def test_cursor_rejects_exact_population_change_without_caller_revision(
         first = board.get_task_view_page(owner.read_scope(), limit=1)
         owner.replace(changed)
         with pytest.raises(ValueError, match="population is stale"):
-            board.get_task_view_page(owner.read_scope(), limit=1, cursor=first.next_cursor)
+            board.get_task_view_page(
+                owner.read_scope(), limit=1, cursor=first.next_cursor
+            )
 
     assert folded == ["public-000", "public-001"]
 
 
-def test_stale_record_unstable_owner_and_invalid_limits_fail_closed(tmp_path: Path) -> None:
+def test_stale_record_unstable_owner_and_invalid_limits_fail_closed(
+    tmp_path: Path,
+) -> None:
     board = Board(tmp_path)
     owner = OwnerIndex(("public-000", "public-001"))
     with patch.object(CardStore, "fold", return_value=None):

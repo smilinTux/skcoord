@@ -42,10 +42,7 @@ ollama.service     loaded active running Ollama
 
 DOCKER_PS_IDS = "a1b2c3d4e5f6\tollama\nf6e5d4c3b2a1\tredis\n"
 
-OLLAMA_CGROUP = (
-    "0::/system.slice/docker-"
-    "a1b2c3d4e5f6" + "0" * 50 + "de" + ".scope\n"
-)
+OLLAMA_CGROUP = "0::/system.slice/docker-" "a1b2c3d4e5f6" + "0" * 50 + "de" + ".scope\n"
 
 ANSWERS = {
     "ss -tlnpH": SS_WITH_PROCS,
@@ -77,7 +74,9 @@ class FakeRunner:
 
 
 def _connects(ci) -> set[str]:
-    return {target for rel_type, target in ci.relationships if rel_type == "connects_to"}
+    return {
+        target for rel_type, target in ci.relationships if rel_type == "connects_to"
+    }
 
 
 def _by_name(cis):

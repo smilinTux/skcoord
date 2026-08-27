@@ -184,7 +184,9 @@ def test_fleet_objects_yield_host_and_service_cis(home: Path) -> None:
     assert [h.name for h in hosts] == ["alpha01"]
     assert hosts[0].attributes["role"] == "control-plane"
     assert [s.name for s in services] == ["skgateway"]
-    assert all(not c.observed for c in found), "specs are declarations, never observations"
+    assert all(
+        not c.observed for c in found
+    ), "specs are declarations, never observations"
 
 
 def test_operatorapp_kind_is_preserved_through_the_fold(tmp_path: Path) -> None:
@@ -195,7 +197,11 @@ def test_operatorapp_kind_is_preserved_through_the_fold(tmp_path: Path) -> None:
     root.mkdir(parents=True)
     (root / "cmdb.json").write_text(
         json.dumps(
-            {"kind": "Operatorapp", "name": "cmdb", "spec": {"cli": "skcapstone cmdb operator"}}
+            {
+                "kind": "Operatorapp",
+                "name": "cmdb",
+                "spec": {"cli": "skcapstone cmdb operator"},
+            }
         )
     )
 
@@ -240,7 +246,9 @@ def test_fleet_service_spec_unit_becomes_an_alias(tmp_path: Path) -> None:
     assert "claude-code-api.service" in svc.identity_aliases
 
 
-def test_registry_pid_file_stem_becomes_an_alias_when_it_differs(tmp_path: Path) -> None:
+def test_registry_pid_file_stem_becomes_an_alias_when_it_differs(
+    tmp_path: Path,
+) -> None:
     root = tmp_path / "registry"
     root.mkdir()
     (root / "skvoice.json").write_text(
@@ -293,10 +301,15 @@ def test_systemd_units_are_observed_and_bound_to_their_host() -> None:
     assert all(c.observed for c in found)
     gateway = next(c for c in found if c.name == "skgateway")
     assert gateway.attributes["active_state"] == "active"
-    assert ("runs_on", make_ci_id(CIType.HOST.value, "testnode")) in gateway.relationships
+    assert (
+        "runs_on",
+        make_ci_id(CIType.HOST.value, "testnode"),
+    ) in gateway.relationships
 
     failed = next(c for c in found if c.name == "dead-thing")
-    assert failed.attributes["active_state"] == "failed", "a failed unit is still an asset"
+    assert (
+        failed.attributes["active_state"] == "failed"
+    ), "a failed unit is still an asset"
 
 
 def test_listening_ports_parse_bind_port_and_process() -> None:
@@ -368,10 +381,19 @@ def test_host_facts_normalise_linux_capacity_and_preserve_provenance() -> None:
             ),
             "free": "              total used free shared buff/cache available\nMem: 1000 400 200 10 400 500\n",
             "ip -j": json.dumps(
-                [{"ifname": "eth0", "addr_info": [{"local": "192.0.2.10", "scope": "global"}]}]
+                [
+                    {
+                        "ifname": "eth0",
+                        "addr_info": [{"local": "192.0.2.10", "scope": "global"}],
+                    }
+                ]
             ),
             "lsblk": json.dumps(
-                {"blockdevices": [{"name": "sda", "type": "disk", "size": 10000, "children": []}]}
+                {
+                    "blockdevices": [
+                        {"name": "sda", "type": "disk", "size": 10000, "children": []}
+                    ]
+                }
             ),
             "df": "Filesystem 1B-blocks Used Available Use% Mounted on\n/dev/sda1 9000 4000 5000 45% /\n",
         },
@@ -410,7 +432,9 @@ def test_cron_jobs_are_observed_without_persisting_command_arguments() -> None:
     assert "nope" not in json.dumps([ci.attributes for ci in found])
 
 
-def test_cron_jobs_wrapped_by_sk_cron_run_carry_the_declared_job_name_as_an_alias() -> None:
+def test_cron_jobs_wrapped_by_sk_cron_run_carry_the_declared_job_name_as_an_alias() -> (
+    None
+):
     """Fleet-managed cron entries are dispatched as
     ``sk-cron-run.sh <job-name> <command> [args]``, prefixed by inline
     ``VAR=value`` assignments. The fingerprinted name stays the CI's stable
@@ -429,9 +453,13 @@ def test_cron_jobs_wrapped_by_sk_cron_run_carry_the_declared_job_name_as_an_alia
     )
     found = collect_cron_jobs(runner)
 
-    assert len(found) == 1, "the inline VAR=value prefix must not make the whole line invisible"
+    assert (
+        len(found) == 1
+    ), "the inline VAR=value prefix must not make the whole line invisible"
     job = found[0]
-    assert job.name.startswith("testnode:cron:user:"), "identity stays the fingerprint, not renamed"
+    assert job.name.startswith(
+        "testnode:cron:user:"
+    ), "identity stays the fingerprint, not renamed"
     assert job.aliases == ("ingest-order",)
     assert "ingest-order" in job.identity_aliases
     assert job.attributes["cron_run_name"] == "ingest-order"
@@ -477,7 +505,9 @@ def test_drift_matches_a_declared_cronjob_against_its_sk_cron_run_alias() -> Non
         aliases=("ingest-order",),
     )
     assert drift(merge([declared, observed])) == []
-    assert drift([declared, observed]) == [], "must match even before folding, via alias keys"
+    assert (
+        drift([declared, observed]) == []
+    ), "must match even before folding, via alias keys"
 
 
 def test_network_interfaces_are_first_class_cis() -> None:
@@ -554,7 +584,12 @@ def test_shared_interface_addresses_do_not_merge_distinct_hosts() -> None:
     answers = {
         "uname": "Linux 6.8\n",
         "ip -j": json.dumps(
-            [{"ifname": "docker0", "addr_info": [{"local": "172.17.0.1", "scope": "global"}]}]
+            [
+                {
+                    "ifname": "docker0",
+                    "addr_info": [{"local": "172.17.0.1", "scope": "global"}],
+                }
+            ]
         ),
     }
 
@@ -601,7 +636,8 @@ def test_observation_freshness_is_not_health() -> None:
         is ObservationState.FRESH
     )
     assert (
-        observation_state((now - timedelta(days=1)).isoformat(), now=now) is ObservationState.STALE
+        observation_state((now - timedelta(days=1)).isoformat(), now=now)
+        is ObservationState.STALE
     )
 
 
@@ -692,7 +728,9 @@ def test_merge_is_order_independent() -> None:
 
 def test_reconcile_dry_run_writes_nothing(tmp_path: Path) -> None:
     mgr = CMDBManager(tmp_path)
-    found = [DiscoveredCI("service", "skgateway", "fleet:service", tags=(DISCOVERED_TAG,))]
+    found = [
+        DiscoveredCI("service", "skgateway", "fleet:service", tags=(DISCOVERED_TAG,))
+    ]
 
     report = reconcile(mgr, found, apply=False)
 
@@ -721,7 +759,7 @@ def test_reconcile_apply_creates_cis_and_relationships(tmp_path: Path) -> None:
             attributes={"active_state": "active"},
             tags=(DISCOVERED_TAG,),
             relationships=(("runs_on", host_id),),
-        )
+        ),
     ]
 
     reconcile(mgr, found, apply=True)
@@ -731,14 +769,20 @@ def test_reconcile_apply_creates_cis_and_relationships(tmp_path: Path) -> None:
     assert set(by_id) == {host_id, make_ci_id("service", "skgateway")}
     service = by_id[make_ci_id("service", "skgateway")]
     assert service.attributes["active_state"] == "active"
-    assert [(r.rel_type, r.target) for r in service.relationships] == [("runs_on", host_id)]
+    assert [(r.rel_type, r.target) for r in service.relationships] == [
+        ("runs_on", host_id)
+    ]
 
 
 def test_reconcile_is_idempotent(tmp_path: Path) -> None:
     mgr = CMDBManager(tmp_path)
     found = [
         DiscoveredCI(
-            "service", "skgateway", "systemd", attributes={"port": 18991}, tags=(DISCOVERED_TAG,)
+            "service",
+            "skgateway",
+            "systemd",
+            attributes={"port": 18991},
+            tags=(DISCOVERED_TAG,),
         )
     ]
 
@@ -750,7 +794,9 @@ def test_reconcile_is_idempotent(tmp_path: Path) -> None:
     assert second.unchanged == [make_ci_id("service", "skgateway")]
 
 
-def test_reconcile_reports_relationships_and_drops_secret_attributes(tmp_path: Path) -> None:
+def test_reconcile_reports_relationships_and_drops_secret_attributes(
+    tmp_path: Path,
+) -> None:
     mgr = CMDBManager(tmp_path)
     host = DiscoveredCI("host", "chiap04", "fleet:node", tags=(DISCOVERED_TAG,))
     service = DiscoveredCI(
@@ -765,7 +811,12 @@ def test_reconcile_reports_relationships_and_drops_secret_attributes(tmp_path: P
     report = reconcile(mgr, [host, service], apply=True)
 
     assert report.relationships == [
-        {"ci_id": service.ci_id, "action": "add", "rel_type": "runs_on", "target": host.ci_id}
+        {
+            "ci_id": service.ci_id,
+            "action": "add",
+            "rel_type": "runs_on",
+            "target": host.ci_id,
+        }
     ]
     assert report.secret_redaction_findings == [
         {"ci_id": service.ci_id, "path": "attributes.password"}
@@ -874,7 +925,9 @@ def test_reconcile_converges_owned_metadata_tags_relationships_and_scope(
     assert any(change.startswith("remove:runs_on") for change in report.updated[ci.id])
 
 
-def test_reconcile_preserves_unowned_manual_relationship_and_tag(tmp_path: Path) -> None:
+def test_reconcile_preserves_unowned_manual_relationship_and_tag(
+    tmp_path: Path,
+) -> None:
     mgr = CMDBManager(tmp_path)
     host = mgr.create_ci("host", "host")
     ci = mgr.create_ci("api", "service", tags=["manual"])
@@ -912,7 +965,8 @@ def test_managed_host_promotes_matching_device_without_rewriting_device_core(
     assert promoted.ci_type == "host"
     assert retained.ci_type == "device"
     assert any(
-        rel.rel_type == "alias_of" and rel.target == promoted.id for rel in retained.relationships
+        rel.rel_type == "alias_of" and rel.target == promoted.id
+        for rel in retained.relationships
     )
 
 
@@ -924,7 +978,9 @@ def test_drift_uses_same_alias_identity_resolution_as_reconcile(tmp_path: Path) 
         attributes={"aliases": ["192.0.2.10"]},
         tags=[DISCOVERED_TAG],
     )
-    sighting = DiscoveredCI("host", "ssh-alpha", "host", observed=True, aliases=("192.0.2.10",))
+    sighting = DiscoveredCI(
+        "host", "ssh-alpha", "host", observed=True, aliases=("192.0.2.10",)
+    )
     findings = drift([sighting], mgr)
     assert not any(
         finding.kind == "stored_not_discovered" and finding.ci_id == stored.id
@@ -970,7 +1026,9 @@ def test_partial_scan_never_turns_absence_into_an_orphan(tmp_path: Path) -> None
     assert reconcile(mgr, [], apply=True, scan_complete=False).orphans == []
 
 
-def test_reconcile_links_existing_alias_duplicates_without_rewriting_ids(tmp_path: Path) -> None:
+def test_reconcile_links_existing_alias_duplicates_without_rewriting_ids(
+    tmp_path: Path,
+) -> None:
     mgr = CMDBManager(tmp_path)
     canonical = mgr.create_ci(
         "alpha.example",
@@ -995,7 +1053,8 @@ def test_reconcile_links_existing_alias_duplicates_without_rewriting_ids(tmp_pat
     migrated = mgr.get_ci(duplicate.id)
     assert canonical.id != duplicate.id
     assert any(
-        r.rel_type == "alias_of" and r.target == canonical.id for r in migrated.relationships
+        r.rel_type == "alias_of" and r.target == canonical.id
+        for r in migrated.relationships
     )
 
 
@@ -1019,7 +1078,9 @@ def test_reconcile_derives_operational_from_active_state(tmp_path: Path) -> None
     mgr = CMDBManager(tmp_path)
     ci_id = make_ci_id("service", "skgateway")
     mgr.create_ci("skgateway", "service", tags=[DISCOVERED_TAG])
-    mgr.set_status(ci_id, "cmdb-seed", CIStatus.DEGRADED.value, note="from incident health")
+    mgr.set_status(
+        ci_id, "cmdb-seed", CIStatus.DEGRADED.value, note="from incident health"
+    )
 
     report = reconcile(mgr, [_service("skgateway", "active")], apply=True)
 
@@ -1038,7 +1099,9 @@ def test_reconcile_derives_down_from_failed_state(tmp_path: Path) -> None:
     assert mgr.get_ci(ci_id).status == CIStatus.DOWN.value
 
 
-def test_reconcile_status_changes_listed_as_status_not_attribute(tmp_path: Path) -> None:
+def test_reconcile_status_changes_listed_as_status_not_attribute(
+    tmp_path: Path,
+) -> None:
     mgr = CMDBManager(tmp_path)
     ci_id = make_ci_id("service", "skchat")
     mgr.create_ci("skchat", "service", tags=[DISCOVERED_TAG])
@@ -1085,7 +1148,9 @@ def test_reconcile_does_not_force_status_for_declared_only(tmp_path: Path) -> No
     mgr.create_ci("skchat", "service", tags=[DISCOVERED_TAG])
     mgr.set_status(ci_id, "cmdb-seed", CIStatus.DEGRADED.value)
 
-    declared = DiscoveredCI("service", "skchat", "fleet:service", tags=(DISCOVERED_TAG,))
+    declared = DiscoveredCI(
+        "service", "skchat", "fleet:service", tags=(DISCOVERED_TAG,)
+    )
     report = reconcile(mgr, [declared], apply=True)
 
     assert "status" not in [k for v in report.updated.values() for k in v]
@@ -1125,7 +1190,11 @@ def test_drift_operatorapp_exemption_does_not_swallow_a_real_service_gap() -> No
 
 
 def test_drift_flags_a_service_running_that_nothing_declared() -> None:
-    found = [DiscoveredCI("service", "mystery-thing", "systemd", observed=True, node="alpha01")]
+    found = [
+        DiscoveredCI(
+            "service", "mystery-thing", "systemd", observed=True, node="alpha01"
+        )
+    ]
     findings = drift(found)
     assert [f.kind for f in findings] == ["observed_not_declared"]
 
@@ -1257,10 +1326,14 @@ def test_docker_containers_are_observed_services() -> None:
 
 def test_docker_restart_identity_excludes_pid_and_run_token() -> None:
     first = FakeRunner(
-        answers={"docker": "sklegal-s102-3620007-4e13b305\tpostgres:17.7-alpine\tUp 1 second\t\t\n"}
+        answers={
+            "docker": "sklegal-s102-3620007-4e13b305\tpostgres:17.7-alpine\tUp 1 second\t\t\n"
+        }
     )
     restarted = FakeRunner(
-        answers={"docker": "sklegal-s102-3521761-73688fd1\tpostgres:17.7-alpine\tUp 1 second\t\t\n"}
+        answers={
+            "docker": "sklegal-s102-3521761-73688fd1\tpostgres:17.7-alpine\tUp 1 second\t\t\n"
+        }
     )
 
     before = collect_docker_containers(first)[0]

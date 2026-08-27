@@ -18,7 +18,9 @@ def _assert_closed(descriptor: int) -> None:
     assert raised.value.errno == errno.EBADF
 
 
-def test_atomic_write_closes_temp_descriptor_after_success(tmp_path, monkeypatch) -> None:
+def test_atomic_write_closes_temp_descriptor_after_success(
+    tmp_path, monkeypatch
+) -> None:
     """A successful replacement must close its temporary descriptor."""
     target = tmp_path / "state.json"
     original_open = os.open
@@ -38,7 +40,9 @@ def test_atomic_write_closes_temp_descriptor_after_success(tmp_path, monkeypatch
     _assert_closed(descriptors["temp"])
 
 
-def test_atomic_write_closes_descriptors_when_replace_fails(tmp_path, monkeypatch) -> None:
+def test_atomic_write_closes_descriptors_when_replace_fails(
+    tmp_path, monkeypatch
+) -> None:
     """A failed replacement closes both temporary and directory descriptors."""
     target = tmp_path / "state.json"
     original_open = os.open
