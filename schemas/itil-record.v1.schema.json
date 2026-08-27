@@ -1,0 +1,203 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://skworld.io/schemas/itil-record.v1.schema.json",
+  "title": "SKCapstone ITIL record core (incident / problem / change)",
+  "description": "Derived from all 304 incidents, 3 problems and 11 changes in ~/.skcapstone/coordination/itil as of 2026-08-27. core.json holds IMMUTABLE creation facts only. Current state is NOT stored here: it is derived from the events log. See itil-event.v1.schema.json.",
+  "type": "object",
+  "required": [
+    "id",
+    "type",
+    "title",
+    "label",
+    "managed_by",
+    "created_by",
+    "tags"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^(inc|prb|chg)-[0-9a-f]{8}$",
+      "description": "Prefix encodes the record type and MUST agree with the type field. All 318 observed ids are exactly 12 chars: a 3-char prefix, a hyphen, and 8 lowercase hex."
+    },
+    "type": {
+      "enum": [
+        "incident",
+        "problem",
+        "change"
+      ]
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 300
+    },
+    "label": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 120
+    },
+    "managed_by": {
+      "type": "string",
+      "minLength": 1
+    },
+    "created_by": {
+      "type": "string",
+      "minLength": 1
+    },
+    "tags": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "severity_at_creation": {
+      "enum": [
+        "sev1",
+        "sev2",
+        "sev3",
+        "sev4"
+      ],
+      "description": "Named _at_creation on purpose: severity may be revised later via an event, and this field must never be rewritten."
+    },
+    "source": {
+      "type": "string",
+      "description": "Observed: service_health, manual, syncthing_guard."
+    },
+    "affected_services": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ci_identity"
+      }
+    },
+    "impact": {
+      "type": "string"
+    },
+    "detected_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "dedup_key": {
+      "type": "string",
+      "pattern": "^[a-z0-9\\-_.]+:[a-z0-9\\-_]+$",
+      "description": "<ci_identity>:<condition>. REQUIRED for any machine-generated record. Dedup is only as good as this key: if the CI identity embeds a volatile token, dedup silently fails and a fresh record is minted on every restart. See CMDB-IDENT-01. 7 of 318 live records omit it entirely, all manually created; it is required for machine-generated records and should become required for all."
+    },
+    "related_incident_ids": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^inc-[0-9a-f]{8}$"
+      }
+    },
+    "related_problem_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^prb-[0-9a-f]{8}$"
+    },
+    "workaround": {
+      "type": "string"
+    },
+    "change_type": {
+      "type": "string"
+    },
+    "risk": {
+      "type": "string"
+    },
+    "rollback_plan": {
+      "type": "string",
+      "minLength": 1
+    },
+    "test_plan": {
+      "type": "string",
+      "minLength": 1
+    },
+    "implementer": {
+      "type": "string"
+    },
+    "cab_required": {
+      "type": "boolean"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "incident"
+          }
+        },
+        "required": [
+          "type"
+        ]
+      },
+      "then": {
+        "required": [
+          "severity_at_creation",
+          "source",
+          "affected_services",
+          "impact",
+          "detected_at",
+          "dedup_key"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "problem"
+          }
+        },
+        "required": [
+          "type"
+        ]
+      },
+      "then": {
+        "required": [
+          "created_at",
+          "related_incident_ids",
+          "workaround"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "change"
+          }
+        },
+        "required": [
+          "type"
+        ]
+      },
+      "then": {
+        "required": [
+          "created_at",
+          "change_type",
+          "risk",
+          "rollback_plan",
+          "test_plan",
+          "implementer",
+          "cab_required"
+        ]
+      }
+    }
+  ],
+  "$defs": {
+    "ci_identity": {
+      "type": "string",
+      "pattern": "^ci-(service|host|network|app)-[a-z0-9][a-z0-9\\-]*$",
+      "not": {
+        "pattern": "-[0-9]{3,8}(-|$)"
+      },
+      "description": "STABLE identity only. TWO defect classes were found in live data and this pattern deliberately rejects both, so current violations are the remediation backlog, not a reason to loosen the schema. (1) Machine-generated identities embedding a process id, e.g. ci-service-sklegal-s102-3620007-4e13b305: 122 of 263 drift incidents, 118 for one service, every restart minting a permanent new incident. (2) Manually created records using free-text service names with spaces and parentheses, e.g. 'skgraph (FalkorDB)' and 'skchat daemon': about 30 records, which also corrupts the derived dedup_key. See CMDB-IDENT-01."
+    }
+  }
+}

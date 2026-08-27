@@ -1,0 +1,233 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://skworld.io/schemas/itil-event.v1.schema.json",
+  "title": "SKCapstone ITIL event (append-only)",
+  "description": "Derived from 1580 events across incidents, problems and changes. IMPORTANT VOCABULARY SPLIT: CardStore events use the key 'action'; ITIL events use 'kind'. A reader written for one store silently sees no state in the other. That mismatch let 269 closed incidents be treated as assignable work.",
+  "type": "object",
+  "required": [
+    "event_id",
+    "ts",
+    "writer",
+    "node",
+    "seq",
+    "kind"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "event_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "ts": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "writer": {
+      "type": "string",
+      "minLength": 1
+    },
+    "node": {
+      "type": "string",
+      "minLength": 1
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "kind": {
+      "enum": [
+        "created",
+        "status",
+        "assignment",
+        "recovery",
+        "note",
+        "evidence",
+        "gtd_link",
+        "link_problem",
+        "link_kedb",
+        "root_cause",
+        "workaround",
+        "schedule",
+        "validation"
+      ],
+      "description": "Only kind=status changes lifecycle state. Every other kind is annotation."
+    },
+    "to_state": {
+      "description": "Lifecycle target. ONLY valid when kind=status.",
+      "enum": [
+        "acknowledged",
+        "investigating",
+        "escalated",
+        "resolved",
+        "closed",
+        "analyzing",
+        "known_error",
+        "reviewing",
+        "approved",
+        "rejected",
+        "implementing",
+        "deployed",
+        "verified",
+        "cancelled"
+      ]
+    },
+    "assignee": {
+      "type": "string",
+      "description": "Owner. ONLY valid when kind=assignment."
+    },
+    "to": {
+      "type": "string",
+      "deprecated": true,
+      "description": "DEPRECATED AND OVERLOADED. Carried both a lifecycle target (kind=status) and a person (kind=assignment) in the same key, so naive state derivation reported 9 incidents in a state named 'jarvis'. Readers MUST gate on kind. New writers emit to_state or assignee instead."
+    },
+    "note": {
+      "type": "string"
+    },
+    "text": {
+      "type": "string"
+    },
+    "id": {
+      "type": "string"
+    },
+    "resolution_summary": {
+      "type": "string"
+    },
+    "verdict": {
+      "enum": [
+        "PASS",
+        "PASS_FOR_REVIEW",
+        "BLOCKED",
+        "FAIL"
+      ]
+    },
+    "artifact": {
+      "type": "string"
+    },
+    "artifact_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "window_start": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "window_end": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "asap": {
+      "type": "boolean"
+    },
+    "deploy_mode": {
+      "type": "string"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "artifact_path": {
+      "type": "string"
+    },
+    "evidence_type": {
+      "type": "string"
+    },
+    "summary": {
+      "type": "string"
+    },
+    "head_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{7,40}$"
+    },
+    "passed": {
+      "type": "boolean"
+    },
+    "url": {
+      "type": "string"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "status"
+          }
+        },
+        "required": [
+          "kind"
+        ]
+      },
+      "then": {
+        "anyOf": [
+          {
+            "required": [
+              "to_state"
+            ]
+          },
+          {
+            "required": [
+              "to"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "assignment"
+          }
+        },
+        "required": [
+          "kind"
+        ]
+      },
+      "then": {
+        "anyOf": [
+          {
+            "required": [
+              "assignee"
+            ]
+          },
+          {
+            "required": [
+              "to"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "evidence"
+          }
+        },
+        "required": [
+          "kind"
+        ]
+      },
+      "then": {
+        "anyOf": [
+          {
+            "required": [
+              "artifact"
+            ]
+          },
+          {
+            "required": [
+              "artifact_path"
+            ]
+          },
+          {
+            "required": [
+              "sha256"
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}
