@@ -1,0 +1,42 @@
+# gitleaks configuration for skcoord.
+#
+# The CI job scans FULL HISTORY on every pull request, so one finding anywhere in
+# the repo's past blocks every PR equally, forever, until it is resolved. On
+# 2026-08-27 that state was reached: four open PRs were all red on gitleaks and
+# none of them had introduced anything.
+#
+# The finding is a false positive in a test whose entire purpose is to prove that
+# secrets are redacted. tests/test_discovery.py feeds a fake cron line containing
+# "--token secret-value" and "--password nope" into the collector and then asserts
+# that neither string survives into the recorded attributes:
+#
+#     assert "secret-value" not in json.dumps([ci.attributes for ci in found])
+#     assert "nope" not in json.dumps([ci.attributes for ci in found])
+#
+# A redaction test cannot do its job without containing something that looks like
+# a secret. Removing the fixture would delete the only proof that redaction works,
+# which is a strictly worse outcome than a scanner false positive.
+#
+# The allowlist below is deliberately narrow: one path, and the two literal
+# placeholder values. It is NOT a blanket exemption for the tests directory, so a
+# real credential committed into any other test still fails the scan.
+
+[extend]
+useDefault = true
+
+[[rules]]
+  id = "placeholder-secrets-in-redaction-test"
+  description = "Literal placeholder values in the cron redaction test"
+  regex = '''(secret-value|--password nope)'''
+  [rules.allowlist]
+    paths = ['''^tests/test_discovery\.py$''']
+
+[allowlist]
+  description = "Redaction-proving fixtures in tests/test_discovery.py only"
+  paths = [
+    '''^tests/test_discovery\.py$''',
+  ]
+  regexes = [
+    '''secret-value''',
+    '''--password nope''',
+  ]
