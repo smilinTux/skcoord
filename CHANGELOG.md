@@ -9,6 +9,19 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
 
 ## [Unreleased]
 
+### Fixed
+
+- `lifecycle_reassessment` now isolates a card whose `core.json` cannot be
+  parsed instead of raising, and skips an event line that is not yet whole.
+  `~/.skcapstone` is a single Syncthing folder, so a file written on one host
+  is observable mid-write on the others; `assess` raising on that aborted the
+  fleet rotation, which exits non-zero when the assessment fails, on every host
+  simultaneously. Measured 2026-08-27: all five hosts stopped launching on a
+  `core.json` that was two bytes long at the instant it was read, and nothing
+  was actually corrupt. Damaged cards are reported in a new `unreadable_cards`
+  class and added to `excluded_card_ids`, so the failure mode is to withhold
+  one card rather than to stop all work.
+
 ### Added
 
 - Schemas and validators for the two coordination stores, derived from live data

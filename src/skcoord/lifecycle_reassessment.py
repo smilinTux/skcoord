@@ -52,16 +52,22 @@ def load_evidence(evidence_dir: Path) -> dict[str, list[dict[str, Any]]]:
             card_id = event.get("card_id")
             if not isinstance(card_id, str):
                 continue
-            rows.setdefault(card_id, []).append({
-                "ts": event.get("ts"),
-                "key": _fold_key(event.get("link_key")),
-                "raw_key": event.get("link_key"),
-                "value": event.get("link_value"),
-                "event_id": event.get("event_id") or event.get("link_key"),
-            })
+            rows.setdefault(card_id, []).append(
+                {
+                    "ts": event.get("ts"),
+                    "key": _fold_key(event.get("link_key")),
+                    "raw_key": event.get("link_key"),
+                    "value": event.get("link_value"),
+                    "event_id": event.get("event_id") or event.get("link_key"),
+                }
+            )
     for card_id in rows:
-        rows[card_id].sort(key=lambda r: (str(r.get("ts") or ""), str(r.get("event_id") or "")))
+        rows[card_id].sort(
+            key=lambda r: (str(r.get("ts") or ""), str(r.get("event_id") or ""))
+        )
     return rows
+
+
 _TERMINAL = {"complete", "void", "archive"}
 _SUPERSEDES_RE = re.compile(r"\bsupersedes(?:\s+card)?\s+([a-z0-9-]+)", re.IGNORECASE)
 _VOLATILE_CI_RE = re.compile(r"(?:^|[-_])\d{2,}(?:[-_][0-9a-f]{6,})?$")
@@ -86,34 +92,105 @@ def _parse_time(value: object) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
-def _json_object_lines(path: Path) -> list[dict[str, Any]]:
+def _json_object_lines(
+    path: Path, damaged: list[dict[str, str]] | None = None
+) -> list[dict[str, Any]]:
+    """Parse one JSONL event file, skipping lines that are not yet whole.
+
+    ~/.skcapstone is a single Syncthing folder, so an append made on one host can
+    be observed mid-flight on another as a truncated final line. Raising on that
+    aborts the whole assessment, which aborts the whole rotation, on every host at
+    once. A partial line is skipped and recorded instead.
+    """
     rows: list[dict[str, Any]] = []
-    with path.open(encoding="utf-8") as source:
-        for number, line in enumerate(source, 1):
-            if not line.strip():
-                continue
+    try:
+        source_text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        if damaged is not None:
+            damaged.append({"path": str(path), "error": f"{type(exc).__name__}: {exc}"})
+        return rows
+    for number, line in enumerate(source_text.splitlines(), 1):
+        if not line.strip():
+            continue
+        try:
             value = json.loads(line)
-            if not isinstance(value, dict):
-                raise ValueError(f"{path}:{number} must contain a JSON object")
-            rows.append(value)
+        except ValueError as exc:
+            if damaged is not None:
+                damaged.append(
+                    {
+                        "path": f"{path}:{number}",
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                )
+            continue
+        if not isinstance(value, dict):
+            if damaged is not None:
+                damaged.append(
+                    {"path": f"{path}:{number}", "error": "line is not a JSON object"}
+                )
+            continue
+        rows.append(value)
     return rows
 
 
-def load_cards(cards_dir: Path) -> dict[str, CardRecord]:
-    """Parse every core and every event line before classification."""
+def load_cards(
+    cards_dir: Path, unreadable: list[dict[str, str]] | None = None
+) -> dict[str, CardRecord]:
+    """Parse every core and every event line before classification.
+
+    A card whose core cannot be parsed is ISOLATED, not fatal. It is recorded in
+    ``unreadable`` and left out of the records, so the caller can exclude it from
+    assignment while every other card is still assessed.
+
+    This function used to raise. Because ~/.skcapstone is one Syncthing folder,
+    a core.json written on one host is visible mid-write on the others, and a
+    single partial file aborted the assessment on EVERY host simultaneously. The
+    rotation exits non-zero when the assessment fails, so one transient truncated
+    write stopped the entire fleet until it happened to be re-read intact.
+    Measured 2026-08-27: all five hosts logged
+    "lifecycle reassessment failed: Expecting property name enclosed in double
+    quotes: line 2 column 1 (char 2)" and launched nothing.
+    """
     records: dict[str, CardRecord] = {}
     for card_dir in sorted(cards_dir.iterdir() if cards_dir.is_dir() else ()):
         core_path = card_dir / "core.json"
         if not card_dir.is_dir() or not core_path.is_file():
             continue
-        core = json.loads(core_path.read_text(encoding="utf-8"))
+        try:
+            core = json.loads(core_path.read_text(encoding="utf-8"))
+        except (ValueError, OSError) as exc:
+            if unreadable is not None:
+                unreadable.append(
+                    {
+                        "card_id": card_dir.name,
+                        "path": str(core_path),
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                )
+            continue
         if not isinstance(core, dict):
-            raise ValueError(f"{core_path} must contain a JSON object")
+            if unreadable is not None:
+                unreadable.append(
+                    {
+                        "card_id": card_dir.name,
+                        "path": str(core_path),
+                        "error": "core.json is not a JSON object",
+                    }
+                )
+            continue
         events: list[dict[str, Any]] = []
         event_dir = card_dir / "events"
-        for event_path in sorted(event_dir.glob("*.jsonl") if event_dir.is_dir() else ()):
-            events.extend(_json_object_lines(event_path))
-        events.sort(key=lambda row: (str(row.get("ts", "")), str(row.get("writer", "")), row.get("seq", 0)))
+        for event_path in sorted(
+            event_dir.glob("*.jsonl") if event_dir.is_dir() else ()
+        ):
+            events.extend(_json_object_lines(event_path, unreadable))
+        events.sort(
+            key=lambda row: (
+                str(row.get("ts", "")),
+                str(row.get("writer", "")),
+                row.get("seq", 0),
+            )
+        )
         card_id = str(core.get("id") or card_dir.name)
         records[card_id] = CardRecord(card_id, core, tuple(events))
     return records
@@ -124,7 +201,9 @@ def _actions(record: CardRecord) -> list[str]:
 
 
 def _dependencies(record: CardRecord) -> list[str]:
-    dependencies = [str(value) for value in record.core.get("dependencies", []) if value]
+    dependencies = [
+        str(value) for value in record.core.get("dependencies", []) if value
+    ]
     for event in record.events:
         dependency = event.get("dependency")
         if event.get("action") == "add_dependency" and isinstance(dependency, str):
@@ -139,7 +218,11 @@ def _current_claim(record: CardRecord) -> dict[str, Any] | None:
     claim: dict[str, Any] | None = None
     for event in record.events:
         action = event.get("action")
-        if action == "claim" and isinstance(event.get("owner"), str) and event.get("owner"):
+        if (
+            action == "claim"
+            and isinstance(event.get("owner"), str)
+            and event.get("owner")
+        ):
             claim = event
         elif action in {"complete", "unassign", "release_claim", "void", "archive"}:
             claim = None
@@ -164,7 +247,12 @@ def _blocked_evidence_after(
     for event in record.events:
         event_time = _parse_time(event.get("ts"))
         verdict = event.get("verdict")
-        if event_time and event_time >= after and isinstance(verdict, str) and _BLOCKED_RE.match(verdict):
+        if (
+            event_time
+            and event_time >= after
+            and isinstance(verdict, str)
+            and _BLOCKED_RE.match(verdict)
+        ):
             artifact_hash = (
                 event.get("artifact_sha256")
                 or event.get("verdict_hash")
@@ -198,11 +286,15 @@ def _superseded_ids(records: dict[str, CardRecord]) -> dict[str, list[str]]:
         candidates: set[str] = set()
         for label in record.core.get("initial_labels", []):
             if isinstance(label, str) and label.lower().startswith("supersedes-"):
-                candidates.add(label[len("supersedes-"):])
-        text = " ".join((str(record.core.get("title", "")), str(record.core.get("description", ""))))
+                candidates.add(label[len("supersedes-") :])
+        text = " ".join(
+            (str(record.core.get("title", "")), str(record.core.get("description", "")))
+        )
         candidates.update(match.group(1) for match in _SUPERSEDES_RE.finditer(text))
         for event in record.events:
-            if event.get("action") == "supersede" and isinstance(event.get("supersedes"), str):
+            if event.get("action") == "supersede" and isinstance(
+                event.get("supersedes"), str
+            ):
                 candidates.add(event["supersedes"])
         for old_id in candidates:
             if old_id in records and old_id != record.card_id:
@@ -233,7 +325,8 @@ def assess(
 ) -> dict[str, Any]:
     """Return a deterministic, mutation free lifecycle report and exclusion set."""
     now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
-    records = load_cards(cards_dir)
+    unreadable_rows: list[dict[str, str]] = []
+    records = load_cards(cards_dir, unreadable_rows)
     actions = {card_id: _actions(record) for card_id, record in records.items()}
     if evidence_dir is None:
         evidence_dir = Path(cards_dir).parent / "coordination" / "card_events"
@@ -243,7 +336,9 @@ def assess(
     for dependent in records.values():
         for dependency in _dependencies(dependent):
             if dependency in records and "void" in actions[dependency]:
-                void_edges.append({"card_id": dependent.card_id, "void_dependency_id": dependency})
+                void_edges.append(
+                    {"card_id": dependent.card_id, "void_dependency_id": dependency}
+                )
 
     stale_claims: list[dict[str, Any]] = []
     dead_worker_claims: list[dict[str, Any]] = []
@@ -257,43 +352,54 @@ def assess(
         age_hours = int((now - claimed_at).total_seconds() // 3600)
         if blocked:
             # class 2a: finished in evidence, structure never caught up.
-            stale_claims.append({
-                "card_id": record.card_id,
-                "owner": claim["owner"],
-                "claimed_at": claimed_at.isoformat(),
-                "age_hours": age_hours,
-                "evidence_event_id": blocked.get("event_id"),
-                "verdict": blocked.get("verdict"),
-                "evidence_source": blocked.get("source", "structure_store"),
-                "kind": "finished_in_evidence",
-            })
+            stale_claims.append(
+                {
+                    "card_id": record.card_id,
+                    "owner": claim["owner"],
+                    "claimed_at": claimed_at.isoformat(),
+                    "age_hours": age_hours,
+                    "evidence_event_id": blocked.get("event_id"),
+                    "verdict": blocked.get("verdict"),
+                    "evidence_source": blocked.get("source", "structure_store"),
+                    "kind": "finished_in_evidence",
+                }
+            )
             continue
         # class 2b: no evidence at all since the claim, and the owner is an
         # ephemeral worker that cannot still be alive. A named agent (jarvis,
         # lumina) or a human may hold a claim deliberately and is never included.
         owner = claim.get("owner") or ""
         produced_anything = any(
-            (_parse_time(row.get("ts")) or claimed_at) >= claimed_at for row in card_evidence
+            (_parse_time(row.get("ts")) or claimed_at) >= claimed_at
+            for row in card_evidence
         )
         if (
             not produced_anything
             and _EPHEMERAL_OWNER_RE.match(str(owner))
             and now - claimed_at >= dead_worker_after
         ):
-            dead_worker_claims.append({
-                "card_id": record.card_id,
-                "owner": owner,
-                "claimed_at": claimed_at.isoformat(),
-                "age_hours": age_hours,
-                "kind": "dead_worker",
-            })
+            dead_worker_claims.append(
+                {
+                    "card_id": record.card_id,
+                    "owner": owner,
+                    "claimed_at": claimed_at.isoformat(),
+                    "age_hours": age_hours,
+                    "kind": "dead_worker",
+                }
+            )
 
     launch_counts = _launch_counts(launch_log_roots)
     unclaimable: list[dict[str, Any]] = []
     for card_id, launches in sorted(launch_counts.items()):
         record = records.get(card_id)
         if launches >= 2 and (record is None or "claim" not in actions[card_id]):
-            unclaimable.append({"card_id": card_id, "launch_count": launches, "reason": "repeated_launch_without_claim"})
+            unclaimable.append(
+                {
+                    "card_id": card_id,
+                    "launch_count": launches,
+                    "reason": "repeated_launch_without_claim",
+                }
+            )
 
     superseded = _superseded_ids(records)
     superseded_rows = [
@@ -307,22 +413,43 @@ def assess(
         description = str(record.core.get("description", ""))
         if "CMDB-IDENT-01" in title:
             volatile_ci.append({"card_id": record.card_id, "reason": "tracking_card"})
-        elif record.core.get("kind") == "incident" and _VOLATILE_CI_RE.search(description):
-            volatile_ci.append({"card_id": record.card_id, "reason": "volatile_ci_identity"})
+        elif record.core.get("kind") == "incident" and _VOLATILE_CI_RE.search(
+            description
+        ):
+            volatile_ci.append(
+                {"card_id": record.card_id, "reason": "volatile_ci_identity"}
+            )
 
     classes: dict[str, list[dict[str, Any]]] = {
-        "void_dependency_edges": sorted(void_edges, key=lambda row: (row["card_id"], row["void_dependency_id"])),
+        "void_dependency_edges": sorted(
+            void_edges, key=lambda row: (row["card_id"], row["void_dependency_id"])
+        ),
         "stale_claims": sorted(stale_claims, key=lambda row: row["card_id"]),
-        "dead_worker_claims": sorted(dead_worker_claims, key=lambda row: row["card_id"]),
+        "dead_worker_claims": sorted(
+            dead_worker_claims, key=lambda row: row["card_id"]
+        ),
         "unclaimable_cards": unclaimable,
         "superseded_cards": superseded_rows,
         "volatile_ci_identity": sorted(volatile_ci, key=lambda row: row["card_id"]),
+        "unreadable_cards": sorted(
+            (row for row in unreadable_rows if row.get("card_id")),
+            key=lambda row: (row.get("card_id", ""), row.get("path", "")),
+        ),
     }
-    excluded = sorted({
-        row["card_id"]
-        for name in ("void_dependency_edges", "stale_claims", "dead_worker_claims", "unclaimable_cards", "superseded_cards")
-        for row in classes[name]
-    })
+    excluded = sorted(
+        {
+            row["card_id"]
+            for name in (
+                "void_dependency_edges",
+                "stale_claims",
+                "dead_worker_claims",
+                "unclaimable_cards",
+                "superseded_cards",
+                "unreadable_cards",
+            )
+            for row in classes[name]
+        }
+    )
     report: dict[str, Any] = {
         "schema": "skcoord.lifecycle-reassessment/v1",
         "generated_at": now.isoformat(),
@@ -337,6 +464,10 @@ def assess(
             "unclaimable_cards": "Close or normalize the source record in a separate approved action.",
             "superseded_cards": "Append a canonical supersession event in a separate approved action.",
             "volatile_ci_identity": "Complete CMDB-IDENT-01 before incident reconciliation.",
+            "unreadable_cards": "Excluded from assignment, not fatal. A card here is usually a "
+            "transient partial write seen across the Syncthing folder and clears on the next "
+            "pass. One that persists is genuinely corrupt and needs the core rewritten from "
+            "its event log.",
         },
     }
     canonical = json.dumps(report, sort_keys=True, separators=(",", ":")).encode()
