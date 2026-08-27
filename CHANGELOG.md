@@ -32,6 +32,12 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
 
 ### Fixed
 
+- Kanban and coordination status aggregation now degrade one failed CardStore
+  fold into an explicit `UNREADABLE` card with its identifier, source, and
+  reason. Readable cards remain visible, while direct folds, malformed event
+  reads, parity, and export remain strict and fail closed (card `5f809dfe`,
+  defect family `00bb0a6a`).
+
 - Stale-claim detection now joins the evidence store. It previously scanned only
   `cards/<id>/events/*.jsonl` looking for verdicts that are written to
   `coordination/card_events/*.jsonl`, so it reported `stale_claims: 0` against a
