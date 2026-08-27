@@ -1255,6 +1255,35 @@ def test_docker_containers_are_observed_services() -> None:
     assert all(c.observed for c in found)
 
 
+def test_docker_restart_identity_excludes_pid_and_run_token() -> None:
+    first = FakeRunner(
+        answers={"docker": "sklegal-s102-3620007-4e13b305\tpostgres:17.7-alpine\tUp 1 second\t\t\n"}
+    )
+    restarted = FakeRunner(
+        answers={"docker": "sklegal-s102-3521761-73688fd1\tpostgres:17.7-alpine\tUp 1 second\t\t\n"}
+    )
+
+    before = collect_docker_containers(first)[0]
+    after = collect_docker_containers(restarted)[0]
+
+    assert before.ci_id == after.ci_id == "ci-service-sklegal-s102"
+    assert before.attributes["launcher_pid"] == "3620007"
+    assert after.attributes["restart_token"] == "73688fd1"
+    assert before.aliases == ("sklegal-s102-3620007-4e13b305",)
+
+
+def test_container_names_without_known_restart_suffix_are_preserved() -> None:
+    runner = FakeRunner(
+        answers={"docker": "api-1234-deadbeef-extra\tapi:1\tUp 1 day\t\t\n"}
+    )
+
+    found = collect_docker_containers(runner)[0]
+
+    assert found.name == "api-1234-deadbeef-extra"
+    assert "launcher_pid" not in found.attributes
+    assert found.aliases == ()
+
+
 def test_docker_collector_is_empty_without_docker() -> None:
     assert collect_docker_containers(FakeRunner(answers={})) == []
 
