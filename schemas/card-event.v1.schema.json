@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://skworld.io/schemas/card-event.v1.schema.json",
+  "title": "SKCapstone CardStore evidence event (coordination/card_events)",
+  "description": "The EVIDENCE half of the two-store split. Structure lives in cards/<id>/events/*.jsonl and keys its type as 'action'; this store also uses 'action' but carries link/label facts rather than lifecycle. Neither store alone answers whether a card is done AND passed.\n\nORDERING: 'seq' is PER WRITER FILE, not global. Measured: 145 of 145 multi-writer cards have two or more files both starting at seq 0. Cross-writer ordering MUST use ts, then writer, then event_id. Ordering by seq silently interleaves history wrong.",
+  "type": "object",
+  "required": ["card_id", "action", "writer", "ts"],
+  "properties": {
+    "card_id": { "type": "string", "minLength": 1 },
+    "action": { "enum": ["link", "add_label", "remove_label"] },
+    "writer": { "type": "string", "minLength": 1 },
+    "ts": { "type": "string", "format": "date-time" },
+    "seq": {
+      "type": "integer", "minimum": 0,
+      "description": "Per-writer-file counter. NEVER valid for cross-writer ordering."
+    },
+    "link_key": { "$ref": "#/$defs/link_key" },
+    "link_value": { "type": ["string", "number", "boolean", "null"] },
+    "label": { "type": "string" },
+    "column": { "type": ["string", "null"] },
+    "order": { "type": ["number", "null"] },
+    "priority": { "type": ["string", "null"] },
+    "swimlane": { "type": ["string", "null"] }
+  },
+  "allOf": [
+    { "if": { "properties": { "action": { "const": "link" } }, "required": ["action"] },
+      "then": { "required": ["link_key", "link_value"] } },
+    { "if": { "properties": { "action": { "enum": ["add_label", "remove_label"] } }, "required": ["action"] },
+      "then": { "required": ["label"] } }
+  ],
+  "$defs": {
+    "link_key": {
+      "type": "string",
+      "pattern": "^([a-z][a-z0-9_]*|x-[a-z0-9][a-z0-9_.-]*-[a-z0-9][a-z0-9_.-]*)$",
+      "not": { "anyOf": [
+        { "pattern": "20[0-9]{6}" },
+        { "pattern": "[0-9a-f]{16,}" }
+      ] },
+      "description": "Either a canonical core key (see evidence_vocab.CORE, 61 keys) or the namespaced escape form x-<agent>-<key>. Lowercase, underscore-separated. A timestamp or hash in the KEY is rejected: it belongs in the value. Live data has 125 keys with a timestamp baked in, e.g. verdict-20260826T021646Z, which makes every such event invisible to a reader asking for 'verdict'.\n\nWHY CONTROLLED: 19408 link events currently use 3674 distinct keys; the top 100 cover 49 percent. human_approval alone has 26 spellings, so a safety check reading only the canonical key finds 41 of 173 recorded approvals. Supersession has 14 spellings, which is why a card was once ranked highest-leverage while actually superseded twice."
+    }
+  }
+}
