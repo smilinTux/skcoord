@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import time
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -222,6 +224,49 @@ def _launch_counts(log_roots: Iterable[Path]) -> Counter[str]:
     return counts
 
 
+
+_LAUNCH_EVIDENCE_TTL_H = 6.0
+
+
+def _reporting_launch_counts(log_dir: Path, launch_counts: dict[str, int]) -> dict[str, int]:
+    """Count only launches whose worker actually reported, within a TTL.
+
+    A launch is evidence that a card is unclaimable ONLY if the worker got far
+    enough to say so. Two very different failures were being conflated:
+
+      - the board genuinely rejects the card (closed ITIL incident, an id
+        namespace it will not accept, already assigned elsewhere). The worker
+        writes a rejection and exits. That IS evidence.
+      - the worker was INTERRUPTED before it could claim: killed, session torn
+        down, host restarted. `pi` buffers its output and flushes at exit, so an
+        interrupted worker leaves a ZERO BYTE log. That is evidence of nothing.
+
+    Measured 2026-08-27: b0c8489a, the single card standing between the fleet and
+    the SKLegal human gate, was excluded permanently on two launches that both
+    left empty logs. 46 cards were held this way, and the exclusion never expired
+    because nothing aged it out.
+    """
+    out: dict[str, int] = {}
+    if not log_dir.is_dir():
+        return out
+    cutoff = time.time() - _LAUNCH_EVIDENCE_TTL_H * 3600
+    for card_id in launch_counts:
+        n = 0
+        for f in log_dir.glob("%s-*.log" % card_id):
+            try:
+                stt = f.stat()
+            except OSError:
+                continue
+            if stt.st_mtime < cutoff:
+                continue          # aged out: exclusion self-heals
+            if stt.st_size == 0:
+                continue          # interrupted, never reported
+            n += 1
+        if n:
+            out[card_id] = n
+    return out
+
+
 def assess(
     cards_dir: Path,
     launch_log_roots: Iterable[Path] = (),
@@ -290,10 +335,15 @@ def assess(
 
     launch_counts = _launch_counts(launch_log_roots)
     unclaimable: list[dict[str, Any]] = []
+    reporting = _reporting_launch_counts(
+        Path(os.path.expanduser("~/.skcapstone/fleet/logs")), launch_counts)
     for card_id, launches in sorted(launch_counts.items()):
         record = records.get(card_id)
-        if launches >= 2 and (record is None or "claim" not in actions[card_id]):
-            unclaimable.append({"card_id": card_id, "launch_count": launches, "reason": "repeated_launch_without_claim"})
+        evidenced = reporting.get(card_id, 0)
+        if evidenced >= 2 and (record is None or "claim" not in actions[card_id]):
+            unclaimable.append({"card_id": card_id, "launch_count": launches,
+                                "reporting_launches": evidenced,
+                                "reason": "repeated_launch_without_claim"})
 
     superseded = _superseded_ids(records)
     superseded_rows = [

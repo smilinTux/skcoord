@@ -174,8 +174,11 @@ def test_board_and_card_lock_symlinks_and_hardlinks_are_rejected(tmp_path) -> No
     locks = home / "coordination" / "locks"
     outside = tmp_path / "outside"
     home.mkdir()
-    (home / "coordination").mkdir()
+    CardStore(home).create(CardCore(id="hard0001", title="lock fixture"))
     outside.mkdir()
+    for path in locks.iterdir():
+        path.unlink()
+    locks.rmdir()
     locks.symlink_to(outside, target_is_directory=True)
     with pytest.raises(ValueError, match="lock directory"):
         with _board_mutation_lock(home):

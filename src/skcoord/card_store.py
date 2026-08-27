@@ -27,6 +27,7 @@ import stat
 import time
 import uuid
 from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -46,6 +47,37 @@ _TASK_VIEW_SCOPE_MAX_BYTES = 1024
 _TASK_VIEW_CURSOR_MAX_ENCODED_BYTES = 10382
 # Process-local by design: restart invalidates every outstanding cursor.
 _TASK_VIEW_CURSOR_SECRET = secrets.token_bytes(32)
+_HELD_CARD_LOCKS: ContextVar[frozenset[tuple[str, str]]] = ContextVar(
+    "skcoord_held_card_locks", default=frozenset()
+)
+_HELD_HOME_ANCHOR: ContextVar[tuple[int, int] | None] = ContextVar(
+    "skcoord_home_anchor", default=None
+)
+
+
+def _card_lock_key(home: Path, card_id: str) -> tuple[str, str]:
+    """Return a process-local reentrancy key for one resolved card namespace."""
+    return str(Path(home).expanduser().resolve(strict=False)), card_id
+
+
+@contextmanager
+def _mark_card_lock_held(home: Path, card_id: str, home_anchor: tuple[int, int] | None = None):
+    """Mark a real acquired lock so nested store appends do not reacquire it.
+    
+    Args:
+        home: CardStore home path.
+        card_id: Card identifier.
+        home_anchor: Optional (dev, ino) tuple for home ancestor validation.
+    """
+    key = _card_lock_key(home, card_id)
+    token = _HELD_CARD_LOCKS.set(_HELD_CARD_LOCKS.get() | {key})
+    anchor_token = _HELD_HOME_ANCHOR.set(home_anchor) if home_anchor else None
+    try:
+        yield
+    finally:
+        _HELD_CARD_LOCKS.reset(token)
+        if anchor_token is not None:
+            _HELD_HOME_ANCHOR.reset(anchor_token)
 
 
 def validate_card_lock_identifier(card_id: str) -> str:
@@ -480,6 +512,15 @@ class CardStore:
 
     # ── writes ────────────────────────────────────────────────────────────
 
+    def _ensure_card_lock_anchor(self, card_id: str) -> None:
+        """Create the persistent card-ID anchor only for a validated card."""
+        core = self._load_core(card_id)
+        if core is None or core.get("id") != card_id:
+            raise ValueError(f"CardStore card {card_id} has no foldable core")
+        filename = f"{hashlib.sha256(card_id.encode('utf-8')).hexdigest()}.lock"
+        with _open_lockfile(self.home, filename, "card"):
+            pass
+
     def create(self, core: CardCore) -> str:
         """Write ``cards/<id>/core.json`` write-once. Returns the card id.
 
@@ -528,16 +569,33 @@ class CardStore:
                 os.close(fd)
             os.fsync(rec_fd)
             os.close(rec_fd)
+        # New cards carry their namespace-stable card-ID anchor from birth.
+        self._ensure_card_lock_anchor(core.id)
         return core.id
 
     def append_event(self, card_id: str, action: str, agent: str, **payload: Any) -> dict:
-        """Append one event line to this writer's own log (flock-guarded).
+        """Append one event line under the common same-card lock protocol.
 
         ``transition_id`` is an optional deterministic caller token. Repeating
         it returns the already-durable event instead of appending another line,
         which lets a caller safely classify a write-then-error as success.
+        A lock already held by this context is recognized internally to avoid
+        recursively reacquiring ``flock`` through an ordinary higher-level
+        mutation protocol.
         """
         validate_card_lock_identifier(card_id)
+        if _card_lock_key(self.home, card_id) not in _HELD_CARD_LOCKS.get():
+            with card_mutation_lock(self.home, card_id):
+                return self.append_event(card_id, action, agent, **payload)
+        # Validate home anchor hasn't been replaced during the critical section
+        home_anchor = _HELD_HOME_ANCHOR.get()
+        if home_anchor is not None:
+            try:
+                current_home = self.home.stat()
+                if home_anchor != (current_home.st_dev, current_home.st_ino):
+                    raise ValueError("CardStore home ancestor changed during critical section")
+            except FileNotFoundError:
+                raise ValueError("CardStore home directory disappeared during critical section")
         self._require_foldable_core(card_id)
         writer_filename = f"{self._writer_id(agent)}.jsonl"
         rec_fd = self._open_card_directory(card_id)
@@ -667,9 +725,7 @@ class CardStore:
                 if not name.endswith(".jsonl"):
                     continue
                 try:
-                    raw = self._read_regular_file_bytes(
-                        events_fd, name, "CardStore event source"
-                    )
+                    raw = self._read_regular_file_bytes(events_fd, name, "CardStore event source")
                 except ValueError:
                     raise
                 except Exception as exc:  # noqa: BLE001
@@ -681,9 +737,7 @@ class CardStore:
                 try:
                     lines = raw.decode("utf-8").splitlines()
                 except UnicodeError as exc:
-                    raise ValueError(
-                        f"CardStore event source for {card_id} is malformed"
-                    ) from exc
+                    raise ValueError(f"CardStore event source for {card_id} is malformed") from exc
                 for line in lines:
                     line = line.strip()
                     if not line:
@@ -852,9 +906,7 @@ class CardStore:
                     or not criteria
                     or any(not isinstance(value, str) or not value.strip() for value in criteria)
                 ):
-                    raise ValueError(
-                        f"CardStore criteria amendment for {card_id} is malformed"
-                    )
+                    raise ValueError(f"CardStore criteria amendment for {card_id} is malformed")
                 card.acceptance_criteria = list(criteria)
             elif action == "add_dependency" and isinstance(e.get("dependency"), str):
                 dependency = e["dependency"]
@@ -1112,9 +1164,7 @@ def _task_view_cursor_position(
     ):
         raise ValueError("task-view cursor is malformed")
     try:
-        raw = base64.b64decode(
-            cursor + "=" * (-len(cursor) % 4), altchars=b"-_", validate=True
-        )
+        raw = base64.b64decode(cursor + "=" * (-len(cursor) % 4), altchars=b"-_", validate=True)
         body, signature = raw[:-32], raw[-32:]
         expected = hmac.digest(_TASK_VIEW_CURSOR_SECRET, body, "sha256")
         if len(signature) != 32 or not hmac.compare_digest(signature, expected):
@@ -1375,25 +1425,223 @@ def amend_dependency(
         return True
 
 
-@contextmanager
-def card_mutation_lock(home: Path, card_id: str, timeout_seconds: float = 5.0):
-    """Acquire a bounded, path-safe per-card advisory lock."""
-    card_id = validate_card_lock_identifier(card_id)
-    filename = f"{hashlib.sha256(card_id.encode('utf-8')).hexdigest()}.lock"
-    deadline = time.monotonic() + timeout_seconds
-    with _open_lockfile(home, filename, "card") as handle:
-        while True:
-            try:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except BlockingIOError:
-                if time.monotonic() >= deadline:
-                    raise TimeoutError(f"timed out acquiring card lock for {card_id}")
-                time.sleep(0.01)
+def _open_existing_coordination_lock(home: Path, filename: str, label: str):
+    """Open an existing persistent lock without creating any path component."""
+    no_follow = getattr(os, "O_NOFOLLOW", None)
+    if no_follow is None:
+        raise RuntimeError("safe coordination paths require O_NOFOLLOW support")
+    root = Path(home).expanduser()
+    if root.is_symlink():
+        raise ValueError("coordination home must not be a symlink")
+    flags = os.O_RDONLY | os.O_DIRECTORY | no_follow
+    try:
+        root_fd = os.open(root, flags)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise ValueError("coordination home is unsafe") from exc
+    coordination_fd = locks_fd = descriptor = -1
+    try:
+        coordination_fd = CardStore._open_existing_directory(
+            root_fd, "coordination", "coordination lock directory"
+        )
+        if coordination_fd is None:
+            return None
+        locks_fd = CardStore._open_existing_directory(
+            coordination_fd, "locks", "coordination lock directory"
+        )
+        if locks_fd is None:
+            return None
         try:
-            yield
+            existing = os.stat(filename, dir_fd=locks_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return None
+        if (
+            stat.S_ISLNK(existing.st_mode)
+            or not stat.S_ISREG(existing.st_mode)
+            or existing.st_nlink != 1
+        ):
+            raise ValueError(f"{label} lock path must be a regular single-link file")
+        try:
+            descriptor = os.open(filename, os.O_RDWR | no_follow, dir_fd=locks_fd)
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise ValueError(f"{label} lock path is unsafe") from exc
+    finally:
+        if locks_fd is not None and locks_fd >= 0:
+            os.close(locks_fd)
+        if coordination_fd is not None and coordination_fd >= 0:
+            os.close(coordination_fd)
+        os.close(root_fd)
+    opened = os.fstat(descriptor)
+    if (
+        not stat.S_ISREG(opened.st_mode)
+        or opened.st_nlink != 1
+        or (opened.st_dev, opened.st_ino) != (existing.st_dev, existing.st_ino)
+    ):
+        os.close(descriptor)
+        raise ValueError(f"{label} lock path must be a regular single-link file")
+    return os.fdopen(descriptor, "a+", encoding="utf-8")
+
+
+def _open_home_directory(home: Path) -> int:
+    """Open a validated CardStore home directory as an ancestor anchor.
+
+    A home directory descriptor is kept open during the critical section
+    to detect atomic replacement of the entire home namespace. This prevents
+    post-entry home-ancestor bypass where a helper locked on the detached
+    old home would not serialize with an ordinary writer in the new home.
+    """
+    no_follow = getattr(os, "O_NOFOLLOW", None)
+    if no_follow is None:
+        raise RuntimeError("safe CardStore paths require O_NOFOLLOW support")
+    root = Path(home).expanduser()
+    if root.is_symlink():
+        raise ValueError("CardStore home must not be a symlink")
+    try:
+        home_fd = os.open(
+            root,
+            os.O_RDONLY | os.O_DIRECTORY | no_follow,
+        )
+    except OSError as exc:
+        raise ValueError("CardStore home is unsafe") from exc
+    if not stat.S_ISDIR(os.fstat(home_fd).st_mode):
+        os.close(home_fd)
+        raise ValueError("CardStore home must be a directory")
+    return home_fd
+
+
+def _open_existing_card_lock(home: Path, card_id: str):
+    """Open a validated card directory as its artifact-neutral lock anchor.
+
+    A directory descriptor survives atomic replacement of ``core.json`` and is
+    therefore common to every same-card mutation while the card namespace is
+    stable.  The core is validated through that descriptor before it is
+    returned; malformed, missing, symlinked, hardlinked, or ID-mismatched cores
+    fail without creating any filesystem node.
+    """
+    store = CardStore(home)
+    card_fd = store._open_existing_card_directory(card_id)
+    if card_fd is None:
+        raise ValueError(f"CardStore card {card_id} has no foldable core")
+    try:
+        raw = store._read_regular_file_bytes(card_fd, "core.json", "CardStore core")
+        if raw is None:
+            raise ValueError(f"CardStore card {card_id} has no foldable core")
+        try:
+            core = json.loads(raw.decode("utf-8"))
+        except (UnicodeError, json.JSONDecodeError) as exc:
+            raise ValueError(f"CardStore core for {card_id} is malformed") from exc
+        if not isinstance(core, dict) or core.get("id") != card_id:
+            raise ValueError(f"CardStore core for {card_id} does not match its card")
+        return card_fd
+    except Exception:
+        os.close(card_fd)
+        raise
+
+
+def _acquire_card_lock(descriptor: int, card_id: str, deadline: float) -> None:
+    """Acquire one already-open card lock before a shared deadline."""
+    while True:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"timed out acquiring card lock for {card_id}")
+            time.sleep(0.01)
+
+
+@contextmanager
+def card_mutation_lock(
+    home: Path,
+    card_id: str,
+    timeout_seconds: float = 5.0,
+    *,
+    artifact_neutral: bool = False,
+):
+    """Acquire the common bounded lock for every existing-card mutation.
+
+    The validated card directory, not replaceable ``core.json``, is the common
+    card-ID anchor.  It is opened without creation, locked first, and validated
+    again after acquisition.  Ordinary callers may additionally retain the
+    persistent hashed lock for compatibility.  Artifact-neutral callers never
+    create it or any parent, preserving the complete tree on invalid input.
+    """
+    card_id = validate_card_lock_identifier(card_id)
+    deadline = time.monotonic() + timeout_seconds
+    try:
+        anchor_handle = _open_existing_card_lock(home, card_id)
+    except ValueError:
+        if artifact_neutral or card_store_write_enabled():
+            raise
+        # Explicit legacy-only rollback mode has no CardStore card directory.
+        # Its ordinary mutations retain the historical persistent lock path;
+        # there is no helper/store writer with which to share a card anchor.
+        filename = f"{hashlib.sha256(card_id.encode('utf-8')).hexdigest()}.lock"
+        with _open_lockfile(home, filename, "card") as handle:
+            _acquire_card_lock(handle.fileno(), card_id, deadline)
+            try:
+                with _mark_card_lock_held(home, card_id):
+                    yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        return
+    
+    # For non-legacy mode, track home anchor for critical section validation
+    home_anchor = None
+    try:
+        # Open home directory before lock acquisition to detect home-ancestor replacement
+        home_handle = _open_home_directory(home)
+        home_anchor = os.fstat(home_handle)
+        try:
+            _acquire_card_lock(anchor_handle, card_id, deadline)
+            # A card/ancestor replacement while waiting would leave this descriptor
+            # detached from the current namespace.  Fail closed rather than enter a
+            # critical section on an anchor ordinary writers can no longer reach.
+            current_handle = _open_existing_card_lock(home, card_id)
+            try:
+                anchor = os.fstat(anchor_handle)
+                current = os.fstat(current_handle)
+                if (anchor.st_dev, anchor.st_ino) != (current.st_dev, current.st_ino):
+                    raise ValueError("CardStore card lock anchor changed while acquiring it")
+            finally:
+                os.close(current_handle)
+            # Also validate the home ancestor hasn't been replaced.
+            # This prevents the bypass where a helper holds locks on the detached
+            # old home while an ordinary writer acquires locks on the new home.
+            current_home = os.fstat(home_handle)
+            if (home_anchor.st_dev, home_anchor.st_ino) != (current_home.st_dev, current_home.st_ino):
+                raise ValueError("CardStore home ancestor changed while acquiring card lock")
+
+            filename = f"{hashlib.sha256(card_id.encode('utf-8')).hexdigest()}.lock"
+            if artifact_neutral:
+                existing_handle = _open_existing_coordination_lock(home, filename, "card")
+                if existing_handle is None:
+                    raise ValueError(f"CardStore card {card_id} has no stable lock anchor")
+                with existing_handle:
+                    _acquire_card_lock(existing_handle.fileno(), card_id, deadline)
+                    try:
+                        with _mark_card_lock_held(home, card_id, home_anchor=(home_anchor.st_dev, home_anchor.st_ino)):
+                            yield
+                    finally:
+                        fcntl.flock(existing_handle.fileno(), fcntl.LOCK_UN)
+                return
+
+            with _open_lockfile(home, filename, "card") as handle:
+                _acquire_card_lock(handle.fileno(), card_id, deadline)
+                try:
+                    with _mark_card_lock_held(home, card_id, home_anchor=(home_anchor.st_dev, home_anchor.st_ino)):
+                        yield
+                finally:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
         finally:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            fcntl.flock(home_handle, fcntl.LOCK_UN)
+            os.close(home_handle)
+    finally:
+        fcntl.flock(anchor_handle, fcntl.LOCK_UN)
+        os.close(anchor_handle)
 
 
 def add_dependency(
@@ -1552,59 +1800,24 @@ def mirror_coord_archive(home: Path, task_id: str, agent: str) -> None:
 OPEN_DRIFT_THRESHOLD = 5
 
 
-def _open_count(
-    cards: dict, known_status_ids: Optional[set[str]] = None
-) -> int:
-    """Count comparable coord-board OPEN cards.
+def _open_count(cards: dict) -> int:
+    """Count coord-board OPEN cards (what ``coord status`` reports as open).
 
-    Args:
-        cards: Projected cards keyed by identifier.
-        known_status_ids: Optional card ids whose immutable legacy record
-            carries an explicit ``status`` field. Other cards are unknown.
-
-    Returns:
-        The number of non-archived task cards explicitly known to be open.
+    Open = a task/epic card, not archived, still in the backlog column.
     """
     return sum(
         1
-        for card_id, card in cards.items()
-        if (known_status_ids is None or card_id in known_status_ids)
-        and not card.archived
-        and card.kind.value in ("task", "epic")
-        and card.status.value == "backlog"
+        for c in cards.values()
+        if not c.archived and c.kind.value in ("task", "epic") and c.status.value == "backlog"
     )
-
-
-def _legacy_status_ids(home: Path) -> set[str]:
-    """Return task ids with status physically present in the legacy record.
-
-    Args:
-        home: Shared SKCapstone root.
-
-    Returns:
-        Task ids whose immutable birth record explicitly carries ``status``.
-    """
-    from .coordination import Board
-
-    card_ids: set[str] = set()
-    for path in sorted(Board(home).tasks_dir.glob("*.json")):
-        try:
-            record = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError):
-            continue
-        card_id = record.get("id") if isinstance(record, dict) else None
-        if isinstance(card_id, str) and card_id and "status" in record:
-            card_ids.add(card_id)
-    return card_ids
 
 
 def parity_check(home: Path, open_drift_threshold: int = OPEN_DRIFT_THRESHOLD) -> dict:
     """Diff the legacy board against the CardStore fold.
 
-    Compares only fields physically maintained by each legacy record. A
-    projected default for an absent legacy field is unknown, not disagreement.
-    The open-count alert likewise compares only records with explicit legacy
-    lifecycle state.
+    Compares every card on lifecycle and governance state, and computes the
+    PARITY ALERT: whether the store-served open-count diverges from legacy by
+    more than ``open_drift_threshold``.
 
     Returns:
         dict: ``{"checked", "matched", "mismatches", "missing",
@@ -1620,7 +1833,6 @@ def parity_check(home: Path, open_drift_threshold: int = OPEN_DRIFT_THRESHOLD) -
     with _forced_legacy_read():
         legacy = {c.id: c for c in KanbanBoard(home).cards(include_archived=True)}
     stored = {c.id: c for c in store.list_cards(include_archived=True)}
-    legacy_status_ids = _legacy_status_ids(home)
 
     # Coarse lifecycle bucket: legacy coord can only derive todo/active/done from
     # its claim files, so kanban-native column moves (ready<->doing<->review) made
@@ -1649,11 +1861,7 @@ def parity_check(home: Path, open_drift_threshold: int = OPEN_DRIFT_THRESHOLD) -
         # reconcile_from_legacy() can actually converge. A diff here means the
         # mirror is genuinely broken.
         diff = {}
-        # Legacy task JSON is a birth record. A projected status default for
-        # a record without that field is unknown and cannot disagree.
-        if cid in legacy_status_ids and _bucket(lc.status.value) != _bucket(
-            sc.status.value
-        ):
+        if _bucket(lc.status.value) != _bucket(sc.status.value):
             diff["status"] = [lc.status.value, sc.status.value]
         if (lc.owner or None) != (sc.owner or None):
             diff["owner"] = [lc.owner, sc.owner]
@@ -1689,11 +1897,8 @@ def parity_check(home: Path, open_drift_threshold: int = OPEN_DRIFT_THRESHOLD) -
             matched += 1
         if info:
             informational.append({"id": cid, "diff": info})
-    # Compare only lifecycle values the legacy side actually carries. A
-    # status-less birth record projected to backlog is unknown, not evidence
-    # that the CardStore completion is wrong.
-    open_legacy = _open_count(legacy, legacy_status_ids)
-    open_store = _open_count(stored, legacy_status_ids)
+    open_legacy = _open_count(legacy)
+    open_store = _open_count(stored)
     open_drift = abs(open_legacy - open_store)
     return {
         "checked": len(legacy),
