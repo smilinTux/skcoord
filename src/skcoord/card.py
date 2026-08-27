@@ -605,7 +605,9 @@ class KanbanBoard:
         if card_store_read_enabled():
             from .card_store import CardStore
 
-            store_cards = CardStore(self.home).list_cards(include_archived=include_archived)
+            store_cards = CardStore(self.home).list_cards(
+                include_archived=include_archived, degrade_unreadable=True
+            )
             # Catastrophe guard: never silently empty the board if the store is
             # behind. Fall back to the legacy projection when the store is empty
             # but legacy task files exist.
