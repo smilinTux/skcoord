@@ -24,7 +24,10 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
   `human_approval` alone had 26 spellings: a check reading only the canonical key
   found 41 of 173 recorded approvals. Folding never invents a concept; a key that
   cannot be confidently folded stays uncontrolled and is reported rather than
-  reinterpreted.
+  reinterpreted. New link writes now enforce that vocabulary before opening an
+  append destination, readers fold historical aliases to canonical keys, and the
+  migration map proves the known failure is covered across all 22 supersession
+  spellings and all 43 verdict spellings.
 
 - `dead_worker_claims` class in the lifecycle reassessment report, covering a
   claim held by an ephemeral worker that produced no evidence at all. Named

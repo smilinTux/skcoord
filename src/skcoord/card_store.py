@@ -35,6 +35,7 @@ from pydantic import BaseModel, Field
 
 from .card import Card, Column, Kind
 from .coordination import validate_shared_home
+from .evidence_vocab import canonical_key, validate_for_write
 
 logger = logging.getLogger(__name__)
 
@@ -539,6 +540,8 @@ class CardStore:
         """
         validate_card_lock_identifier(card_id)
         self._require_foldable_core(card_id)
+        if action == "link" and isinstance(payload.get("link_key"), str):
+            validate_for_write(payload["link_key"])
         writer_filename = f"{self._writer_id(agent)}.jsonl"
         rec_fd = self._open_card_directory(card_id)
         try:
@@ -596,8 +599,12 @@ class CardStore:
                         "action": action,
                     }
                     event.update(payload)
+                    serialized = json.dumps(event, default=str)
+                    parsed = json.loads(serialized)
+                    if not isinstance(parsed, dict):
+                        raise ValueError("CardStore event must serialize to a JSON object")
                     fh.seek(0, os.SEEK_END)
-                    fh.write(json.dumps(event, default=str) + "\n")
+                    fh.write(serialized + "\n")
                     fh.flush()
                     os.fsync(fh.fileno())
                     return event
@@ -836,7 +843,7 @@ class CardStore:
             elif action == "remove_label" and e.get("label") in card.labels:
                 card.labels.remove(e["label"])
             elif action == "link" and e.get("link_key") is not None:
-                card.links[e["link_key"]] = e.get("link_value")
+                card.links[canonical_key(e["link_key"])] = e.get("link_value")
             elif action == "describe":
                 # SPE P3.1: title/description are folded, not frozen. Only the
                 # keys actually present are applied, so an empty string is a

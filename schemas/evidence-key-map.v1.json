@@ -1,5 +1,5 @@
 {
- "core_size": 61,
+ "core_size": 62,
  "distinct_keys": 3674,
  "generated_from": "~/.skcapstone/coordination/card_events/*.jsonl",
  "link_events": 19408,
@@ -13635,92 +13635,92 @@
    "status": "unknown"
   },
   "replacement-deployment": {
-   "canonical": "replacement",
+   "canonical": "replaces",
    "events": 2,
    "status": "aliased"
   },
   "replacement-peer": {
-   "canonical": "replacement",
+   "canonical": "replaces",
    "events": 1,
    "status": "aliased"
   },
   "replacement-proof": {
-   "canonical": "replacement",
+   "canonical": "replaces",
    "events": 1,
    "status": "aliased"
   },
   "replacement-qualification": {
-   "canonical": "replacement",
+   "canonical": "replaces",
    "events": 2,
    "status": "aliased"
   },
   "replacement_chain": {
-   "canonical": "replacement",
+   "canonical": "replaces",
    "events": 6,
    "status": "aliased"
   },
   "replacement_deployment": {
-   "canonical": "replacement",
+   "canonical": "replaces",
    "events": 2,
    "status": "aliased"
   },
   "replacement_evidence": {
-   "canonical": "replacement",
+   "canonical": "replaces",
    "events": 2,
    "status": "aliased"
   },
   "replacement_evidence_commit": {
-   "canonical": "replacement",
+   "canonical": "replaces",
    "events": 2,
    "status": "aliased"
   },
   "replacement_evidence_sha256": {
-   "canonical": "replacement",
+   "canonical": "replaces",
    "events": 2,
    "status": "aliased"
   },
   "replacement_packet": {
-   "canonical": "replacement",
+   "canonical": "replaces",
    "events": 2,
    "status": "aliased"
   },
   "replacement_producer_evidence": {
-   "canonical": "replacement",
+   "canonical": "replaces",
    "events": 2,
    "status": "aliased"
   },
   "replacement_producer_evidence_commit": {
-   "canonical": "replacement",
+   "canonical": "replaces",
    "events": 2,
    "status": "aliased"
   },
   "replacement_producer_result": {
-   "canonical": "replacement",
+   "canonical": "replaces",
    "events": 2,
    "status": "aliased"
   },
   "replacement_reason": {
-   "canonical": "replacement",
+   "canonical": "replaces",
    "events": 8,
    "status": "aliased"
   },
   "replacement_rereview": {
-   "canonical": "replacement",
+   "canonical": "replaces",
    "events": 4,
    "status": "aliased"
   },
   "replacement_review": {
-   "canonical": "replacement",
+   "canonical": "replaces",
    "events": 6,
    "status": "aliased"
   },
   "replaces": {
-   "canonical": "replacement",
+   "canonical": "superseded_by",
    "events": 2,
    "status": "aliased"
   },
   "replaces_gate_for_changed_bytes": {
-   "canonical": "replacement",
+   "canonical": "replaces",
    "events": 2,
    "status": "aliased"
   },
@@ -14080,9 +14080,9 @@
    "status": "unknown"
   },
   "result": {
-   "canonical": "result",
+   "canonical": "verdict",
    "events": 110,
-   "status": "core"
+   "status": "aliased"
   },
   "results": {
    "canonical": "x-legacy-results",
@@ -14285,7 +14285,7 @@
    "status": "aliased"
   },
   "review-decision": {
-   "canonical": "review_decision",
+   "canonical": "verdict",
    "events": 30,
    "status": "aliased"
   },
@@ -17265,37 +17265,37 @@
    "status": "aliased"
   },
   "supersedes": {
-   "canonical": "supersedes",
+   "canonical": "superseded_by",
    "events": 56,
-   "status": "core"
+   "status": "aliased"
   },
   "supersedes-count-from": {
-   "canonical": "supersedes",
+   "canonical": "superseded_by",
    "events": 2,
    "status": "aliased"
   },
   "supersedes-inline-controller": {
-   "canonical": "supersedes",
+   "canonical": "superseded_by",
    "events": 1,
    "status": "aliased"
   },
   "supersedes_blocked_commit": {
-   "canonical": "supersedes",
+   "canonical": "superseded_by",
    "events": 2,
    "status": "aliased"
   },
   "supersedes_blocked_deployment": {
-   "canonical": "supersedes",
+   "canonical": "superseded_by",
    "events": 2,
    "status": "aliased"
   },
   "supersedes_erroneous_review_tdd_commit_link": {
-   "canonical": "supersedes",
+   "canonical": "superseded_by",
    "events": 2,
    "status": "aliased"
   },
   "supersedes_evidence_commit": {
-   "canonical": "supersedes",
+   "canonical": "superseded_by",
    "events": 2,
    "status": "aliased"
   },

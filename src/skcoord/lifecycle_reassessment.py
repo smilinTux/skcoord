@@ -11,26 +11,19 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from .evidence_vocab import read_links
+
 _VERDICTS = {"PASS", "PASS_FOR_REVIEW", "BLOCKED"}
 # Live verdicts are qualified, e.g. BLOCKED_FAIL_CLOSED,
 # BLOCKED_ACCURATE_OUTCOME_NOT_RUNTIME_APPROVAL. Exact equality against "BLOCKED"
 # matches none of them, so match on the family.
 _BLOCKED_RE = re.compile(r"^BLOCKED\b|^BLOCKED_", re.IGNORECASE)
-# Evidence keys carrying an outcome. The evidence store spells these many ways
-# (verdict has 41 spellings, review_decision several more), so fold before matching.
-_OUTCOME_KEY_RE = re.compile(r"(^|_)(verdict|result|disposition|review_decision)(_|$)")
+# Evidence outcomes are read through the controlled vocabulary. Presence of a
+# verdict link is not itself a verdict: its value must still carry the outcome.
+_OUTCOME_KEYS = {"verdict", "disposition", "review_decision"}
 # Ephemeral fleet workers are named pi-auto-<card>/pi-<slug>. Named agents such as
 # jarvis or lumina hold claims deliberately and must never be treated as dead.
 _EPHEMERAL_OWNER_RE = re.compile(r"^(pi|codex)[-_]", re.IGNORECASE)
-
-
-def _fold_key(key: object) -> str:
-    """Fold a link_key to a comparable form. Mirrors schemas/evidence_vocab.py."""
-    k = str(key or "").strip().lower().replace("-", "_")
-    k = re.sub(r"_?20\d{6}t?\d{0,6}z?", "", k)
-    k = re.sub(r"_[0-9a-f]{8,64}$", "", k)
-    k = re.sub(r"__+", "_", k).strip("_")
-    return k
 
 
 def load_evidence(evidence_dir: Path) -> dict[str, list[dict[str, Any]]]:
@@ -45,16 +38,15 @@ def load_evidence(evidence_dir: Path) -> dict[str, list[dict[str, Any]]]:
     rows: dict[str, list[dict[str, Any]]] = {}
     if not evidence_dir or not Path(evidence_dir).is_dir():
         return rows
-    for path in sorted(Path(evidence_dir).glob("*.jsonl")):
-        for event in _json_object_lines(path):
-            if event.get("action") != "link":
-                continue
+    grouped = read_links(Path(evidence_dir).glob("*.jsonl"))
+    for canonical, events in grouped.items():
+        for event in events:
             card_id = event.get("card_id")
             if not isinstance(card_id, str):
                 continue
             rows.setdefault(card_id, []).append({
                 "ts": event.get("ts"),
-                "key": _fold_key(event.get("link_key")),
+                "key": canonical,
                 "raw_key": event.get("link_key"),
                 "value": event.get("link_value"),
                 "event_id": event.get("event_id") or event.get("link_key"),
@@ -178,7 +170,7 @@ def _blocked_evidence_after(
         row_time = _parse_time(row.get("ts"))
         if not row_time or row_time < after:
             continue
-        if not _OUTCOME_KEY_RE.search(row.get("key", "")):
+        if row.get("key") not in _OUTCOME_KEYS:
             continue
         value = row.get("value")
         if isinstance(value, str) and _BLOCKED_RE.match(value):
