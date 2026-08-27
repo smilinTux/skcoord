@@ -35,13 +35,19 @@ def test_assessment_reports_all_classes_and_exclusions(tmp_path: Path) -> None:
     _card(cards, "dependent1", dependencies=["void0001"])
 
     stale = _card(cards, "stale001")
-    _events(stale, [
-        {"action": "claim", "owner": "worker", "ts": "2026-08-20T01:00:00+00:00"},
-        {
-            "action": "evidence", "verdict": "BLOCKED", "event_id": "evidence1",
-            "artifact_sha256": "a" * 64, "ts": "2026-08-20T02:00:00+00:00",
-        },
-    ])
+    _events(
+        stale,
+        [
+            {"action": "claim", "owner": "worker", "ts": "2026-08-20T01:00:00+00:00"},
+            {
+                "action": "evidence",
+                "verdict": "BLOCKED",
+                "event_id": "evidence1",
+                "artifact_sha256": "a" * 64,
+                "ts": "2026-08-20T02:00:00+00:00",
+            },
+        ],
+    )
 
     _card(cards, "unclaim1")
     _card(cards, "oldcard1")
@@ -68,19 +74,33 @@ def test_assessment_reports_all_classes_and_exclusions(tmp_path: Path) -> None:
         "superseded_cards": 1,
         "volatile_ci_identity": 1,
         "dead_worker_claims": 0,
+        # a healthy tree reports zero here. The class exists so a partial write
+        # seen across the Syncthing folder is isolated instead of aborting the
+        # whole assessment on every host at once.
+        "unreadable_cards": 0,
     }
-    assert report["excluded_card_ids"] == ["dependent1", "oldcard1", "stale001", "unclaim1"]
+    assert report["excluded_card_ids"] == [
+        "dependent1",
+        "oldcard1",
+        "stale001",
+        "unclaim1",
+    ]
     assert report["classes"]["stale_claims"][0]["evidence_event_id"] == "evidence1"
     assert len(report["content_sha256"]) == 64
 
 
-def test_lifecycle_without_separate_blocked_evidence_is_not_stale(tmp_path: Path) -> None:
+def test_lifecycle_without_separate_blocked_evidence_is_not_stale(
+    tmp_path: Path,
+) -> None:
     cards = tmp_path / "cards"
     card = _card(cards, "claimed01")
-    _events(card, [
-        {"action": "claim", "owner": "worker", "ts": "2026-08-20T01:00:00+00:00"},
-        {"action": "move", "column": "review", "ts": "2026-08-20T02:00:00+00:00"},
-    ])
+    _events(
+        card,
+        [
+            {"action": "claim", "owner": "worker", "ts": "2026-08-20T01:00:00+00:00"},
+            {"action": "move", "column": "review", "ts": "2026-08-20T02:00:00+00:00"},
+        ],
+    )
     report = assess(cards, now=datetime(2026, 8, 27, tzinfo=timezone.utc))
     assert report["classes"]["stale_claims"] == []
 
@@ -102,20 +122,32 @@ def test_stale_claim_is_found_in_the_separate_evidence_store(tmp_path: Path) -> 
     """
     cards = tmp_path / "cards"
     card = _card(cards, "evid0001")
-    _events(card, [{"action": "claim", "owner": "codex-deploy", "ts": "2026-08-20T01:00:00+00:00"}])
+    _events(
+        card,
+        [
+            {
+                "action": "claim",
+                "owner": "codex-deploy",
+                "ts": "2026-08-20T01:00:00+00:00",
+            }
+        ],
+    )
 
     evidence = tmp_path / "card_events"
     evidence.mkdir(parents=True)
     (evidence / "node.jsonl").write_text(
-        json.dumps({
-            "card_id": "evid0001",
-            "action": "link",
-            "writer": "codex-deploy",
-            "ts": "2026-08-20T02:00:00+00:00",
-            "event_id": "eve1",
-            "link_key": "disposition",
-            "link_value": "BLOCKED_FAIL_CLOSED: absent qualified verifier",
-        }) + "\n",
+        json.dumps(
+            {
+                "card_id": "evid0001",
+                "action": "link",
+                "writer": "codex-deploy",
+                "ts": "2026-08-20T02:00:00+00:00",
+                "event_id": "eve1",
+                "link_key": "disposition",
+                "link_value": "BLOCKED_FAIL_CLOSED: absent qualified verifier",
+            }
+        )
+        + "\n",
         encoding="utf-8",
     )
 
@@ -140,10 +172,17 @@ def test_unassign_clears_a_claim_so_it_is_not_stale(tmp_path: Path) -> None:
     """
     cards = tmp_path / "cards"
     card = _card(cards, "unas0001")
-    _events(card, [
-        {"action": "claim", "owner": "codex-deploy", "ts": "2026-08-20T01:00:00+00:00"},
-        {"action": "unassign", "ts": "2026-08-21T01:00:00+00:00"},
-    ])
+    _events(
+        card,
+        [
+            {
+                "action": "claim",
+                "owner": "codex-deploy",
+                "ts": "2026-08-20T01:00:00+00:00",
+            },
+            {"action": "unassign", "ts": "2026-08-21T01:00:00+00:00"},
+        ],
+    )
     report = assess(cards, [], now=datetime(2026, 8, 25, tzinfo=timezone.utc))
     assert report["classes"]["stale_claims"] == []
     assert report["classes"]["dead_worker_claims"] == []
@@ -152,12 +191,22 @@ def test_unassign_clears_a_claim_so_it_is_not_stale(tmp_path: Path) -> None:
 def test_named_agent_claim_is_never_a_dead_worker(tmp_path: Path) -> None:
     """jarvis and lumina hold claims deliberately; only ephemeral workers die."""
     cards = tmp_path / "cards"
-    _events(_card(cards, "named001"), [
-        {"action": "claim", "owner": "jarvis", "ts": "2026-08-20T01:00:00+00:00"},
-    ])
-    _events(_card(cards, "ephem001"), [
-        {"action": "claim", "owner": "pi-auto-ephem001", "ts": "2026-08-20T01:00:00+00:00"},
-    ])
+    _events(
+        _card(cards, "named001"),
+        [
+            {"action": "claim", "owner": "jarvis", "ts": "2026-08-20T01:00:00+00:00"},
+        ],
+    )
+    _events(
+        _card(cards, "ephem001"),
+        [
+            {
+                "action": "claim",
+                "owner": "pi-auto-ephem001",
+                "ts": "2026-08-20T01:00:00+00:00",
+            },
+        ],
+    )
     report = assess(cards, [], now=datetime(2026, 8, 25, tzinfo=timezone.utc))
     dead = [row["card_id"] for row in report["classes"]["dead_worker_claims"]]
     assert dead == ["ephem001"]
