@@ -490,7 +490,9 @@ class CardEventLog:
         ]
         if not links:
             return None
-        ordered = sorted(links, key=lambda item: (item.event.ts, item.event.writer, item.event.seq))
+        ordered = sorted(
+            links, key=lambda item: (item.event.ts, item.event.writer, item.event.seq)
+        )
         return self._physical_identity(ordered[-1])
 
     @staticmethod
@@ -560,7 +562,9 @@ class CardEventLog:
         if raw_before and not raw_before.endswith(b"\n"):
             raise ValueError("card event journal is not newline terminated")
         if os.fstat(descriptor).st_size != len(raw_before):
-            raise CardEventAuthorityUnavailableError("card event journal changed during validation")
+            raise CardEventAuthorityUnavailableError(
+                "card event journal changed during validation"
+            )
         raw_json = event.model_dump_json().encode()
         payload = raw_json + b"\n"
         written = 0
@@ -655,13 +659,21 @@ class CardEventLog:
                 if event.action != "link" and not event.transition_id:
                     continue
                 if name != authority_journal:
-                    violations.append(f"governed write outside authority journal: {name}:{line_number}")
+                    violations.append(
+                        f"governed write outside authority journal: {name}:{line_number}"
+                    )
                 if event.authority_node != config.authority_node:
-                    violations.append(f"governed write has wrong authority node: {name}:{line_number}")
+                    violations.append(
+                        f"governed write has wrong authority node: {name}:{line_number}"
+                    )
                 if event.authority_epoch != config.authority_epoch:
-                    violations.append(f"governed write has wrong authority epoch: {name}:{line_number}")
+                    violations.append(
+                        f"governed write has wrong authority epoch: {name}:{line_number}"
+                    )
                 if not event.event_id:
-                    violations.append(f"governed write has no physical event_id: {name}:{line_number}")
+                    violations.append(
+                        f"governed write has no physical event_id: {name}:{line_number}"
+                    )
 
         records = self._records_from_sources(sources)
         event_ids: dict[str, int] = {}
@@ -721,7 +733,7 @@ class CardEventLog:
         if event.expected_link_revision or event.intent_sha256:
             raise ValueError("CardEvent transition metadata is assigned only by the journal")
 
-    def append(self, event: CardEvent) -> CardEventAppendReceipt:
+    def append(self, event: CardEvent) -> CardEventAppendReceipt | None:
         """Append one event, routing governed links through the authority journal."""
         self._preflight_target(event)
         self._reject_reserved_fields(event)
@@ -741,10 +753,12 @@ class CardEventLog:
                 "authority_epoch": self.governance.authority_epoch,
             }
         else:
+            if not event.writer:
+                event.writer = socket.gethostname()
             filename = f"{socket.gethostname()}.jsonl"
             updates = {
                 "event_id": uuid.uuid4().hex,
-                "writer": event.writer or socket.gethostname(),
+                "writer": event.writer,
             }
         intended = event.model_copy(update=updates)
         directory_fd = self._open_event_directory()
@@ -756,13 +770,14 @@ class CardEventLog:
                 sources = self._read_sources(directory_fd)
                 if governed:
                     self._raise_if_unavailable(self._audit_sources(sources))
-                return self._write_locked(
+                receipt = self._write_locked(
                     descriptor,
                     directory_fd,
                     filename,
                     intended,
                     sources.get(filename, b""),
                 )
+                return receipt if governed else None
             finally:
                 fcntl.flock(descriptor, fcntl.LOCK_UN)
         finally:
@@ -826,9 +841,7 @@ class CardEventLog:
                 self._raise_if_unavailable(self._audit_sources(sources))
                 records = self._records_from_sources(sources)
                 matching = [
-                    record
-                    for record in records
-                    if record.event.transition_id == transition_id
+                    record for record in records if record.event.transition_id == transition_id
                 ]
                 if len(matching) > 1:
                     raise CardEventTransitionConflictError(

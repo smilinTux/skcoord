@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import multiprocessing
+import socket
 from pathlib import Path
 
 import pytest
@@ -41,7 +42,9 @@ def _governed_log(
     )
 
 
-def _marker(card_id: str, verdict_event_id: str, value: str = "verdict-1") -> tuple[CardEvent, str]:
+def _marker(
+    card_id: str, verdict_event_id: str, value: str = "verdict-1"
+) -> tuple[CardEvent, str]:
     event = CardEvent(
         card_id=card_id,
         action="add_label",
@@ -116,27 +119,48 @@ def test_historical_records_remain_readable_and_new_appends_gain_event_id(tmp_pa
 
     log = CardEventLog(tmp_path)
     assert log.read_all()[0].event_id is None
-    receipt = log.append(CardEvent(card_id="legacy01", action="move", column="doing"))
-    appended = [event for event in log.read_all() if event.event_id == receipt.event_id]
+    event = CardEvent(card_id="legacy01", action="move", column="doing")
+    assert log.append(event) is None
+    assert event.writer == socket.gethostname()
+    appended = [event for event in log.read_all() if event.event_id is not None]
     assert len(appended) == 1
-    assert len(receipt.event_id) == 32
+    assert len(appended[0].event_id or "") == 32
 
 
 def test_disabled_mode_keeps_legacy_link_path_compatible(tmp_path) -> None:
     _card(tmp_path, "disabled01")
     log = CardEventLog(tmp_path)
-    receipt = log.append(
-        CardEvent(
-            card_id="disabled01",
-            action="link",
-            link_key="verdict",
-            link_value="BLOCKED",
-        )
+    intended = CardEvent(
+        card_id="disabled01",
+        action="link",
+        link_key="verdict",
+        link_value="BLOCKED",
     )
-    event = next(event for event in log.read_all() if event.event_id == receipt.event_id)
+    assert log.append(intended) is None
+    assert intended.writer == socket.gethostname()
+    event = next(event for event in log.read_all() if event.link_value == "BLOCKED")
     assert event.authority_node is None
     assert event.authority_epoch is None
     assert event.transition_id is None
+
+
+@pytest.mark.parametrize(
+    ("action", "fields"),
+    [
+        ("move", {"column": "doing"}),
+        ("add_label", {"label": "compatibility"}),
+        ("describe", {"description": "compatible"}),
+        ("link", {"link_key": "verdict", "link_value": "BLOCKED"}),
+    ],
+)
+def test_disabled_mode_preserves_legacy_append_contract(tmp_path, action, fields) -> None:
+    _card(tmp_path, "compat001")
+    log = CardEventLog(tmp_path)
+    intended = CardEvent(card_id="compat001", action=action, **fields)
+
+    assert log.append(intended) is None
+    assert intended.writer == socket.gethostname()
+    assert log.read_all()[-1].writer == intended.writer
 
 
 def test_governed_link_and_transition_share_authority_journal(tmp_path) -> None:
@@ -180,9 +204,7 @@ def test_governed_write_fails_off_authority_or_without_baseline(tmp_path) -> Non
         ),
     )
     with pytest.raises(CardEventAuthorityUnavailableError, match="not the CardEvent authority"):
-        off_authority.append(
-            CardEvent(card_id="authority01", action="link", link_key="verdict")
-        )
+        off_authority.append(CardEvent(card_id="authority01", action="link", link_key="verdict"))
 
     missing_baseline = CardEventLog(
         tmp_path,
