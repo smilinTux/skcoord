@@ -280,7 +280,26 @@ def _blocked_evidence_after(
     return result
 
 
-def _superseded_ids(records: dict[str, CardRecord]) -> dict[str, list[str]]:
+def _superseded_ids(
+    records: dict[str, CardRecord],
+    evidence: dict[str, list[dict[str, Any]]] | None = None,
+) -> dict[str, list[str]]:
+    """Map each superseded card to the cards that replace it.
+
+    This used to read only the structure store: core labels, title and
+    description, and events whose action is "supersede". Supersession is
+    normally recorded the other way, as a link in the EVIDENCE store, and those
+    were invisible here. It is the same two-store defect already documented
+    above for BLOCKED verdicts, which was fixed in _blocked_evidence_after and
+    never applied to this function.
+
+    Measured on the live board 2026-08-27: c91a7504 carries superseded_by
+    2209f7fe and disposition superseded-unclaimable-use-2209f7fe, recorded
+    2026-08-23T07:39:47. It was never classed superseded, never excluded, and
+    stayed assignable. Only blocked_backoff kept a worker off it, and backoff
+    lifts on any material change, so the card was one label away from being
+    handed out again in place of its own successor.
+    """
     successors: dict[str, list[str]] = {}
     for record in records.values():
         candidates: set[str] = set()
@@ -299,6 +318,49 @@ def _superseded_ids(records: dict[str, CardRecord]) -> dict[str, list[str]]:
         for old_id in candidates:
             if old_id in records and old_id != record.card_id:
                 successors.setdefault(old_id, []).append(record.card_id)
+
+    # evidence store: the normal case, and the one that was missing.
+    for card_id, rows in (evidence or {}).items():
+        for row in rows:
+            key = str(row.get("key") or row.get("raw_key") or "").strip().lower()
+            value = str(row.get("value") or "").strip()
+            if not value:
+                continue
+            if key == "superseded_by":
+                old, new = card_id, value
+            elif key == "supersedes":
+                old, new = value, card_id
+            else:
+                continue
+            # A link may name a full id or a short prefix. Resolve it, and never
+            # let an ambiguous prefix silently retire the wrong card.
+            if new not in records:
+                matches = [c for c in records if c.startswith(new)]
+                if len(matches) != 1:
+                    continue
+                new = matches[0]
+            if old not in records:
+                matches = [c for c in records if c.startswith(old)]
+                if len(matches) != 1:
+                    continue
+                old = matches[0]
+            # A HUMAN gate is never retired by a link in the evidence store.
+            # superseded_by there is free-form: any worker can write it, and
+            # honouring it would let a machine card discharge an approval only a
+            # person can give. Measured on this board, doing so would have
+            # retired 36afc5e8 and 64fbb530 in favour of the machine task
+            # 6dd21df9, and retired the open gate fcb4147f. Structure-store
+            # supersession above is a deliberate authored act and still counts;
+            # this path is evidence, and evidence does not carry that authority.
+            old_core = records[old].core
+            old_title = str(old_core.get("title", "")).upper()
+            old_labels = {
+                str(x).lower() for x in (old_core.get("initial_labels") or [])
+            }
+            if "[HUMAN]" in old_title or "human-gate" in old_labels:
+                continue
+            if old != new:
+                successors.setdefault(old, []).append(new)
     return {card_id: sorted(set(values)) for card_id, values in successors.items()}
 
 
@@ -401,7 +463,7 @@ def assess(
                 }
             )
 
-    superseded = _superseded_ids(records)
+    superseded = _superseded_ids(records, evidence)
     superseded_rows = [
         {"card_id": card_id, "superseded_by": successors}
         for card_id, successors in sorted(superseded.items())
