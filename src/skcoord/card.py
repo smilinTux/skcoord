@@ -9,16 +9,20 @@ card ``kind``. See docs/superpowers/specs/2026-07-16-unified-kanban-card-model.m
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import html
+import json
 import logging
 import os
 import socket
 import stat
+import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from .coordination import Board, TaskStatus, TaskView, validate_shared_home
 
@@ -87,6 +91,12 @@ class CardEvent(BaseModel):
     column, order it, tag it) without touching coord's claim-based write path.
     """
 
+    event_id: str | None = Field(default=None, frozen=True)
+    transition_id: str | None = None
+    authority_node: str | None = None
+    authority_epoch: str | None = None
+    expected_link_revision: str | None = None
+    intent_sha256: str | None = None
     card_id: str
     action: str
     writer: str = ""
@@ -104,6 +114,113 @@ class CardEvent(BaseModel):
     description: str | None = None
 
 
+class CardEventJournalBaseline(BaseModel):
+    """One immutable journal prefix captured before governed activation."""
+
+    model_config = ConfigDict(frozen=True)
+
+    journal: str
+    byte_length: int
+    prefix_sha256: str
+
+
+class CardEventActivationBaseline(BaseModel):
+    """Exact journal prefixes that predate governed mode."""
+
+    model_config = ConfigDict(frozen=True)
+
+    journals: tuple[CardEventJournalBaseline, ...] = ()
+
+
+class GovernedCardEventConfig(BaseModel):
+    """Explicit, disabled-by-default single-writer authority configuration."""
+
+    model_config = ConfigDict(frozen=True)
+
+    enabled: bool = False
+    authority_node: str = ""
+    authority_epoch: str = ""
+    local_node: str = Field(default_factory=socket.gethostname)
+    activation_baseline: CardEventActivationBaseline | None = None
+
+
+class CardEventAppendReceipt(BaseModel):
+    """Stable proof of one physical CardEvent journal record."""
+
+    model_config = ConfigDict(frozen=True)
+
+    event_id: str
+    transition_id: str | None = None
+    card_id: str
+    authority_node: str | None = None
+    authority_epoch: str | None = None
+    expected_link_revision: str | None = None
+    intent_sha256: str | None = None
+    journal: str
+    journal_line: int
+    byte_offset: int
+    record_sha256: str
+
+
+class GovernedCardEventAudit(BaseModel):
+    """Availability result for the configured governed write boundary."""
+
+    model_config = ConfigDict(frozen=True)
+
+    available: bool
+    authority_node: str
+    authority_epoch: str
+    checked_records: int
+    violations: tuple[str, ...] = ()
+
+
+class GovernedCardEventError(RuntimeError):
+    """Base error for a fail-closed governed CardEvent write."""
+
+
+class CardEventAuthorityUnavailableError(GovernedCardEventError):
+    """The configured authority is absent, off-node, or no longer clean."""
+
+
+class StaleCardLinkRevisionError(GovernedCardEventError):
+    """The exact expected card link revision is no longer current."""
+
+
+class CardEventTransitionConflictError(GovernedCardEventError):
+    """A transition ID was reused for a different intended effect."""
+
+
+@dataclass(frozen=True)
+class _CardEventRecord:
+    event: CardEvent
+    journal: str
+    journal_line: int
+    byte_offset: int
+    raw_json: bytes
+
+
+def derive_card_event_transition_id(
+    *,
+    card_id: str,
+    verdict_event_id: str,
+    action: str,
+    label: str,
+    marker_payload: str,
+) -> str:
+    """Derive the v1 transition ID for one exact verdict marker effect."""
+    values = [
+        "skcoord.card-event-transition",
+        "v1",
+        card_id,
+        verdict_event_id,
+        action,
+        label,
+        marker_payload,
+    ]
+    encoded = json.dumps(values, ensure_ascii=True, separators=(",", ":")).encode()
+    return f"card-event-transition:v1:{hashlib.sha256(encoded).hexdigest()}"
+
+
 class CardEventLog:
     """Per-writer append-only overlay log for kanban operations.
 
@@ -112,9 +229,14 @@ class CardEventLog:
     files and the archive index).
     """
 
-    def __init__(self, home: Path) -> None:
+    def __init__(
+        self,
+        home: Path,
+        governance: GovernedCardEventConfig | None = None,
+    ) -> None:
         self.home = validate_shared_home(home)
         self.dir = self.home / "coordination" / "card_events"
+        self.governance = governance or GovernedCardEventConfig()
 
     @staticmethod
     def _open_or_create_directory(parent_fd: int, name: str) -> int:
@@ -256,44 +378,495 @@ class CardEventLog:
         finally:
             os.close(descriptor)
 
-    def append(self, event: CardEvent) -> None:
-        """Append one overlay event to this host's log."""
+    @staticmethod
+    def _validate_journal_name(name: str) -> str:
+        if (
+            not name
+            or name in {".", ".."}
+            or ".." in name
+            or "/" in name
+            or "\\" in name
+            or "\x00" in name
+            or any(ord(char) < 32 or ord(char) == 127 for char in name)
+        ):
+            raise CardEventAuthorityUnavailableError("authority node is not a safe journal name")
+        return name
+
+    def _authority_filename(self) -> str:
+        return f"{self._validate_journal_name(self.governance.authority_node)}.jsonl"
+
+    def _require_authority(self) -> None:
+        config = self.governance
+        if not config.enabled:
+            raise CardEventAuthorityUnavailableError("governed CardEvent mode is disabled")
+        if not config.authority_node or not config.authority_epoch:
+            raise CardEventAuthorityUnavailableError("governed CardEvent authority is incomplete")
+        if config.activation_baseline is None:
+            raise CardEventAuthorityUnavailableError("governed CardEvent baseline is missing")
+        if config.local_node != config.authority_node:
+            raise CardEventAuthorityUnavailableError("local node is not the CardEvent authority")
+        if (
+            len(config.authority_epoch) > 256
+            or "\x00" in config.authority_epoch
+            or any(ord(char) < 32 or ord(char) == 127 for char in config.authority_epoch)
+        ):
+            raise CardEventAuthorityUnavailableError("authority epoch is invalid")
+        self._authority_filename()
+
+    @staticmethod
+    def _records_from_sources(sources: dict[str, bytes]) -> list[_CardEventRecord]:
+        records: list[_CardEventRecord] = []
+        for journal, raw in sorted(sources.items()):
+            offset = 0
+            for journal_line, raw_line in enumerate(raw.splitlines(keepends=True), start=1):
+                raw_json = raw_line.rstrip(b"\r\n").strip()
+                line_offset = offset
+                offset += len(raw_line)
+                if not raw_json:
+                    continue
+                try:
+                    event = CardEvent.model_validate_json(raw_json)
+                except Exception:  # noqa: BLE001
+                    continue
+                records.append(
+                    _CardEventRecord(
+                        event=event,
+                        journal=journal,
+                        journal_line=journal_line,
+                        byte_offset=line_offset,
+                        raw_json=raw_json,
+                    )
+                )
+        return records
+
+    def _read_sources(self, directory_fd: int) -> dict[str, bytes]:
+        sources: dict[str, bytes] = {}
+        for name in sorted(os.listdir(directory_fd)):
+            if not name.endswith(".jsonl"):
+                continue
+            raw = self._read_regular_file_bytes(directory_fd, name)
+            if raw is not None:
+                sources[name] = raw
+        return sources
+
+    @staticmethod
+    def _physical_identity(record: _CardEventRecord) -> str:
+        if record.event.event_id:
+            return record.event.event_id
+        legacy = [
+            "skcoord.legacy-card-event",
+            "v1",
+            record.journal,
+            record.journal_line,
+            hashlib.sha256(record.raw_json).hexdigest(),
+        ]
+        encoded = json.dumps(legacy, ensure_ascii=True, separators=(",", ":")).encode()
+        return f"legacy-card-event:v1:{hashlib.sha256(encoded).hexdigest()}"
+
+    def _latest_link_revision_from_records(
+        self, records: list[_CardEventRecord], card_id: str
+    ) -> str | None:
+        if self.governance.enabled:
+            authority_journal = self._authority_filename()
+            governed_links = [
+                record
+                for record in records
+                if record.journal == authority_journal
+                and record.event.card_id == card_id
+                and record.event.action == "link"
+                and record.event.authority_node == self.governance.authority_node
+                and record.event.authority_epoch == self.governance.authority_epoch
+            ]
+            if governed_links:
+                latest = max(governed_links, key=lambda item: item.journal_line)
+                return self._physical_identity(latest)
+
+        # Historical records have no authority order. Preserve their existing
+        # overlay fold order until the first governed link establishes one.
+        links = [
+            record
+            for record in records
+            if record.event.card_id == card_id and record.event.action == "link"
+        ]
+        if not links:
+            return None
+        ordered = sorted(links, key=lambda item: (item.event.ts, item.event.writer, item.event.seq))
+        return self._physical_identity(ordered[-1])
+
+    @staticmethod
+    def _intent_sha256(event: CardEvent) -> str:
+        payload = event.model_dump(
+            mode="json",
+            exclude={
+                "event_id",
+                "ts",
+                "authority_node",
+                "authority_epoch",
+                "expected_link_revision",
+                "intent_sha256",
+            },
+        )
+        raw = json.dumps(payload, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+        return hashlib.sha256(raw.encode()).hexdigest()
+
+    @staticmethod
+    def _receipt(record: _CardEventRecord) -> CardEventAppendReceipt:
+        event = record.event
+        if not event.event_id:
+            raise CardEventTransitionConflictError("durable event has no physical event_id")
+        return CardEventAppendReceipt(
+            event_id=event.event_id,
+            transition_id=event.transition_id,
+            card_id=event.card_id,
+            authority_node=event.authority_node,
+            authority_epoch=event.authority_epoch,
+            expected_link_revision=event.expected_link_revision,
+            intent_sha256=event.intent_sha256,
+            journal=record.journal,
+            journal_line=record.journal_line,
+            byte_offset=record.byte_offset,
+            record_sha256=hashlib.sha256(record.raw_json).hexdigest(),
+        )
+
+    @staticmethod
+    def _open_journal(directory_fd: int, filename: str) -> int:
+        flags = os.O_APPEND | os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            existing = os.stat(filename, dir_fd=directory_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            existing = None
+        if existing is not None and (
+            stat.S_ISLNK(existing.st_mode)
+            or not stat.S_ISREG(existing.st_mode)
+            or existing.st_nlink != 1
+        ):
+            raise ValueError("card event destination is unsafe")
+        descriptor = os.open(filename, flags, 0o600, dir_fd=directory_fd)
+        event_stat = os.fstat(descriptor)
+        if not stat.S_ISREG(event_stat.st_mode) or event_stat.st_nlink != 1:
+            os.close(descriptor)
+            raise ValueError("card event destination is unsafe")
+        return descriptor
+
+    @classmethod
+    def _write_locked(
+        cls,
+        descriptor: int,
+        directory_fd: int,
+        filename: str,
+        event: CardEvent,
+        raw_before: bytes,
+    ) -> CardEventAppendReceipt:
+        if raw_before and not raw_before.endswith(b"\n"):
+            raise ValueError("card event journal is not newline terminated")
+        if os.fstat(descriptor).st_size != len(raw_before):
+            raise CardEventAuthorityUnavailableError("card event journal changed during validation")
+        raw_json = event.model_dump_json().encode()
+        payload = raw_json + b"\n"
+        written = 0
+        while written < len(payload):
+            written += os.write(descriptor, payload[written:])
+        os.fsync(descriptor)
+        os.fsync(directory_fd)
+        record = _CardEventRecord(
+            event=event,
+            journal=filename,
+            journal_line=raw_before.count(b"\n") + 1,
+            byte_offset=len(raw_before),
+            raw_json=raw_json,
+        )
+        return cls._receipt(record)
+
+    def capture_activation_baseline(self) -> CardEventActivationBaseline:
+        """Capture exact current journal prefixes without enabling governed mode."""
+        directory_fd = self._open_existing_event_directory()
+        if directory_fd is None:
+            return CardEventActivationBaseline()
+        try:
+            sources = self._read_sources(directory_fd)
+        finally:
+            os.close(directory_fd)
+        return CardEventActivationBaseline(
+            journals=tuple(
+                CardEventJournalBaseline(
+                    journal=name,
+                    byte_length=len(raw),
+                    prefix_sha256=hashlib.sha256(raw).hexdigest(),
+                )
+                for name, raw in sorted(sources.items())
+            )
+        )
+
+    def _audit_sources(self, sources: dict[str, bytes]) -> GovernedCardEventAudit:
+        config = self.governance
+        violations: list[str] = []
+        if not config.enabled:
+            violations.append("governed CardEvent mode is disabled")
+        if not config.authority_node or not config.authority_epoch:
+            violations.append("governed CardEvent authority is incomplete")
+        if config.local_node != config.authority_node:
+            violations.append("local node is not the CardEvent authority")
+        baseline = config.activation_baseline
+        if baseline is None:
+            violations.append("governed CardEvent baseline is missing")
+            baseline_entries: dict[str, CardEventJournalBaseline] = {}
+        else:
+            baseline_entries = {entry.journal: entry for entry in baseline.journals}
+            if len(baseline_entries) != len(baseline.journals):
+                violations.append("activation baseline contains duplicate journals")
+
+        try:
+            authority_journal = self._authority_filename()
+        except CardEventAuthorityUnavailableError as exc:
+            authority_journal = ""
+            violations.append(str(exc))
+
+        checked_records = 0
+        for name, entry in sorted(baseline_entries.items()):
+            raw = sources.get(name)
+            if raw is None:
+                violations.append(f"baseline journal disappeared: {name}")
+                continue
+            prefix = raw[: entry.byte_length]
+            if len(prefix) != entry.byte_length:
+                violations.append(f"baseline journal was truncated: {name}")
+                continue
+            if hashlib.sha256(prefix).hexdigest() != entry.prefix_sha256:
+                violations.append(f"baseline journal prefix changed: {name}")
+
+        for name, raw in sorted(sources.items()):
+            start = baseline_entries.get(name).byte_length if name in baseline_entries else 0
+            if start > len(raw):
+                continue
+            if start and raw[:start] and not raw[:start].endswith(b"\n"):
+                violations.append(f"baseline does not end at a record boundary: {name}")
+                continue
+            tail = raw[start:]
+            for line_number, raw_line in enumerate(tail.splitlines(), start=1):
+                raw_json = raw_line.strip()
+                if not raw_json:
+                    continue
+                checked_records += 1
+                try:
+                    event = CardEvent.model_validate_json(raw_json)
+                except Exception:  # noqa: BLE001
+                    violations.append(f"unreadable post-activation record: {name}:{line_number}")
+                    continue
+                if event.action != "link" and not event.transition_id:
+                    continue
+                if name != authority_journal:
+                    violations.append(f"governed write outside authority journal: {name}:{line_number}")
+                if event.authority_node != config.authority_node:
+                    violations.append(f"governed write has wrong authority node: {name}:{line_number}")
+                if event.authority_epoch != config.authority_epoch:
+                    violations.append(f"governed write has wrong authority epoch: {name}:{line_number}")
+                if not event.event_id:
+                    violations.append(f"governed write has no physical event_id: {name}:{line_number}")
+
+        records = self._records_from_sources(sources)
+        event_ids: dict[str, int] = {}
+        transition_ids: dict[str, int] = {}
+        for record in records:
+            if record.event.event_id:
+                event_ids[record.event.event_id] = event_ids.get(record.event.event_id, 0) + 1
+            if record.event.transition_id:
+                transition_ids[record.event.transition_id] = (
+                    transition_ids.get(record.event.transition_id, 0) + 1
+                )
+        for event_id, count in event_ids.items():
+            if count > 1:
+                violations.append(f"duplicate physical event_id: {event_id}")
+        for transition_id, count in transition_ids.items():
+            if count > 1:
+                violations.append(f"duplicate transition_id: {transition_id}")
+        return GovernedCardEventAudit(
+            available=not violations,
+            authority_node=config.authority_node,
+            authority_epoch=config.authority_epoch,
+            checked_records=checked_records,
+            violations=tuple(violations),
+        )
+
+    def audit_governed_writes(self) -> GovernedCardEventAudit:
+        """Audit all journal tails created after the pinned activation baseline."""
+        directory_fd = self._open_existing_event_directory()
+        if directory_fd is None:
+            sources: dict[str, bytes] = {}
+        else:
+            try:
+                sources = self._read_sources(directory_fd)
+            finally:
+                os.close(directory_fd)
+        return self._audit_sources(sources)
+
+    @staticmethod
+    def _raise_if_unavailable(audit: GovernedCardEventAudit) -> None:
+        if not audit.available:
+            detail = "; ".join(audit.violations)
+            raise CardEventAuthorityUnavailableError(detail)
+
+    def _preflight_target(self, event: CardEvent) -> None:
         if event.action in {"describe", "link"}:
             from .card_store import CardStore
 
             if CardStore(self.home).fold(event.card_id) is None:
                 raise ValueError(f"CardStore card {event.card_id} has no foldable core")
-        if not event.writer:
-            event.writer = socket.gethostname()
-        filename = f"{socket.gethostname()}.jsonl"
-        flags = os.O_APPEND | os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+
+    @staticmethod
+    def _reject_reserved_fields(event: CardEvent) -> None:
+        if event.event_id:
+            raise ValueError("event_id is assigned only by the CardEvent journal")
+        if event.authority_node or event.authority_epoch:
+            raise ValueError("CardEvent authority fields are assigned only by the journal")
+        if event.expected_link_revision or event.intent_sha256:
+            raise ValueError("CardEvent transition metadata is assigned only by the journal")
+
+    def append(self, event: CardEvent) -> CardEventAppendReceipt:
+        """Append one event, routing governed links through the authority journal."""
+        self._preflight_target(event)
+        self._reject_reserved_fields(event)
+        if event.transition_id:
+            raise CardEventTransitionConflictError(
+                "transition writes require append_if_link_revision"
+            )
+
+        governed = self.governance.enabled and event.action == "link"
+        if governed:
+            self._require_authority()
+            filename = self._authority_filename()
+            updates = {
+                "event_id": uuid.uuid4().hex,
+                "writer": event.writer or socket.gethostname(),
+                "authority_node": self.governance.authority_node,
+                "authority_epoch": self.governance.authority_epoch,
+            }
+        else:
+            filename = f"{socket.gethostname()}.jsonl"
+            updates = {
+                "event_id": uuid.uuid4().hex,
+                "writer": event.writer or socket.gethostname(),
+            }
+        intended = event.model_copy(update=updates)
         directory_fd = self._open_event_directory()
         descriptor = -1
         try:
+            descriptor = self._open_journal(directory_fd, filename)
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
             try:
-                existing = os.stat(filename, dir_fd=directory_fd, follow_symlinks=False)
-            except FileNotFoundError:
-                existing = None
-            if existing is not None and (
-                stat.S_ISLNK(existing.st_mode)
-                or not stat.S_ISREG(existing.st_mode)
-                or existing.st_nlink != 1
-            ):
-                raise ValueError("card event destination is unsafe")
-            descriptor = os.open(filename, flags, 0o600, dir_fd=directory_fd)
-            event_stat = os.fstat(descriptor)
-            if not stat.S_ISREG(event_stat.st_mode) or event_stat.st_nlink != 1:
-                raise ValueError("card event destination is unsafe")
-            with os.fdopen(descriptor, "a", encoding="utf-8") as fh:
-                descriptor = -1
-                fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
-                try:
-                    fh.write(event.model_dump_json() + "\n")
-                    fh.flush()
-                    os.fsync(fh.fileno())
-                finally:
-                    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
-            os.fsync(directory_fd)
+                sources = self._read_sources(directory_fd)
+                if governed:
+                    self._raise_if_unavailable(self._audit_sources(sources))
+                return self._write_locked(
+                    descriptor,
+                    directory_fd,
+                    filename,
+                    intended,
+                    sources.get(filename, b""),
+                )
+            finally:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+            os.close(directory_fd)
+
+    def latest_link_revision(self, card_id: str) -> str | None:
+        """Return the exact physical identity of the current card link event."""
+        directory_fd = self._open_existing_event_directory()
+        if directory_fd is None:
+            return None
+        try:
+            records = self._records_from_sources(self._read_sources(directory_fd))
+        finally:
+            os.close(directory_fd)
+        return self._latest_link_revision_from_records(records, card_id)
+
+    def append_if_link_revision(
+        self,
+        event: CardEvent,
+        *,
+        expected_link_revision: str,
+        transition_id: str,
+    ) -> CardEventAppendReceipt:
+        """Append one exact-once transition if the card link revision is current."""
+        self._preflight_target(event)
+        self._require_authority()
+        self._reject_reserved_fields(event)
+        if not expected_link_revision:
+            raise StaleCardLinkRevisionError("expected link revision is required")
+        if not transition_id:
+            raise CardEventTransitionConflictError("transition_id is required")
+        if event.transition_id and event.transition_id != transition_id:
+            raise CardEventTransitionConflictError("event transition_id does not match request")
+
+        base = event.model_copy(
+            update={
+                "writer": event.writer or socket.gethostname(),
+                "transition_id": transition_id,
+            }
+        )
+        intent_sha256 = self._intent_sha256(base)
+        intended = base.model_copy(
+            update={
+                "event_id": uuid.uuid4().hex,
+                "authority_node": self.governance.authority_node,
+                "authority_epoch": self.governance.authority_epoch,
+                "expected_link_revision": expected_link_revision,
+                "intent_sha256": intent_sha256,
+            }
+        )
+        filename = self._authority_filename()
+        directory_fd = self._open_event_directory()
+        descriptor = -1
+        try:
+            descriptor = self._open_journal(directory_fd, filename)
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            try:
+                sources = self._read_sources(directory_fd)
+                self._raise_if_unavailable(self._audit_sources(sources))
+                records = self._records_from_sources(sources)
+                matching = [
+                    record
+                    for record in records
+                    if record.event.transition_id == transition_id
+                ]
+                if len(matching) > 1:
+                    raise CardEventTransitionConflictError(
+                        "transition_id already has multiple physical records"
+                    )
+                if matching:
+                    existing = matching[0]
+                    prior = existing.event
+                    same_intent = (
+                        prior.card_id == intended.card_id
+                        and prior.authority_node == intended.authority_node
+                        and prior.authority_epoch == intended.authority_epoch
+                        and prior.expected_link_revision == expected_link_revision
+                        and prior.intent_sha256 == intent_sha256
+                        and self._intent_sha256(prior) == intent_sha256
+                    )
+                    if not same_intent:
+                        raise CardEventTransitionConflictError(
+                            "transition_id was already used for a different intent"
+                        )
+                    return self._receipt(existing)
+
+                current_revision = self._latest_link_revision_from_records(
+                    records, intended.card_id
+                )
+                if current_revision != expected_link_revision:
+                    raise StaleCardLinkRevisionError(
+                        f"expected link revision {expected_link_revision}, got {current_revision}"
+                    )
+                return self._write_locked(
+                    descriptor,
+                    directory_fd,
+                    filename,
+                    intended,
+                    sources.get(filename, b""),
+                )
+            finally:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
         finally:
             if descriptor >= 0:
                 os.close(descriptor)
@@ -301,28 +874,14 @@ class CardEventLog:
 
     def read_all(self) -> list[CardEvent]:
         """Read every overlay event across all writers."""
-        out: list[CardEvent] = []
         directory_fd = self._open_existing_event_directory()
         if directory_fd is None:
-            return out
+            return []
         try:
-            for name in sorted(os.listdir(directory_fd)):
-                if not name.endswith(".jsonl"):
-                    continue
-                raw = self._read_regular_file_bytes(directory_fd, name)
-                if raw is None:
-                    continue
-                for line in raw.decode("utf-8").splitlines():
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        out.append(CardEvent.model_validate_json(line))
-                    except Exception:  # noqa: BLE001
-                        continue
+            records = self._records_from_sources(self._read_sources(directory_fd))
         finally:
             os.close(directory_fd)
-        return out
+        return [record.event for record in records]
 
 
 def fold_overlay(events: list[CardEvent]) -> dict[str, dict]:
