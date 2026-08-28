@@ -11,6 +11,21 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
 
 ### Fixed
 
+- `lifecycle_reassessment` now reads supersession from the EVIDENCE store, not
+  only from the structure store. `superseded_by` is normally recorded as an
+  evidence link, and none of those were visible, so a superseded card stayed
+  assignable alongside its own successor. This is the same two-store defect
+  already documented in this module for BLOCKED verdicts, fixed there and never
+  carried across. Measured 2026-08-28: `c91a7504` carried `superseded_by`
+  `2209f7fe` since 2026-08-23 and was never excluded; detection rises from 7
+  superseded cards to 28.
+- Evidence-derived supersession can no longer retire a HUMAN approval gate.
+  `superseded_by` in the evidence store is free-form and any worker can write
+  one, so honouring it unguarded let a machine card discharge an approval only a
+  person can give. Without the guard this change retired gate `36afc5e8` in
+  favour of machine task `6dd21df9`. Structure-store supersession is a
+  deliberate authored act and still applies.
+
 - `lifecycle_reassessment` now isolates a card whose `core.json` cannot be
   parsed instead of raising, and skips an event line that is not yet whole.
   `~/.skcapstone` is a single Syncthing folder, so a file written on one host
