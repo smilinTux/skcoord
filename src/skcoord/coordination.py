@@ -2008,6 +2008,13 @@ class Board:
             try:
                 card_before = CardStore(self.home).fold(task_id)
                 current_claim_revision = current_claim_precondition(self.home, task_id, owner)
+                releases_conflict = card_before is not None and card_before.owner != owner
+                if releases_conflict and (
+                    not isinstance(expected_claim_revision, str) or not expected_claim_revision
+                ):
+                    raise ValueError(
+                        f"exact expected claim revision required to release conflict on {task_id}"
+                    )
                 if (
                     expected_claim_revision is not None
                     and current_claim_revision != expected_claim_revision

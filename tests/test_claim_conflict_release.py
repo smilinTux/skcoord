@@ -211,8 +211,8 @@ def test_multiple_losing_claims_are_independently_fenced_and_retry_is_idempotent
     assert audit_lifecycle(tmp_path, task_ids={"multi001"}).clean is True
 
 
-@pytest.mark.parametrize("expected_revision", ["wrong-revision", "", "older-revision"])
-def test_wrong_missing_or_stale_revision_appends_nothing_and_preserves_projection(
+@pytest.mark.parametrize("expected_revision", ["wrong-revision", "older-revision"])
+def test_wrong_or_stale_revision_appends_nothing_and_preserves_projection(
     tmp_path, expected_revision
 ) -> None:
     board, store = _make_conflict(
@@ -237,6 +237,44 @@ def test_wrong_missing_or_stale_revision_appends_nothing_and_preserves_projectio
 
     assert projection.read_bytes() == projection_before
     assert store._read_events("refuse01") == events_before
+
+
+@pytest.mark.parametrize(
+    "revision_argument",
+    [
+        pytest.param({}, id="omitted"),
+        pytest.param({"expected_claim_revision": None}, id="null"),
+        pytest.param({"expected_claim_revision": ""}, id="empty"),
+        pytest.param({"expected_claim_revision": []}, id="malformed"),
+    ],
+)
+def test_losing_release_requires_present_nonempty_exact_revision(
+    tmp_path, revision_argument
+) -> None:
+    board, store = _make_conflict(
+        tmp_path,
+        "required1",
+        "authoritative",
+        "authoritative-revision",
+        "loser",
+        "losing-revision",
+    )
+    projection = board.agent_projection_path("loser")
+    projection_before = projection.read_bytes()
+    events_before = store._read_events("required1")
+    folded_before = store.fold("required1")
+
+    with pytest.raises(ValueError, match="exact expected claim revision required"):
+        board.release_claim(
+            "loser",
+            "required1",
+            actor="claim-conflict-repair",
+            **revision_argument,
+        )
+
+    assert projection.read_bytes() == projection_before
+    assert store._read_events("required1") == events_before
+    assert store.fold("required1") == folded_before
 
 
 def test_missing_malformed_or_ambiguous_losing_owner_appends_nothing(tmp_path) -> None:
