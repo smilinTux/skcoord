@@ -449,8 +449,9 @@ def _cab_resolved_status(
     """
     if status not in ("proposed", "reviewing"):
         return status
-    if not CAB_POLICY_ENABLED:
-        return status
+    # Standard and safe operator-authored auto-normal approvals are change
+    # classification rules, not CAB outcomes. They remain available when the
+    # optional CAB layer is disabled.
     if change_type == "standard":
         return "approved"
     if (
@@ -459,9 +460,14 @@ def _cab_resolved_status(
         and core.get("created_by") == "operator"
         and core.get("risk", "medium") != "high"
         and (core.get("rollback_plan") or "").strip()
-        and not any(v.decision == CABDecisionValue.REJECTED for v in votes)
+        and (
+            not CAB_POLICY_ENABLED
+            or not any(v.decision == CABDecisionValue.REJECTED for v in votes)
+        )
     ):
         return "approved"
+    if not CAB_POLICY_ENABLED:
+        return status
     rejections = [v for v in votes if v.decision == CABDecisionValue.REJECTED]
     if rejections:
         return "rejected"
@@ -989,7 +995,7 @@ class ITILManager:
         if not CAB_POLICY_ENABLED and core.get("cab_required"):
             timeline.append(
                 {
-                    "ts": core.get("created_at") or _now_iso(),
+                    "ts": CAB_RETIREMENT_EFFECTIVE_AT,
                     "agent": "itil-policy",
                     "action": "cab-retired",
                     "note": "CAB vote retained as history; execution uses hard preflight and rollback controls",
