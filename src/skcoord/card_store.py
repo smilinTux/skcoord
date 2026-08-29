@@ -771,14 +771,46 @@ class CardStore:
                 released_owner = e.get("released_owner")
                 expected_revision = e.get("expected_claim_revision")
                 actual_revision = card.meta.get("_claim_revision")
-                if (
-                    not isinstance(released_owner, str)
-                    or not released_owner
-                    or not isinstance(expected_revision, str)
-                    or not expected_revision
-                    or card.owner != released_owner
-                    or actual_revision != expected_revision
-                ):
+                valid_release = (
+                    isinstance(released_owner, str)
+                    and bool(released_owner)
+                    and isinstance(expected_revision, str)
+                    and bool(expected_revision)
+                )
+                releases_current = (
+                    valid_release
+                    and card.owner == released_owner
+                    and actual_revision == expected_revision
+                )
+                conflicts = card.meta.get("claim_conflicts", [])
+                matching_conflicts = [
+                    conflict
+                    for conflict in conflicts
+                    if isinstance(conflict, dict)
+                    and conflict.get("owner") == released_owner
+                    and conflict.get("claim_revision") == expected_revision
+                ]
+                releases_conflict = (
+                    valid_release
+                    and len(matching_conflicts) == 1
+                    and isinstance(actual_revision, str)
+                    and bool(actual_revision)
+                    and card.owner == matching_conflicts[0].get("existing_owner")
+                    and actual_revision == matching_conflicts[0].get("existing_claim_revision")
+                )
+                if releases_current:
+                    card.owner = None
+                    card.status = Column.BACKLOG
+                    card.meta.pop("_claim_revision", None)
+                elif releases_conflict:
+                    remaining = [
+                        conflict for conflict in conflicts if conflict is not matching_conflicts[0]
+                    ]
+                    if remaining:
+                        card.meta["claim_conflicts"] = remaining
+                    else:
+                        card.meta.pop("claim_conflicts", None)
+                else:
                     card.meta.setdefault("release_conflicts", []).append(
                         {
                             "event_id": e.get("event_id"),
@@ -789,12 +821,9 @@ class CardStore:
                             "actual_claim_revision": actual_revision,
                         }
                     )
-                else:
-                    card.owner = None
-                    card.status = Column.BACKLOG
-                    card.meta.pop("_claim_revision", None)
             elif action == "claim":
                 owner = e.get("owner")
+                revision = e.get("claim_revision") or e.get("event_id")
                 was_unowned_backlog = card.owner is None and card.status == Column.BACKLOG
                 if (
                     isinstance(owner, str)
@@ -807,14 +836,15 @@ class CardStore:
                         {
                             "event_id": e.get("event_id"),
                             "owner": owner,
+                            "claim_revision": e.get("claim_revision"),
                             "existing_owner": card.owner,
+                            "existing_claim_revision": card.meta.get("_claim_revision"),
                             "reason": "concurrent claim requires explicit release or completion",
                         }
                     )
                 else:
                     card.owner = owner
                     card.status = _CLAIM_COLUMN
-                    revision = e.get("claim_revision") or e.get("event_id")
                     if isinstance(revision, str) and revision:
                         card.meta["_claim_revision"] = revision
                     else:
@@ -1510,6 +1540,27 @@ def current_claim_precondition(home: Path, task_id: str, owner: str) -> str | No
         if isinstance(revision, str) and revision:
             return revision
         raise ValueError(f"CardStore claim on {task_id} has no revision")
+    conflicts = [
+        conflict
+        for conflict in card.meta.get("claim_conflicts", [])
+        if isinstance(conflict, dict) and conflict.get("owner") == owner
+    ]
+    if len(conflicts) > 1:
+        raise ValueError(f"CardStore claim conflict for {task_id} owned by {owner} is ambiguous")
+    if conflicts:
+        conflict = conflicts[0]
+        revision = conflict.get("claim_revision")
+        authoritative_revision = conflict.get("existing_claim_revision")
+        if (
+            isinstance(revision, str)
+            and revision
+            and isinstance(authoritative_revision, str)
+            and authoritative_revision
+            and conflict.get("existing_owner") == card.owner
+            and authoritative_revision == card.meta.get("_claim_revision")
+        ):
+            return revision
+        raise ValueError(f"CardStore claim conflict on {task_id} has no exact revision")
     if card.owner is None and card.status == Column.BACKLOG:
         for event in reversed(CardStore(home)._read_events(task_id)):
             if event.get("action") == "release_claim" and event.get("released_owner") == owner:
