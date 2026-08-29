@@ -47,6 +47,13 @@ logger = logging.getLogger("skcapstone.itil")
 # that is the heartbeat-v1 collision documented in ~/.skcapstone/.stignore.
 _HOSTNAME = socket.gethostname()
 
+# Estate-wide CAB policy switch. CAB voting is retained as an optional,
+# append-only review signal, but is not an execution gate while this is False.
+# Re-enable the gate by changing this single setting to True. See
+# docs/cab-policy.md for the additional control that enabling it provides.
+CAB_POLICY_ENABLED = False
+CAB_RETIREMENT_EFFECTIVE_AT = "2026-08-29T00:00:00+00:00"
+
 
 # ---------------------------------------------------------------------------
 # Enums
@@ -263,6 +270,9 @@ class Change(BaseModel):
     prepared_by: Optional[str] = None
     validation: Optional[dict[str, Any]] = None
     scheduled_window: Optional[dict[str, Any]] = None
+    # Latest fail-closed execution preflight. This is event-derived so a
+    # failure and its reason remain in history and can never mutate core.json.
+    preflight: Optional[dict[str, Any]] = None
 
 
 class KEDBEntry(BaseModel):
@@ -438,6 +448,8 @@ def _cab_resolved_status(
         "rejected".
     """
     if status not in ("proposed", "reviewing"):
+        return status
+    if not CAB_POLICY_ENABLED:
         return status
     if change_type == "standard":
         return "approved"
@@ -974,6 +986,15 @@ class ITILManager:
         change_type = core.get("change_type", "normal")
         status = "proposed"
         timeline: list[dict[str, Any]] = []
+        if not CAB_POLICY_ENABLED and core.get("cab_required"):
+            timeline.append(
+                {
+                    "ts": core.get("created_at") or _now_iso(),
+                    "agent": "itil-policy",
+                    "action": "cab-retired",
+                    "note": "CAB vote retained as history; execution uses hard preflight and rollback controls",
+                }
+            )
         tags = list(core.get("tags") or [])
         gtd_ids: list[str] = []
         title = core.get("title", "")
@@ -988,6 +1009,7 @@ class ITILManager:
         prepared_by: Optional[str] = None
         validation: Optional[dict[str, Any]] = None
         scheduled_window: Optional[dict[str, Any]] = None
+        preflight: Optional[dict[str, Any]] = None
 
         for e in events:
             kind = e.get("kind")
@@ -1022,6 +1044,21 @@ class ITILManager:
                 #   - failed -> closed needs a rollback note.
                 pir_gated = gate_status == "deployed" and to == "verified"
                 rollback_gated = gate_status == "failed" and to == "closed"
+                destructive = core.get("risk", "medium") == "high" or "destructive" in tags
+                execution_gated = gate_status in ("approved", "scheduled", "failed") and to == "implementing"
+                execution_blockers: list[str] = []
+                # Do not retroactively invalidate implementation events that
+                # were valid before the policy retirement. New events fail
+                # closed; old lifecycle history continues to fold unchanged.
+                post_retirement = (ts or "") >= CAB_RETIREMENT_EFFECTIVE_AT
+                if execution_gated and destructive and post_retirement:
+                    if not (core.get("test_plan") or "").strip():
+                        execution_blockers.append("stated fail-closed preflight plan required")
+                    if not (core.get("rollback_plan") or "").strip():
+                        execution_blockers.append("rollback plan required")
+                    if not preflight or not preflight.get("passed"):
+                        reason = (preflight or {}).get("reason") or "no passing preflight recorded"
+                        execution_blockers.append(f"preflight failed: {reason}")
                 # CAB bypass guard: a raw `status` event may never be the thing
                 # that grants approval. `_cab_resolved_status` above already
                 # derives "approved" for every LEGITIMATE route (a qualifying
@@ -1043,7 +1080,8 @@ class ITILManager:
                 # (verified), and forging this marker requires direct write
                 # access to the event JSONL, which is already game-over.
                 cab_gated = (
-                    to == "approved"
+                    CAB_POLICY_ENABLED
+                    and to == "approved"
                     and gate_status in ("proposed", "reviewing")
                     and e.get("node") != "migrated"
                 )
@@ -1051,6 +1089,7 @@ class ITILManager:
                     to in _CHANGE_TRANSITIONS.get(gate_status, set())
                     and not ((pir_gated or rollback_gated) and not note.strip())
                     and not cab_gated
+                    and not execution_blockers
                 ):
                     timeline.append(
                         {
@@ -1075,6 +1114,17 @@ class ITILManager:
                                 "standard/auto-normal derivation, never from a "
                                 "raw status event"
                             ),
+                        }
+                    )
+                elif execution_blockers:
+                    timeline.append(
+                        {
+                            "ts": ts,
+                            "agent": agent,
+                            "action": f"status:{gate_status}->{to}",
+                            "note": note,
+                            "conflicted": True,
+                            "conflict_reason": "; ".join(execution_blockers),
                         }
                     )
                 elif (pir_gated or rollback_gated) and not note.strip():
@@ -1165,6 +1215,21 @@ class ITILManager:
                         }
                     )
                     status = "reviewing"
+            elif kind == "preflight":
+                preflight = {
+                    "passed": bool(e.get("passed")),
+                    "reason": (e.get("reason") or "").strip(),
+                    "ts": ts,
+                    "agent": agent,
+                }
+                timeline.append(
+                    {
+                        "ts": ts,
+                        "agent": agent,
+                        "action": "preflight:passed" if preflight["passed"] else "preflight:failed",
+                        "note": preflight["reason"],
+                    }
+                )
             elif kind == "schedule":
                 # Valid only while approved (same fail-closed treatment as an
                 # invalid `status` event: recorded conflicted, no transition).
@@ -1310,7 +1375,7 @@ class ITILManager:
         # `prepared_by` is None (no `pr_link` event, i.e. every change
         # record that predates this card) the filter is a no-op, preserving
         # the fold-invariance guarantee.
-        if status in ("proposed", "reviewing") and votes:
+        if CAB_POLICY_ENABLED and status in ("proposed", "reviewing") and votes:
             rejections = [v for v in votes if v.decision == CABDecisionValue.REJECTED]
             approvals = [
                 v
@@ -1360,6 +1425,7 @@ class ITILManager:
             prepared_by=prepared_by,
             validation=validation,
             scheduled_window=scheduled_window,
+            preflight=preflight,
         )
 
     # ── Incidents ─────────────────────────────────────────────────────
@@ -1806,6 +1872,36 @@ class ITILManager:
         if note and not new_status:
             self._append_event(self.changes_dir, rid, agent, "note", note=note)
 
+        return self._fold_record(self.changes_dir, rid, Change)
+
+    def record_change_preflight(
+        self,
+        change_id: str,
+        agent: str,
+        *,
+        passed: bool,
+        reason: str,
+    ) -> Change:
+        """Record an execution preflight verdict without performing mutation.
+
+        A failed verdict is valid evidence and remains append-only. Destructive
+        or high-risk changes cannot enter ``implementing`` unless the latest
+        verdict passes. A failure must include the reason it stopped.
+        """
+        rid = self._resolve_id(self.changes_dir, change_id)
+        if self._load_core(self.changes_dir, rid) is None:
+            raise ValueError(f"Change {change_id} not found")
+        clean_reason = reason.strip()
+        if not passed and not clean_reason:
+            raise ValueError("a failed preflight must say why it stopped")
+        self._append_event(
+            self.changes_dir,
+            rid,
+            agent,
+            "preflight",
+            passed=bool(passed),
+            reason=clean_reason,
+        )
         return self._fold_record(self.changes_dir, rid, Change)
 
     def list_changes(self, status: str | None = None) -> list[Change]:
