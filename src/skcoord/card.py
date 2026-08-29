@@ -89,6 +89,9 @@ class CardEvent(BaseModel):
 
     card_id: str
     action: str
+    # Optional cross-store identity. Records written before graph-truth
+    # verification do not have this field and remain valid.
+    event_id: str | None = None
     writer: str = ""
     ts: str = Field(default_factory=_now_iso)
     seq: int = 0
