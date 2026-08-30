@@ -16,11 +16,13 @@ from capauth import (
     ControlPlaneBinding,
     ControlPlaneDecisionAuthorizer,
     ControlPlaneInvocationV1,
+    DecisionState,
     InMemoryAuditSink,
     InMemoryPrincipalPolicyBackend,
     InMemoryReplayBackend,
     InMemoryRevocationBackend,
     IssuerGrant,
+    OperatorSessionCurrentnessVerifier,
     Principal,
     RequestBoundary,
     StaticTrustedIssuerBackend,
@@ -131,7 +133,9 @@ def entry(**changes) -> AuthorizedCardPolicyEntryV1:
     return AuthorizedCardPolicyEntryV1.issue(**values)
 
 
-def policy_selection(policy: AuthorizedCardPolicyEntryV1) -> AuthorizedCardPolicySelectionV1:
+def policy_selection(
+    policy: AuthorizedCardPolicyEntryV1,
+) -> AuthorizedCardPolicySelectionV1:
     return AuthorizedCardPolicySelectionV1(
         subject=policy.subject,
         acting_principal_id=policy.acting_principal_id,
@@ -626,6 +630,81 @@ def test_missing_fake_and_reused_verifiers_fail_closed() -> None:
     assert rig.store.fold_calls == []
 
 
+def test_exact_operator_session_verifier_guards_before_and_after_owner_read(
+    monkeypatch,
+) -> None:
+    rig = Rig()
+    context, legacy_verifier = current_authority(rig)
+    legacy_verifier.close()
+    calls = []
+    operator_verifier = object.__new__(OperatorSessionCurrentnessVerifier)
+    monkeypatch.setattr(
+        OperatorSessionCurrentnessVerifier,
+        "check_before_owner_read",
+        lambda self, value: calls.append(("before", self, value)) or DecisionState.ALLOW,
+    )
+    monkeypatch.setattr(
+        OperatorSessionCurrentnessVerifier,
+        "check_after_owner_read",
+        lambda self, value: calls.append(("after", self, value)) or DecisionState.ALLOW,
+    )
+    monkeypatch.setattr(
+        OperatorSessionCurrentnessVerifier,
+        "close",
+        lambda self: calls.append(("close", self, None)),
+    )
+
+    result = rig.provider.read(
+        context,
+        SCOPE,
+        Path("/unused"),
+        currentness_verifier=operator_verifier,
+        now=NOW,
+    )
+
+    assert result["truth_state"] == "current"
+    assert [name for name, _verifier, _context in calls] == ["before", "after", "close"]
+    assert all(value is operator_verifier for _name, value, _context in calls)
+    assert calls[0][2] is calls[1][2] is context
+
+
+def test_operator_session_verifier_subclass_is_rejected_before_owner_read(
+    monkeypatch,
+) -> None:
+    rig = Rig()
+    context, legacy_verifier = current_authority(rig)
+    legacy_verifier.close()
+    calls = []
+
+    class PermissiveWrapper(OperatorSessionCurrentnessVerifier):
+        pass
+
+    wrapped = object.__new__(PermissiveWrapper)
+    monkeypatch.setattr(
+        PermissiveWrapper,
+        "check_before_owner_read",
+        lambda *_args: calls.append("before") or DecisionState.ALLOW,
+    )
+    monkeypatch.setattr(
+        PermissiveWrapper,
+        "check_after_owner_read",
+        lambda *_args: calls.append("after") or DecisionState.ALLOW,
+    )
+    monkeypatch.setattr(PermissiveWrapper, "close", lambda *_args: calls.append("close"))
+
+    result = rig.provider.read(
+        context,
+        SCOPE,
+        Path("/unused"),
+        currentness_verifier=wrapped,
+        now=NOW,
+    )
+
+    assert result["truth_state"] == "unknown"
+    assert calls == []
+    assert rig.store.fold_calls == []
+
+
 def test_malformed_scope_closes_verifier_and_cannot_be_retried() -> None:
     rig = Rig()
     context, verifier = current_authority(rig)
@@ -824,10 +903,15 @@ def test_file_policy_backend_loads_exact_immutable_selection(tmp_path) -> None:
         selected.subject = "changed"  # type: ignore[misc]
 
 
-def test_file_policy_backend_rejects_duplicate_and_scope_tampered_documents(tmp_path) -> None:
+def test_file_policy_backend_rejects_duplicate_and_scope_tampered_documents(
+    tmp_path,
+) -> None:
     policy = entry()
     path = tmp_path / "owner-policy.json"
-    duplicate = {"schema_version": "1.0.0", "entries": [policy.model_dump(mode="json")] * 2}
+    duplicate = {
+        "schema_version": "1.0.0",
+        "entries": [policy.model_dump(mode="json")] * 2,
+    }
     atomic_write_text(path, json.dumps(duplicate))
     path.chmod(0o600)
     backend = FileAuthorizedCardPolicyBackend(path, clock=lambda: NOW)
@@ -939,13 +1023,17 @@ def test_file_policy_backend_expired_and_stale_revisions_fail_closed(tmp_path) -
     assert backend.snapshot(policy_selection(expired)) is None
     assert (
         backend.read_if_current(
-            policy_selection(expired), expired.owner_policy_revision, lambda _: {"secret": True}
+            policy_selection(expired),
+            expired.owner_policy_revision,
+            lambda _: {"secret": True},
         )
         is None
     )
 
 
-def test_file_policy_backend_revision_change_during_read_suppresses_result(tmp_path) -> None:
+def test_file_policy_backend_revision_change_during_read_suppresses_result(
+    tmp_path,
+) -> None:
     initial = entry()
     changed = entry(expires_at=NOW + timedelta(minutes=4))
     path = tmp_path / "owner-policy.json"
@@ -975,7 +1063,9 @@ def test_file_policy_backend_unchanged_read_returns_result(tmp_path) -> None:
     ) == {"ok": True}
 
 
-def test_file_policy_backend_drives_bounded_provider_without_enumeration(tmp_path) -> None:
+def test_file_policy_backend_drives_bounded_provider_without_enumeration(
+    tmp_path,
+) -> None:
     policy = entry()
     path = tmp_path / "owner-policy.json"
     write_policy(path, policy)

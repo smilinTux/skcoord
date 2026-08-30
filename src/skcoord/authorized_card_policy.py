@@ -19,6 +19,7 @@ from capauth import (
     DecisionCode,
     DecisionReason,
     DecisionState,
+    OperatorSessionCurrentnessVerifier,
     OwnerPolicyDecision,
     SanitizedControlPlaneDecisionV1,
 )
@@ -528,7 +529,9 @@ class AuthorizedCardPolicyProvider:
         requested_scope: AuthorizedCardScopeV1,
         home: Path,
         *,
-        currentness_verifier: ControlPlaneCurrentnessVerifier | None = None,
+        currentness_verifier: (
+            ControlPlaneCurrentnessVerifier | OperatorSessionCurrentnessVerifier | None
+        ) = None,
         now: datetime | None = None,
     ) -> dict:
         try:
@@ -542,7 +545,10 @@ class AuthorizedCardPolicyProvider:
             if validated_scope != requested_scope:
                 return denied
             denied = unavailable_authorized_card_snapshot(validated_scope)
-            if type(currentness_verifier) is not ControlPlaneCurrentnessVerifier:
+            if type(currentness_verifier) not in {
+                ControlPlaneCurrentnessVerifier,
+                OperatorSessionCurrentnessVerifier,
+            }:
                 return denied
             current = self._current(now)
             if not isinstance(context, SanitizedControlPlaneDecisionV1):
@@ -642,7 +648,10 @@ class AuthorizedCardPolicyProvider:
         except Exception:
             return denied
         finally:
-            if type(currentness_verifier) is ControlPlaneCurrentnessVerifier:
+            if type(currentness_verifier) in {
+                ControlPlaneCurrentnessVerifier,
+                OperatorSessionCurrentnessVerifier,
+            }:
                 currentness_verifier.close()
 
     def _resolve(
