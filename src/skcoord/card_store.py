@@ -571,7 +571,7 @@ class CardStore:
     @staticmethod
     def _creation_class(core: CardCore | dict) -> str | None:
         """Return the governed title class, independent of caller or labels."""
-        title = core.title if isinstance(core, CardCore) else core.get("title", "")
+        title = core.get("title", "") if isinstance(core, dict) else core.title
         match = _GOVERNED_CARD_CLASS.search(title if isinstance(title, str) else "")
         return match.group(1).lower() if match else None
 
