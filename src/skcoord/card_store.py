@@ -21,6 +21,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import secrets
 import socket
 import stat
@@ -50,6 +51,9 @@ _TASK_VIEW_CURSOR_SECRET = secrets.token_bytes(32)
 _HELD_CARD_LOCKS: ContextVar[frozenset[tuple[str, str]]] = ContextVar(
     "skcoord_held_card_locks", default=frozenset()
 )
+_GOVERNED_CARD_CLASS = re.compile(r"\[(REVIEW|REPAIR)\]", re.IGNORECASE)
+_CARD_PARENT_LABEL_PREFIX = "parent-"
+HUMAN_CARD_CREATION_OVERRIDE_LABEL = "human-override"
 
 
 def _card_lock_key(home: Path, card_id: str) -> tuple[str, str]:
@@ -564,55 +568,140 @@ class CardStore:
         with _open_home_ancestor_lock(self.home, card_id):
             pass
 
-    def create(self, core: CardCore) -> str:
-        """Write ``cards/<id>/core.json`` write-once. Returns the card id.
+    @staticmethod
+    def _creation_class(core: CardCore | dict) -> str | None:
+        """Return the governed title class, independent of caller or labels."""
+        title = core.title if isinstance(core, CardCore) else core.get("title", "")
+        match = _GOVERNED_CARD_CLASS.search(title if isinstance(title, str) else "")
+        return match.group(1).lower() if match else None
 
-        Uses O_CREAT|O_EXCL so a concurrent create on the same id is safe (the
-        loser sees the existing core).
+    @staticmethod
+    def _creation_parent(labels: list[str], card_id: str) -> str:
+        parents = {
+            label[len(_CARD_PARENT_LABEL_PREFIX) :]
+            for label in labels
+            if isinstance(label, str)
+            and label.lower().startswith(_CARD_PARENT_LABEL_PREFIX)
+            and label[len(_CARD_PARENT_LABEL_PREFIX) :]
+        }
+        if len(parents) != 1:
+            raise ValueError(
+                f"Governed card {card_id} requires exactly one parent-<card_id> label"
+            )
+        return parents.pop()
+
+    def _is_terminal_card(self, card: Card) -> bool:
+        """Use structural CardStore state only, never evidence annotations."""
+        if card.status == Column.DONE or card.archived:
+            return True
+        return any(event.get("action") == "void" for event in self._read_events(card.id))
+
+    def _govern_create(self, core: CardCore) -> None:
+        """Fail closed on duplicate or over-depth review and repair creation."""
+        creation_class = self._creation_class(core)
+        if creation_class is None:
+            return
+        labels = list(core.initial_labels)
+        if HUMAN_CARD_CREATION_OVERRIDE_LABEL in {label.lower() for label in labels}:
+            return
+        parent_id = self._creation_parent(labels, core.id)
+
+        cards = self.list_cards(include_archived=True)
+        cards_by_id = {card.id: card for card in cards}
+        if parent_id not in cards_by_id:
+            raise ValueError(f"Governed card {core.id} names unknown parent {parent_id}")
+
+        for existing in cards:
+            existing_core = self._load_core(existing.id) or {}
+            if self._creation_class(existing_core) != creation_class:
+                continue
+            try:
+                existing_parent = self._creation_parent(
+                    list(existing_core.get("initial_labels", [])), existing.id
+                )
+            except ValueError:
+                continue
+            if existing_parent == parent_id and not self._is_terminal_card(existing):
+                raise ValueError(
+                    f"Refusing live {creation_class} duplicate for parent {parent_id}; "
+                    f"existing card {existing.id} is non-terminal"
+                )
+
+        if creation_class != "review":
+            return
+        review_depth = 0
+        root_id = parent_id
+        visited = {core.id}
+        while True:
+            if root_id in visited:
+                raise ValueError(f"Review ancestry for {core.id} contains a cycle at {root_id}")
+            visited.add(root_id)
+            ancestor = cards_by_id.get(root_id)
+            if ancestor is None:
+                raise ValueError(f"Review ancestry for {core.id} names unknown card {root_id}")
+            ancestor_core = self._load_core(root_id) or {}
+            if self._creation_class(ancestor_core) != "review":
+                break
+            review_depth += 1
+            root_id = self._creation_parent(
+                list(ancestor_core.get("initial_labels", [])), ancestor.id
+            )
+
+        if review_depth >= 2:
+            raise ValueError(
+                f"Refusing third review level for root {root_id}; human escalation is required"
+            )
+
+    def create(self, core: CardCore) -> str:
+        """Govern and write ``cards/<id>/core.json`` exactly once.
+
+        All callers, including coordination CLI and MCP adapters, converge here.
+        The creation lock makes the scan and O_EXCL write one local transaction;
+        the immutable core remains the final collision boundary for identical IDs.
         """
         validate_card_lock_identifier(core.id)
-        rec_fd = self._open_card_directory(core.id)
-        payload = (core.model_dump_json(indent=2) + "\n").encode("utf-8")
-        fd = -1
-        try:
+        if self._load_core(core.id) is not None:
+            return core.id
+        with _open_lockfile(self.home, "card-creation-governor.lock", "card creation") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
             try:
-                existing = os.stat("core.json", dir_fd=rec_fd, follow_symlinks=False)
-            except FileNotFoundError:
-                existing = None
-            if existing is not None:
-                if (
-                    stat.S_ISLNK(existing.st_mode)
-                    or not stat.S_ISREG(existing.st_mode)
-                    or existing.st_nlink != 1
-                ):
-                    raise ValueError("CardStore core destination is unsafe")
-                return core.id
-            try:
-                fd = os.open(
-                    "core.json",
-                    os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0),
-                    0o644,
-                    dir_fd=rec_fd,
-                )
-            except FileExistsError:
-                existing = os.stat("core.json", dir_fd=rec_fd, follow_symlinks=False)
-                if (
-                    stat.S_ISLNK(existing.st_mode)
-                    or not stat.S_ISREG(existing.st_mode)
-                    or existing.st_nlink != 1
-                ):
-                    raise ValueError("CardStore core destination is unsafe")
-                return core.id
-            offset = 0
-            while offset < len(payload):
-                offset += os.write(fd, payload[offset:])
-            os.fsync(fd)
-        finally:
-            if fd >= 0:
-                os.close(fd)
-            os.fsync(rec_fd)
-            os.close(rec_fd)
-        # New cards carry their namespace-stable card-ID anchor from birth.
+                if self._load_core(core.id) is not None:
+                    return core.id
+                self._govern_create(core)
+                rec_fd = self._open_card_directory(core.id)
+                payload = (core.model_dump_json(indent=2) + "\n").encode("utf-8")
+                fd = -1
+                try:
+                    try:
+                        fd = os.open(
+                            "core.json",
+                            os.O_CREAT
+                            | os.O_EXCL
+                            | os.O_WRONLY
+                            | getattr(os, "O_NOFOLLOW", 0),
+                            0o644,
+                            dir_fd=rec_fd,
+                        )
+                    except FileExistsError:
+                        existing = os.stat("core.json", dir_fd=rec_fd, follow_symlinks=False)
+                        if (
+                            stat.S_ISLNK(existing.st_mode)
+                            or not stat.S_ISREG(existing.st_mode)
+                            or existing.st_nlink != 1
+                        ):
+                            raise ValueError("CardStore core destination is unsafe")
+                        return core.id
+                    offset = 0
+                    while offset < len(payload):
+                        offset += os.write(fd, payload[offset:])
+                    os.fsync(fd)
+                finally:
+                    if fd >= 0:
+                        os.close(fd)
+                    os.fsync(rec_fd)
+                    os.close(rec_fd)
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
         self._ensure_card_lock_anchor(core.id)
         return core.id
 
