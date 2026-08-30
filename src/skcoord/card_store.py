@@ -51,7 +51,7 @@ _TASK_VIEW_CURSOR_SECRET = secrets.token_bytes(32)
 _HELD_CARD_LOCKS: ContextVar[frozenset[tuple[str, str]]] = ContextVar(
     "skcoord_held_card_locks", default=frozenset()
 )
-_GOVERNED_CARD_CLASS = re.compile(r"\[(REVIEW|REPAIR)\]", re.IGNORECASE)
+_GOVERNED_CARD_CLASS = re.compile(r"\[(REVIEW|REREVIEW|REPAIR)\]", re.IGNORECASE)
 _CARD_PARENT_LABEL_PREFIX = "parent-"
 HUMAN_CARD_CREATION_OVERRIDE_LABEL = "human-override"
 
@@ -573,7 +573,8 @@ class CardStore:
         """Return the governed title class, independent of caller or labels."""
         title = core.get("title", "") if isinstance(core, dict) else core.title
         match = _GOVERNED_CARD_CLASS.search(title if isinstance(title, str) else "")
-        return match.group(1).lower() if match else None
+        creation_class = match.group(1).lower() if match else None
+        return "review" if creation_class == "rereview" else creation_class
 
     @staticmethod
     def _creation_parent(labels: list[str], card_id: str) -> str:
