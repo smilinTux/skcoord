@@ -21,14 +21,12 @@ import hmac
 import json
 import logging
 import os
-import re
 import secrets
 import socket
 import stat
 import time
 import uuid
 from contextlib import contextmanager
-from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -48,28 +46,6 @@ _TASK_VIEW_SCOPE_MAX_BYTES = 1024
 _TASK_VIEW_CURSOR_MAX_ENCODED_BYTES = 10382
 # Process-local by design: restart invalidates every outstanding cursor.
 _TASK_VIEW_CURSOR_SECRET = secrets.token_bytes(32)
-_HELD_CARD_LOCKS: ContextVar[frozenset[tuple[str, str]]] = ContextVar(
-    "skcoord_held_card_locks", default=frozenset()
-)
-_GOVERNED_CARD_CLASS = re.compile(r"\[(REVIEW|REREVIEW|REPAIR)\]", re.IGNORECASE)
-_CARD_PARENT_LABEL_PREFIX = "parent-"
-HUMAN_CARD_CREATION_OVERRIDE_LABEL = "human-override"
-
-
-def _card_lock_key(home: Path, card_id: str) -> tuple[str, str]:
-    """Return a process-local reentrancy key for one resolved card namespace."""
-    return str(Path(home).expanduser().resolve(strict=False)), card_id
-
-
-@contextmanager
-def _mark_card_lock_held(home: Path, card_id: str):
-    """Mark a real acquired lock so nested store appends do not reacquire it."""
-    key = _card_lock_key(home, card_id)
-    token = _HELD_CARD_LOCKS.set(_HELD_CARD_LOCKS.get() | {key})
-    try:
-        yield
-    finally:
-        _HELD_CARD_LOCKS.reset(token)
 
 
 def validate_card_lock_identifier(card_id: str) -> str:
@@ -177,59 +153,6 @@ def _open_lockfile(home: Path, filename: str, label: str):
     if not stat.S_ISREG(lock_stat.st_mode) or lock_stat.st_nlink != 1:
         os.close(descriptor)
         raise ValueError(f"{label} lock path must be a regular single-link file")
-    return os.fdopen(descriptor, "a+", encoding="utf-8")
-
-
-def _open_home_ancestor_lock(home: Path, card_id: str, *, create: bool = True):
-    """Open a card lock beside the replaceable CardStore home.
-
-    Artifact-neutral callers pass ``create=False`` so rejected calls cannot
-    manufacture a lock path. New cards receive this anchor during creation.
-    """
-    no_follow = getattr(os, "O_NOFOLLOW", None)
-    if no_follow is None:
-        raise RuntimeError("safe coordination paths require O_NOFOLLOW support")
-    supplied_root = Path(home).expanduser()
-    if supplied_root.is_symlink():
-        raise ValueError("CardStore home must not be a symlink")
-    root = supplied_root.resolve(strict=False)
-    home_digest = hashlib.sha256(os.fsencode(root)).hexdigest()
-    card_digest = hashlib.sha256(card_id.encode("utf-8")).hexdigest()
-    filename = f".skcoord-{home_digest}-{card_digest}.lock"
-    directory_flags = os.O_RDONLY | os.O_DIRECTORY | no_follow
-    try:
-        parent_fd = os.open(root.parent, directory_flags)
-    except OSError as exc:
-        raise ValueError("CardStore home ancestor is unsafe") from exc
-    descriptor = -1
-    try:
-        try:
-            existing = os.stat(filename, dir_fd=parent_fd, follow_symlinks=False)
-        except FileNotFoundError:
-            existing = None
-        if existing is not None and (
-            stat.S_ISLNK(existing.st_mode)
-            or not stat.S_ISREG(existing.st_mode)
-            or existing.st_nlink != 1
-        ):
-            raise ValueError("CardStore home ancestor lock must be a regular single-link file")
-        open_flags = os.O_RDWR | no_follow
-        if create:
-            open_flags |= os.O_CREAT
-        try:
-            descriptor = os.open(filename, open_flags, 0o600, dir_fd=parent_fd)
-        except FileNotFoundError:
-            if not create:
-                return None
-            raise
-        except OSError as exc:
-            raise ValueError("CardStore home ancestor lock is unsafe") from exc
-    finally:
-        os.close(parent_fd)
-    opened = os.fstat(descriptor)
-    if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
-        os.close(descriptor)
-        raise ValueError("CardStore home ancestor lock must be a regular single-link file")
     return os.fdopen(descriptor, "a+", encoding="utf-8")
 
 
@@ -557,169 +480,64 @@ class CardStore:
 
     # ── writes ────────────────────────────────────────────────────────────
 
-    def _ensure_card_lock_anchor(self, card_id: str) -> None:
-        """Create the persistent card-ID anchor only for a validated card."""
-        core = self._load_core(card_id)
-        if core is None or core.get("id") != card_id:
-            raise ValueError(f"CardStore card {card_id} has no foldable core")
-        filename = f"{hashlib.sha256(card_id.encode('utf-8')).hexdigest()}.lock"
-        with _open_lockfile(self.home, filename, "card"):
-            pass
-        with _open_home_ancestor_lock(self.home, card_id):
-            pass
-
-    @staticmethod
-    def _creation_class(core: CardCore | dict) -> str | None:
-        """Return the governed title class, independent of caller or labels."""
-        title = core.get("title", "") if isinstance(core, dict) else core.title
-        match = _GOVERNED_CARD_CLASS.search(title if isinstance(title, str) else "")
-        creation_class = match.group(1).lower() if match else None
-        return "review" if creation_class == "rereview" else creation_class
-
-    @staticmethod
-    def _creation_parent(labels: list[str], card_id: str) -> str:
-        parents = {
-            label[len(_CARD_PARENT_LABEL_PREFIX) :]
-            for label in labels
-            if isinstance(label, str)
-            and label.lower().startswith(_CARD_PARENT_LABEL_PREFIX)
-            and label[len(_CARD_PARENT_LABEL_PREFIX) :]
-        }
-        if len(parents) != 1:
-            raise ValueError(
-                f"Governed card {card_id} requires exactly one parent-<card_id> label"
-            )
-        return parents.pop()
-
-    def _is_terminal_card(self, card: Card) -> bool:
-        """Use structural CardStore state only, never evidence annotations."""
-        if card.status == Column.DONE or card.archived:
-            return True
-        return any(event.get("action") == "void" for event in self._read_events(card.id))
-
-    def _govern_create(self, core: CardCore) -> None:
-        """Fail closed on duplicate or over-depth review and repair creation."""
-        creation_class = self._creation_class(core)
-        if creation_class is None:
-            return
-        labels = list(core.initial_labels)
-        if HUMAN_CARD_CREATION_OVERRIDE_LABEL in {label.lower() for label in labels}:
-            return
-        parent_id = self._creation_parent(labels, core.id)
-
-        cards = self.list_cards(include_archived=True)
-        cards_by_id = {card.id: card for card in cards}
-        if parent_id not in cards_by_id:
-            raise ValueError(f"Governed card {core.id} names unknown parent {parent_id}")
-
-        for existing in cards:
-            existing_core = self._load_core(existing.id) or {}
-            if self._creation_class(existing_core) != creation_class:
-                continue
-            try:
-                existing_parent = self._creation_parent(
-                    list(existing_core.get("initial_labels", [])), existing.id
-                )
-            except ValueError:
-                continue
-            if existing_parent == parent_id and not self._is_terminal_card(existing):
-                raise ValueError(
-                    f"Refusing live {creation_class} duplicate for parent {parent_id}; "
-                    f"existing card {existing.id} is non-terminal"
-                )
-
-        if creation_class != "review":
-            return
-        review_depth = 0
-        root_id = parent_id
-        visited = {core.id}
-        while True:
-            if root_id in visited:
-                raise ValueError(f"Review ancestry for {core.id} contains a cycle at {root_id}")
-            visited.add(root_id)
-            ancestor = cards_by_id.get(root_id)
-            if ancestor is None:
-                raise ValueError(f"Review ancestry for {core.id} names unknown card {root_id}")
-            ancestor_core = self._load_core(root_id) or {}
-            if self._creation_class(ancestor_core) != "review":
-                break
-            review_depth += 1
-            root_id = self._creation_parent(
-                list(ancestor_core.get("initial_labels", [])), ancestor.id
-            )
-
-        if review_depth >= 2:
-            raise ValueError(
-                f"Refusing third review level for root {root_id}; human escalation is required"
-            )
-
     def create(self, core: CardCore) -> str:
-        """Govern and write ``cards/<id>/core.json`` exactly once.
+        """Write ``cards/<id>/core.json`` write-once. Returns the card id.
 
-        All callers, including coordination CLI and MCP adapters, converge here.
-        The creation lock makes the scan and O_EXCL write one local transaction;
-        the immutable core remains the final collision boundary for identical IDs.
+        Uses O_CREAT|O_EXCL so a concurrent create on the same id is safe (the
+        loser sees the existing core).
         """
         validate_card_lock_identifier(core.id)
-        if self._load_core(core.id) is not None:
-            return core.id
-        with _open_lockfile(self.home, "card-creation-governor.lock", "card creation") as lock:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        rec_fd = self._open_card_directory(core.id)
+        payload = (core.model_dump_json(indent=2) + "\n").encode("utf-8")
+        fd = -1
+        try:
             try:
-                if self._load_core(core.id) is not None:
-                    return core.id
-                self._govern_create(core)
-                rec_fd = self._open_card_directory(core.id)
-                payload = (core.model_dump_json(indent=2) + "\n").encode("utf-8")
-                fd = -1
-                try:
-                    try:
-                        fd = os.open(
-                            "core.json",
-                            os.O_CREAT
-                            | os.O_EXCL
-                            | os.O_WRONLY
-                            | getattr(os, "O_NOFOLLOW", 0),
-                            0o644,
-                            dir_fd=rec_fd,
-                        )
-                    except FileExistsError:
-                        existing = os.stat("core.json", dir_fd=rec_fd, follow_symlinks=False)
-                        if (
-                            stat.S_ISLNK(existing.st_mode)
-                            or not stat.S_ISREG(existing.st_mode)
-                            or existing.st_nlink != 1
-                        ):
-                            raise ValueError("CardStore core destination is unsafe")
-                        return core.id
-                    offset = 0
-                    while offset < len(payload):
-                        offset += os.write(fd, payload[offset:])
-                    os.fsync(fd)
-                finally:
-                    if fd >= 0:
-                        os.close(fd)
-                    os.fsync(rec_fd)
-                    os.close(rec_fd)
-            finally:
-                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
-        self._ensure_card_lock_anchor(core.id)
+                existing = os.stat("core.json", dir_fd=rec_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                existing = None
+            if existing is not None:
+                if (
+                    stat.S_ISLNK(existing.st_mode)
+                    or not stat.S_ISREG(existing.st_mode)
+                    or existing.st_nlink != 1
+                ):
+                    raise ValueError("CardStore core destination is unsafe")
+                return core.id
+            try:
+                fd = os.open(
+                    "core.json",
+                    os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0),
+                    0o644,
+                    dir_fd=rec_fd,
+                )
+            except FileExistsError:
+                existing = os.stat("core.json", dir_fd=rec_fd, follow_symlinks=False)
+                if (
+                    stat.S_ISLNK(existing.st_mode)
+                    or not stat.S_ISREG(existing.st_mode)
+                    or existing.st_nlink != 1
+                ):
+                    raise ValueError("CardStore core destination is unsafe")
+                return core.id
+            offset = 0
+            while offset < len(payload):
+                offset += os.write(fd, payload[offset:])
+            os.fsync(fd)
+        finally:
+            if fd >= 0:
+                os.close(fd)
+            os.fsync(rec_fd)
+            os.close(rec_fd)
         return core.id
 
     def append_event(self, card_id: str, action: str, agent: str, **payload: Any) -> dict:
-        """Append one event line under the common same-card lock protocol.
+        """Append one event line to this writer's own log (flock-guarded).
 
         ``transition_id`` is an optional deterministic caller token. Repeating
         it returns the already-durable event instead of appending another line,
         which lets a caller safely classify a write-then-error as success.
-        A lock already held by this context is recognized internally to avoid
-        recursively reacquiring ``flock`` through an ordinary higher-level
-        mutation protocol.
         """
         validate_card_lock_identifier(card_id)
-        if _card_lock_key(self.home, card_id) not in _HELD_CARD_LOCKS.get():
-            with card_mutation_lock(self.home, card_id):
-                return self.append_event(card_id, action, agent, **payload)
         self._require_foldable_core(card_id)
         writer_filename = f"{self._writer_id(agent)}.jsonl"
         rec_fd = self._open_card_directory(card_id)
@@ -849,7 +667,9 @@ class CardStore:
                 if not name.endswith(".jsonl"):
                     continue
                 try:
-                    raw = self._read_regular_file_bytes(events_fd, name, "CardStore event source")
+                    raw = self._read_regular_file_bytes(
+                        events_fd, name, "CardStore event source"
+                    )
                 except ValueError:
                     raise
                 except Exception as exc:  # noqa: BLE001
@@ -861,7 +681,9 @@ class CardStore:
                 try:
                     lines = raw.decode("utf-8").splitlines()
                 except UnicodeError as exc:
-                    raise ValueError(f"CardStore event source for {card_id} is malformed") from exc
+                    raise ValueError(
+                        f"CardStore event source for {card_id} is malformed"
+                    ) from exc
                 for line in lines:
                     line = line.strip()
                     if not line:
@@ -1030,7 +852,9 @@ class CardStore:
                     or not criteria
                     or any(not isinstance(value, str) or not value.strip() for value in criteria)
                 ):
-                    raise ValueError(f"CardStore criteria amendment for {card_id} is malformed")
+                    raise ValueError(
+                        f"CardStore criteria amendment for {card_id} is malformed"
+                    )
                 card.acceptance_criteria = list(criteria)
             elif action == "add_dependency" and isinstance(e.get("dependency"), str):
                 dependency = e["dependency"]
@@ -1325,7 +1149,9 @@ def _task_view_cursor_position(
     ):
         raise ValueError("task-view cursor is malformed")
     try:
-        raw = base64.b64decode(cursor + "=" * (-len(cursor) % 4), altchars=b"-_", validate=True)
+        raw = base64.b64decode(
+            cursor + "=" * (-len(cursor) % 4), altchars=b"-_", validate=True
+        )
         body, signature = raw[:-32], raw[-32:]
         expected = hmac.digest(_TASK_VIEW_CURSOR_SECRET, body, "sha256")
         if len(signature) != 32 or not hmac.compare_digest(signature, expected):
@@ -1588,188 +1414,25 @@ def amend_dependency(
         return True
 
 
-def _open_existing_coordination_lock(home: Path, filename: str, label: str):
-    """Open an existing persistent lock without creating any path component."""
-    no_follow = getattr(os, "O_NOFOLLOW", None)
-    if no_follow is None:
-        raise RuntimeError("safe coordination paths require O_NOFOLLOW support")
-    root = Path(home).expanduser()
-    if root.is_symlink():
-        raise ValueError("coordination home must not be a symlink")
-    flags = os.O_RDONLY | os.O_DIRECTORY | no_follow
-    try:
-        root_fd = os.open(root, flags)
-    except FileNotFoundError:
-        return None
-    except OSError as exc:
-        raise ValueError("coordination home is unsafe") from exc
-    coordination_fd = locks_fd = descriptor = -1
-    try:
-        coordination_fd = CardStore._open_existing_directory(
-            root_fd, "coordination", "coordination lock directory"
-        )
-        if coordination_fd is None:
-            return None
-        locks_fd = CardStore._open_existing_directory(
-            coordination_fd, "locks", "coordination lock directory"
-        )
-        if locks_fd is None:
-            return None
-        try:
-            existing = os.stat(filename, dir_fd=locks_fd, follow_symlinks=False)
-        except FileNotFoundError:
-            return None
-        if (
-            stat.S_ISLNK(existing.st_mode)
-            or not stat.S_ISREG(existing.st_mode)
-            or existing.st_nlink != 1
-        ):
-            raise ValueError(f"{label} lock path must be a regular single-link file")
-        try:
-            descriptor = os.open(filename, os.O_RDWR | no_follow, dir_fd=locks_fd)
-        except FileNotFoundError:
-            return None
-        except OSError as exc:
-            raise ValueError(f"{label} lock path is unsafe") from exc
-    finally:
-        if locks_fd is not None and locks_fd >= 0:
-            os.close(locks_fd)
-        if coordination_fd is not None and coordination_fd >= 0:
-            os.close(coordination_fd)
-        os.close(root_fd)
-    opened = os.fstat(descriptor)
-    if (
-        not stat.S_ISREG(opened.st_mode)
-        or opened.st_nlink != 1
-        or (opened.st_dev, opened.st_ino) != (existing.st_dev, existing.st_ino)
-    ):
-        os.close(descriptor)
-        raise ValueError(f"{label} lock path must be a regular single-link file")
-    return os.fdopen(descriptor, "a+", encoding="utf-8")
-
-
-def _open_existing_card_lock(home: Path, card_id: str):
-    """Open a validated card directory as its artifact-neutral lock anchor.
-
-    A directory descriptor survives atomic replacement of ``core.json`` and is
-    therefore common to every same-card mutation while the card namespace is
-    stable.  The core is validated through that descriptor before it is
-    returned; malformed, missing, symlinked, hardlinked, or ID-mismatched cores
-    fail without creating any filesystem node.
-    """
-    store = CardStore(home)
-    card_fd = store._open_existing_card_directory(card_id)
-    if card_fd is None:
-        raise ValueError(f"CardStore card {card_id} has no foldable core")
-    try:
-        raw = store._read_regular_file_bytes(card_fd, "core.json", "CardStore core")
-        if raw is None:
-            raise ValueError(f"CardStore card {card_id} has no foldable core")
-        try:
-            core = json.loads(raw.decode("utf-8"))
-        except (UnicodeError, json.JSONDecodeError) as exc:
-            raise ValueError(f"CardStore core for {card_id} is malformed") from exc
-        if not isinstance(core, dict) or core.get("id") != card_id:
-            raise ValueError(f"CardStore core for {card_id} does not match its card")
-        return card_fd
-    except Exception:
-        os.close(card_fd)
-        raise
-
-
-def _acquire_card_lock(descriptor: int, card_id: str, deadline: float) -> None:
-    """Acquire one already-open card lock before a shared deadline."""
-    while True:
-        try:
-            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            return
-        except BlockingIOError:
-            if time.monotonic() >= deadline:
-                raise TimeoutError(f"timed out acquiring card lock for {card_id}")
-            time.sleep(0.01)
-
-
 @contextmanager
-def card_mutation_lock(
-    home: Path,
-    card_id: str,
-    timeout_seconds: float = 5.0,
-    *,
-    artifact_neutral: bool = False,
-):
-    """Acquire the common bounded lock for every existing-card mutation.
-
-    The validated card directory, not replaceable ``core.json``, is the common
-    card-ID anchor.  It is opened without creation, locked first, and validated
-    again after acquisition.  Ordinary callers may additionally retain the
-    persistent hashed lock for compatibility.  Artifact-neutral callers never
-    create it or any parent, preserving the complete tree on invalid input.
-    """
+def card_mutation_lock(home: Path, card_id: str, timeout_seconds: float = 5.0):
+    """Acquire a bounded, path-safe per-card advisory lock."""
     card_id = validate_card_lock_identifier(card_id)
-    key = _card_lock_key(home, card_id)
-    if key in _HELD_CARD_LOCKS.get():
-        yield
-        return
+    filename = f"{hashlib.sha256(card_id.encode('utf-8')).hexdigest()}.lock"
     deadline = time.monotonic() + timeout_seconds
-    try:
-        anchor_handle = _open_existing_card_lock(home, card_id)
-    except ValueError:
-        if artifact_neutral or card_store_write_enabled():
-            raise
-        # Explicit legacy-only rollback mode has no CardStore card directory.
-        filename = f"{hashlib.sha256(card_id.encode('utf-8')).hexdigest()}.lock"
-        with _open_lockfile(home, filename, "card") as handle:
-            _acquire_card_lock(handle.fileno(), card_id, deadline)
+    with _open_lockfile(home, filename, "card") as handle:
+        while True:
             try:
-                with _mark_card_lock_held(home, card_id):
-                    yield
-            finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-        return
-
-    try:
-        ancestor_handle = _open_home_ancestor_lock(home, card_id, create=not artifact_neutral)
-        if ancestor_handle is None:
-            raise ValueError(f"CardStore card {card_id} has no stable home lock anchor")
-        with ancestor_handle:
-            _acquire_card_lock(ancestor_handle.fileno(), card_id, deadline)
-            try:
-                _acquire_card_lock(anchor_handle, card_id, deadline)
-                try:
-                    current_handle = _open_existing_card_lock(home, card_id)
-                    try:
-                        anchor = os.fstat(anchor_handle)
-                        current = os.fstat(current_handle)
-                        if (anchor.st_dev, anchor.st_ino) != (
-                            current.st_dev,
-                            current.st_ino,
-                        ):
-                            raise ValueError(
-                                "CardStore card lock anchor changed while acquiring it"
-                            )
-                    finally:
-                        os.close(current_handle)
-
-                    filename = f"{hashlib.sha256(card_id.encode('utf-8')).hexdigest()}.lock"
-                    if artifact_neutral:
-                        lock_handle = _open_existing_coordination_lock(home, filename, "card")
-                        if lock_handle is None:
-                            raise ValueError(f"CardStore card {card_id} has no stable lock anchor")
-                    else:
-                        lock_handle = _open_lockfile(home, filename, "card")
-                    with lock_handle:
-                        _acquire_card_lock(lock_handle.fileno(), card_id, deadline)
-                        try:
-                            with _mark_card_lock_held(home, card_id):
-                                yield
-                        finally:
-                            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
-                finally:
-                    fcntl.flock(anchor_handle, fcntl.LOCK_UN)
-            finally:
-                fcntl.flock(ancestor_handle.fileno(), fcntl.LOCK_UN)
-    finally:
-        os.close(anchor_handle)
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(f"timed out acquiring card lock for {card_id}")
+                time.sleep(0.01)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def add_dependency(

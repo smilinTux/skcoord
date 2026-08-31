@@ -39,14 +39,6 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
 
 ### Added
 
-- Card creation now enforces review-chain governance at `CardStore.create`, so
-  coordination CLI and MCP callers share the same fail-closed policy. Live
-  review or repair duplicates for one parent and class are refused with the
-  existing card ID, review depth is capped at one review plus one re-review,
-  and only the exact `human-override` label bypasses those checks. Refused
-  mirrored creates no longer leave a legacy task projection behind. CapAuth is
-  temporarily bounded below 0.3.10 because that release makes the existing
-  operator-session currentness contract fail closed in clean installations.
 - Schemas and validators for the two coordination stores, derived from live data
   rather than intent: `schemas/itil-record.v1.schema.json` and
   `schemas/itil-event.v1.schema.json` (all 318 records and 1702 events scanned,
