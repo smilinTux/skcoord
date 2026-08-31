@@ -11,6 +11,15 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
 
 ### Fixed
 
+- The authorized-card owner-read currentness boundary
+  (`AuthorizedCardPolicyProvider.read`) now accepts exactly the two CapAuth
+  currentness verifier implementations: `ControlPlaneCurrentnessVerifier` and
+  `OperatorSessionCurrentnessVerifier`. Duck-typed stand-ins and unknown
+  verifiers are rejected fail-closed, and the before-read, after-read,
+  request-local single-use, session revalidation, and close semantics are
+  preserved. Repairs the SKDashboard Now/Portfolio incompatibility where
+  operator-session authorization had no accepted currentness verifier.
+
 - `lifecycle_reassessment` now reads supersession from the EVIDENCE store, not
   only from the structure store. `superseded_by` is normally recorded as an
   evidence link, and none of those were visible, so a superseded card stayed
