@@ -21,6 +21,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import secrets
 import socket
 import stat
@@ -50,6 +51,8 @@ _TASK_VIEW_CURSOR_SECRET = secrets.token_bytes(32)
 _HELD_CARD_LOCKS: ContextVar[frozenset[tuple[str, str]]] = ContextVar(
     "skcoord_held_card_locks", default=frozenset()
 )
+_CARD_EVENT_ACTION = re.compile(r"^[a-z][a-z0-9_.]*$")
+_CARD_EVENT_RESERVED_KEYS = frozenset({"event_id", "ts", "writer", "node", "seq", "action"})
 
 
 def _card_lock_key(home: Path, card_id: str) -> tuple[str, str]:
@@ -83,6 +86,25 @@ def validate_card_lock_identifier(card_id: str) -> str:
     ):
         raise ValueError("card lock identifier must be a non-path identifier")
     return card_id
+
+
+def validate_card_event_input(action: str, agent: str, payload: dict[str, Any]) -> None:
+    """Reject malformed structural event input before any CardStore path is opened."""
+    if not isinstance(action, str) or not _CARD_EVENT_ACTION.fullmatch(action):
+        raise ValueError("CardStore event action must be a lowercase structural identifier")
+    if (
+        not isinstance(agent, str)
+        or not agent.strip()
+        or "\x00" in agent
+        or any(ord(char) < 32 or ord(char) == 127 for char in agent)
+    ):
+        raise ValueError("CardStore event writer identity must be a non-empty string")
+    reserved = _CARD_EVENT_RESERVED_KEYS.intersection(payload)
+    if reserved:
+        raise ValueError(
+            "CardStore event payload cannot replace structural field(s): "
+            + ", ".join(sorted(reserved))
+        )
 
 
 def _open_coordination_child_directory(home: Path, child: str) -> int:
@@ -627,6 +649,7 @@ class CardStore:
         mutation protocol.
         """
         validate_card_lock_identifier(card_id)
+        validate_card_event_input(action, agent, payload)
         if _card_lock_key(self.home, card_id) not in _HELD_CARD_LOCKS.get():
             with card_mutation_lock(self.home, card_id):
                 return self.append_event(card_id, action, agent, **payload)
@@ -676,6 +699,8 @@ class CardStore:
                                 existing_event = json.loads(line)
                             except json.JSONDecodeError:
                                 continue
+                            if not isinstance(existing_event, dict):
+                                continue
                             if existing_event.get("transition_id") == transition_id:
                                 return existing_event
                     seq = len(lines)
@@ -688,8 +713,15 @@ class CardStore:
                         "action": action,
                     }
                     event.update(payload)
+                    serialized = json.dumps(event, default=str)
+                    try:
+                        serialized_event = json.loads(serialized)
+                    except json.JSONDecodeError as exc:
+                        raise ValueError("CardStore event must serialize as valid JSON") from exc
+                    if not isinstance(serialized_event, dict):
+                        raise ValueError("CardStore event must serialize as a JSON object")
                     fh.seek(0, os.SEEK_END)
-                    fh.write(json.dumps(event, default=str) + "\n")
+                    fh.write(serialized + "\n")
                     fh.flush()
                     os.fsync(fh.fileno())
                     return event
@@ -758,6 +790,7 @@ class CardStore:
             for name in sorted(os.listdir(events_fd)):
                 if not name.endswith(".jsonl"):
                     continue
+                skipped = 0
                 try:
                     raw = self._read_regular_file_bytes(events_fd, name, "CardStore event source")
                 except ValueError:
@@ -778,15 +811,20 @@ class CardStore:
                         continue
                     try:
                         event = json.loads(line)
-                    except json.JSONDecodeError as exc:
-                        raise ValueError(
-                            f"CardStore event source for {card_id} is malformed"
-                        ) from exc
+                    except json.JSONDecodeError:
+                        skipped += 1
+                        continue
                     if not isinstance(event, dict):
-                        raise ValueError(
-                            f"CardStore event source for {card_id} must contain JSON objects"
-                        )
+                        skipped += 1
+                        continue
                     out.append(event)
+                if skipped:
+                    logger.warning(
+                        "Skipped %d malformed or non-object CardStore event line(s) for %s in %s",
+                        skipped,
+                        card_id,
+                        name,
+                    )
         finally:
             os.close(events_fd)
         # Deterministic order: ts, then writer, then per-writer seq.

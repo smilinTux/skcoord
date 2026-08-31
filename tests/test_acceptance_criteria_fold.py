@@ -194,7 +194,9 @@ def test_known_card_with_unreadable_core_fails_closed(tmp_path, monkeypatch):
         board.get_task_views()
 
 
-def test_known_card_with_malformed_event_json_fails_closed(tmp_path, monkeypatch):
+def test_known_card_with_malformed_event_json_preserves_core_criteria(
+    tmp_path, monkeypatch
+):
     monkeypatch.setenv("SKCOORD_CARD_STORE", "1")
     board = Board(tmp_path)
     board.create_task(Task(id="criteria-bad-event", title="Card"))
@@ -206,8 +208,14 @@ def test_known_card_with_malformed_event_json_fails_closed(tmp_path, monkeypatch
     event_path.write_text("{malformed\n", encoding="utf-8")
     monkeypatch.setenv("SKCOORD_CARD_STORE", "0")
 
-    with pytest.raises(ValueError, match="event"):
-        board.get_task_views()
+    task = next(
+        view.task
+        for view in board.get_task_views()
+        if view.task.id == "criteria-bad-event"
+    )
+
+    assert task.acceptance_criteria == []
+    assert event_path.read_text(encoding="utf-8") == "{malformed\n"
 
 
 def test_known_card_with_unreadable_event_fails_closed(tmp_path, monkeypatch):
