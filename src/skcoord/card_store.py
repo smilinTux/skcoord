@@ -1001,6 +1001,53 @@ class CardStore:
             out.append(card)
         return out
 
+    def list_cards_with_evidence(
+        self, include_archived: bool = False, *, degrade_unreadable: bool = False
+    ) -> tuple[list[Card], list[dict]]:
+        """Fold every card AND report unreadable ones with an evidence hash.
+
+        The second element is a list of dicts, one per unreadable card:
+        ``{"card_id", "source", "reason", "evidence_sha256"}``. The
+        evidence hash is the SHA-256 of the raw core bytes when the core is
+        present (so a reviewer on another host can verify identity against
+        the durable evidence copy), or of the reason string when the core
+        itself is absent. This keeps one corrupt stream from erasing its
+        card or hiding every readable card.
+        """
+        out: list[Card] = []
+        malformed: list[dict] = []
+        for cid in self.list_card_ids():
+            core_bytes = None
+            try:
+                card = self.fold(cid)
+                core_bytes = self._read_regular_file_bytes(
+                    self._open_existing_card_directory(cid), "core.json", "CardStore core"
+                )
+            except Exception as exc:  # noqa: BLE001 - one-card fault boundary
+                if not degrade_unreadable:
+                    raise
+                logger.error("CardStore card %s is unreadable: %s", cid, exc)
+                card = self._unreadable_card(cid, exc)
+                reason = str(exc).strip() or exc.__class__.__name__
+                if core_bytes:
+                    evidence = hashlib.sha256(core_bytes).hexdigest()
+                else:
+                    evidence = hashlib.sha256(f"reason:{reason}".encode("utf-8")).hexdigest()
+                malformed.append(
+                    {
+                        "card_id": cid,
+                        "source": f"cards/{cid}",
+                        "reason": reason,
+                        "evidence_sha256": evidence,
+                    }
+                )
+            if card is None:
+                continue
+            if card.archived and not include_archived:
+                continue
+            out.append(card)
+        return out, malformed
+
 
 # ---------------------------------------------------------------------------
 # Importer + parity (Phase 4b / 4c)
@@ -1283,6 +1330,28 @@ def task_views_from_store(home: Path, include_archived: bool = False) -> list:
         # ITIL cards (incident/problem/change) live in the kanban view, not here.
         if card.kind.value in ("task", "epic")
     ]
+
+
+def task_views_with_malformed(
+    home: Path, include_archived: bool = False
+) -> tuple[list, list[dict]]:
+    """Return ``(task_views, malformed)`` where ``malformed`` is a list of dicts.
+
+    This is the bounded, machine-readable status contract: the primary
+    payload (task views) is returned on the first element, and one malformed
+    card is reported by ID plus its evidence SHA-256 on the second element
+    without crashing the whole status command or hiding the readable cards.
+    """
+    store = CardStore(home)
+    cards, malformed = store.list_cards_with_evidence(
+        include_archived=include_archived, degrade_unreadable=True
+    )
+    views = [
+        _task_view_from_card(card)
+        for card in cards
+        if card.kind.value in ("task", "epic")
+    ]
+    return views, malformed
 
 
 def _card_exists(home: Path, card_id: str) -> bool:
