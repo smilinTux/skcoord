@@ -8,6 +8,7 @@ from threading import Lock, Thread
 from unittest.mock import Mock, patch
 from uuid import UUID
 
+import capauth
 import pytest
 from capauth import (
     CapabilityAuthorizer,
@@ -16,11 +17,15 @@ from capauth import (
     ControlPlaneBinding,
     ControlPlaneDecisionAuthorizer,
     ControlPlaneInvocationV1,
+    CurrentPolicyRevisions,
     InMemoryAuditSink,
+    InMemoryOperatorSessionBackendForTests,
     InMemoryPrincipalPolicyBackend,
     InMemoryReplayBackend,
     InMemoryRevocationBackend,
     IssuerGrant,
+    OperatorSessionCurrentnessVerifier,
+    OperatorSessionManager,
     Principal,
     RequestBoundary,
     StaticTrustedIssuerBackend,
@@ -46,10 +51,14 @@ from skcoord.card import Card, Column, Kind
 UTC = timezone.utc
 NOW = datetime(2026, 8, 24, 12, tzinfo=UTC)
 ORIGIN = "https://dashboard.example.test"
-ISSUER = "A" * 40
+ISSUER = "A" * 64
 MASK = ("human_gate", "orphan_evidence", "visible_edges")
 CLASSES = ("human-gate", "project")
 SCOPE = AuthorizedCardScopeV1(role="project-manager")
+
+# capauth issues operator-session currentness verifiers through a module-private
+# factory sentinel; tests may reach into it because they exercise capauth itself.
+_OPERATOR_SESSION_CURRENTNESS_VERIFIER_FACTORY = capauth.control_plane_session._VERIFIER_FACTORY
 
 
 class Clock:
@@ -238,6 +247,57 @@ def current_authority(rig: Rig, *, decision_id: str | None = None):
     assert result.allow and result.context is not None
     assert verifier is not None
     return result.context, verifier
+
+
+def operator_session_rig(policy_entry=None, *, store=None, backend=None, principal=None):
+    rig = Rig(policy_entry, store=store, backend=backend, principal=principal)
+    rig.session_backend = InMemoryOperatorSessionBackendForTests()
+    rig.session_manager = OperatorSessionManager(
+        backend=rig.session_backend,
+        current_revisions=lambda binding: binding.revisions,
+        enabled=True,
+        clock=rig.clock,
+    )
+    material = rig.session_manager.create(
+        principal=rig.principal,
+        acting_principal=rig.principal,
+        device_fingerprint="test-device-fingerprint",
+        capability_ceiling=["skdashboard.read"],
+        purpose=rig.binding.purpose,
+        allowed_origin=ORIGIN,
+        revisions=CurrentPolicyRevisions(
+            issuer=ISSUER.lower(),
+            principal="1" * 64,
+            acting_principal="2" * 64,
+            revocation="3" * 64,
+            owner=rig.entry.owner_policy_revision,
+        ),
+        ttl_seconds=300,
+        idle_seconds=120,
+    )
+    cookie, csrf = material.take()
+    rig._session_cookie = cookie
+    rig.session = rig.session_manager.authenticate(
+        cookie=cookie,
+        csrf=csrf,
+        origin=ORIGIN,
+        device_fingerprint="test-device-fingerprint",
+        request_nonce="0123456789abcdef0123",
+    )
+    return rig
+
+
+def operator_session_current_authority(rig: Rig, *, decision_id: str | None = None):
+    """Authorize directly (CP verifier), then wrap it in an operator-session verifier."""
+    context, inner = current_authority(rig, decision_id=decision_id)
+    verifier = OperatorSessionCurrentnessVerifier(
+        _OPERATOR_SESSION_CURRENTNESS_VERIFIER_FACTORY,
+        sessions=rig.session_manager,
+        session=rig.session,
+        context=context,
+        inner=inner,
+    )
+    return context, verifier
 
 
 def test_real_capauth_context_reads_only_policy_selected_ids() -> None:
@@ -997,3 +1057,93 @@ def test_file_policy_backend_drives_bounded_provider_without_enumeration(tmp_pat
     store.list_card_ids.assert_not_called()
     store.list_cards.assert_not_called()
     assert "protected" not in json.dumps(result)
+
+
+def test_operator_session_currentness_verifier_authenticates_now_and_portfolio_projection() -> (
+    None
+):
+    rig = operator_session_rig()
+    context, verifier = operator_session_current_authority(rig)
+    assert type(verifier) is OperatorSessionCurrentnessVerifier
+
+    result = rig.provider.read(
+        context,
+        SCOPE,
+        Path("/unused"),
+        currentness_verifier=verifier,
+        now=NOW,
+    )
+
+    assert result["truth_state"] == "current"
+    assert result["population_counts"]["authorized_ids"] == 1
+    assert rig.store.fold_calls == ["source"]
+    rig.store.list_card_ids.assert_not_called()
+    rig.store.list_cards.assert_not_called()
+
+
+def test_operator_session_reused_verifier_denies_second_read() -> None:
+    rig = operator_session_rig()
+    context, verifier = operator_session_current_authority(rig)
+
+    first = rig.provider.read(
+        context, SCOPE, Path("/unused"), currentness_verifier=verifier, now=NOW
+    )
+    rig.store.fold_calls.clear()
+    reused = rig.provider.read(
+        context, SCOPE, Path("/unused"), currentness_verifier=verifier, now=NOW
+    )
+
+    assert first["truth_state"] == "current"
+    assert reused["truth_state"] == "unknown"
+    assert rig.store.fold_calls == []
+
+
+def test_operator_session_revocation_between_reads_denies() -> None:
+    rig = operator_session_rig()
+    context, verifier = operator_session_current_authority(rig)
+    rig.session_manager.revoke(rig._session_cookie)
+
+    result = rig.provider.read(
+        context, SCOPE, Path("/unused"), currentness_verifier=verifier, now=NOW
+    )
+
+    assert result["truth_state"] == "unknown"
+    assert result["population_counts"] is None
+    assert rig.store.fold_calls == []
+
+
+def test_operator_session_expired_at_read_denies() -> None:
+    policy = entry(expires_at=NOW + timedelta(seconds=30))
+    rig = operator_session_rig(policy)
+    context, verifier = operator_session_current_authority(rig)
+
+    def advance_clock(*_args):
+        rig.clock.value = NOW + timedelta(seconds=45)
+        return rig.store
+
+    rig.provider._store_factory = Mock(side_effect=advance_clock)
+    result = rig.provider.read(context, SCOPE, Path("/unused"), currentness_verifier=verifier)
+
+    assert result["truth_state"] == "unknown"
+    assert result["population_counts"] is None
+
+
+def test_unknown_verifier_type_fails_closed_at_owner_read() -> None:
+    rig = operator_session_rig()
+    context, _ = operator_session_current_authority(rig)
+
+    class UnknownVerifier:  # duck-typed stand-in: right methods, wrong type
+        def check_before_owner_read(self, context):
+            return capauth.DecisionState.ALLOW
+
+        def check_after_owner_read(self, context):
+            return capauth.DecisionState.ALLOW
+
+        def close(self) -> None:
+            return None
+
+    result = rig.provider.read(
+        context, SCOPE, Path("/unused"), currentness_verifier=UnknownVerifier(), now=NOW
+    )
+    assert result["truth_state"] == "unknown"
+    assert rig.store.fold_calls == []
