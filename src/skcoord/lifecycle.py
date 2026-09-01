@@ -24,6 +24,7 @@ from typing import Iterator
 from .atomic_io import atomic_write_text
 from .card import CardEvent, CardEventLog, Column, KanbanBoard
 from .card_store import (
+    CardStore,
     _open_lockfile,
     card_mutation_lock,
     card_store_write_enabled,
@@ -674,6 +675,14 @@ def transition_task(
         current = cards.get(task_id)
         if current is None:
             raise ValueError(f"Task {task_id} not found")
+        if any(
+            event.get("action") == "void"
+            for event in CardStore(root)._read_events(task_id)
+        ):
+            raise ValueError(
+                f"Task {task_id} is voided and cannot be moved; "
+                "void is a terminal decision"
+            )
         before = _audit_lifecycle_unlocked(root, task_ids={task_id})
         _assert_no_active_conflicts(Board(root), before, stale_after_seconds=3600)
 
