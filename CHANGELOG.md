@@ -9,6 +9,19 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
 
 ## [Unreleased]
 
+### Added
+
+- `human_gate_close`: automatic close-out of `[HUMAN]`-titled decision cards.
+  `find_decided_human_gate_cards` reports open human-gate cards that already
+  hold a recorded decision (`human_decision` / `human-decision` /
+  `human_gate_decision`); `close_decided_human_gate_cards` transitions those
+  cards to the terminal `done` column with a lock-guarded, idempotent
+  append-only `complete` event, preserving (never voiding) the decision
+  record. `append_human_gate_decision` appends one canonical hash-bound
+  `human_gate_decision` event carrying `decision`, `decision_ref`,
+  `decision_sha256` and `card_revision`. The `[HUMAN]` title gate itself
+  remains permanent; only the card's lifecycle column moves.
+
 ### Fixed
 
 - `lifecycle_reassessment` now reads supersession from the EVIDENCE store, not

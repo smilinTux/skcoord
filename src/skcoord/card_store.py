@@ -909,6 +909,15 @@ class CardStore:
                     for k in ("pr", "commit", "branch", "transcript"):
                         if e.get(k):
                             r.setdefault("links", {})[k] = e.get(k)
+            elif action == "human_gate_decision":
+                card.meta["human_gate_decision"] = {
+                    "decision": e.get("decision"),
+                    "decision_ref": e.get("decision_ref"),
+                    "decision_sha256": e.get("decision_sha256"),
+                    "card_revision": e.get("card_revision"),
+                    "ts": e.get("ts"),
+                    "writer": e.get("writer"),
+                }
             elif action == "archive":
                 card.archived = True
                 card.meta["archived_at"] = e.get("ts")
