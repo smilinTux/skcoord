@@ -11,16 +11,30 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
 
 ### Added
 
-- `human_gate_close`: automatic close-out of `[HUMAN]`-titled decision cards.
-  `find_decided_human_gate_cards` reports open human-gate cards that already
-  hold a recorded decision (`human_decision` / `human-decision` /
-  `human_gate_decision`); `close_decided_human_gate_cards` transitions those
-  cards to the terminal `done` column with a lock-guarded, idempotent
-  append-only `complete` event, preserving (never voiding) the decision
-  record. `append_human_gate_decision` appends one canonical hash-bound
-  `human_gate_decision` event carrying `decision`, `decision_ref`,
+- `human_gate_close`: automatic close-out of `[HUMAN]`-titled decision cards
+  (card 57764450). `find_decided_human_gate_cards` reports open human-gate
+  cards that already hold a recorded decision (`human_decision` /
+  `human-decision` / `human_gate_decision`); `close_decided_human_gate_cards`
+  transitions those cards to the terminal `done` column with a lock-guarded,
+  idempotent append-only `complete` event, preserving (never voiding) the
+  decision record. `append_human_gate_decision` appends one canonical
+  hash-bound `human_gate_decision` event carrying `decision`, `decision_ref`,
   `decision_sha256` and `card_revision`. The `[HUMAN]` title gate itself
-  remains permanent; only the card's lifecycle column moves.
+  remains permanent; only the card's lifecycle column moves. Partial decisions
+  (`APPROVED_CONDITIONAL`, `APPROVED_QUALIFICATION_ONLY_INTENT`) do not close
+  unless a successor card carrying the remaining decision is named via the
+  `successor_id` parameter, which is then recorded on the closed card as a
+  `successor_card` link (AC4, e.g. card 2433d32d whose staging decision is a
+  separate `SEPARATE_HUMAN_DECISION_BOUND_TO_COMPLETED_PACKET_HASHES_REQUIRED`).
+  The `[HUMAN]` title gate is unchanged: nothing in this change allows `coord
+  describe` or any other path to strip the marker (AC3); a retitle route would
+  let any agent walk its way past a human approval, so it is rejected here.
+  Board effect (AC6): the 23 open `[HUMAN]` cards with recorded decisions move
+  from `open` to the terminal `done` column. Under the current rubric (no
+  change, kept separate from MERO-P0-GATE-03) they count as `claimed-done`,
+  not delivered; Delivery Fraction is unaffected because the rubric is not
+  widened. If a later rubric change makes a recorded decision a `verdict`,
+  they would count as delivered, which requires its own blind re-gate.
 
 ### Fixed
 

@@ -69,11 +69,30 @@ def find_decided_human_gate_cards(
     return decided
 
 
+def _decision_kind(e: dict) -> str | None:
+    """Classify one event as full or partial human decision evidence.
+
+    A ``human_gate_decision`` event with an APPROVED / APPROVED_CONDITIONAL /
+    APPROVED_QUALIFICATION_ONLY_INTENT / DENY_FOR_NOW decision value is the
+    hash-pinned decision record.  A plain ``link`` with a human-decision key
+    is treated as full decision evidence too, since the link value itself is
+    the recorded decision.  Partial decisions (APPROVED_CONDITIONAL with a
+    follow-on staging requirement) must not close unless a successor card
+    carrying the remaining decision exists.
+    """
+    if e.get("action") == "human_gate_decision":
+        return "full"
+    if e.get("action") == "link" and _decision_link_key(e.get("link_key")):
+        return "full"
+    return None
+
+
 def close_decided_human_gate_cards(
     home: Path,
     *,
     actor: str,
     card_ids: list[str] | None = None,
+    successor_id: str | None = None,
 ) -> dict:
     """Transition every open [HUMAN] card with a recorded decision to ``done``.
 
@@ -95,13 +114,17 @@ def close_decided_human_gate_cards(
             closed.append(card.id)
             continue
         events = store._read_events(card_id) + store._legacy_events(card_id)
-        has_decision = any(
-            e.get("action") == "human_gate_decision" for e in events
-        ) or any(
-            e.get("action") == "link" and _decision_link_key(e.get("link_key"))
-            for e in events
+        decision_evidence = [_decision_kind(e) for e in events]
+        if not any(kind is not None for kind in decision_evidence):
+            continue
+        # Partial decisions (APPROVED_CONDITIONAL / APPROVED_QUALIFICATION_ONLY_INTENT)
+        # require a successor card carrying the remaining decision before the
+        # card may close (AC4).  Full decisions close unconditionally.
+        is_partial = any(
+            e.get("decision") in ("APPROVED_CONDITIONAL", "APPROVED_QUALIFICATION_ONLY_INTENT")
+            for e in events if e.get("action") == "human_gate_decision"
         )
-        if not has_decision:
+        if is_partial and successor_id is None:
             continue
         with _board_mutation_lock(home), card_mutation_lock(home, card_id):
             Board(home).ensure_dirs()
@@ -111,6 +134,15 @@ def close_decided_human_gate_cards(
                 actor,
                 transition_id=uuid.uuid4().hex,
             )
+            if successor_id is not None:
+                store.append_event(
+                    card_id,
+                    "link",
+                    actor,
+                    link_key="successor_card",
+                    link_value=successor_id,
+                    transition_id=uuid.uuid4().hex,
+                )
             closed.append(card_id)
     return {
         "closed": closed,
