@@ -11,6 +11,10 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
 
 ### Fixed
 
+- Card fc2d87bf makes void terminal at the mutation boundary: lifecycle moves
+  now refuse any card carrying a void audit event, preventing later bulk moves
+  from overriding the archive event and returning retired work to the board.
+
 - `lifecycle_reassessment` now reads supersession from the EVIDENCE store, not
   only from the structure store. `superseded_by` is normally recorded as an
   evidence link, and none of those were visible, so a superseded card stayed

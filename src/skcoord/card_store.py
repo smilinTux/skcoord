@@ -721,6 +721,18 @@ class CardStore:
             with card_mutation_lock(self.home, card_id):
                 return self.append_event(card_id, action, agent, **payload)
         self._require_foldable_core(card_id)
+        if action in {
+            "move",
+            "reopen",
+            "assign",
+            "unassign",
+            "claim",
+            "release_claim",
+            "complete",
+        } and any(event.get("action") == "void" for event in self._read_events(card_id)):
+            raise ValueError(
+                f"CardStore card {card_id} is voided; void is a terminal decision"
+            )
         writer_filename = f"{self._writer_id(agent)}.jsonl"
         rec_fd = self._open_card_directory(card_id)
         try:
@@ -931,9 +943,30 @@ class CardStore:
         if legacy_events:
             events = events + legacy_events
             events.sort(key=lambda e: (e.get("ts", ""), e.get("writer", ""), e.get("seq", 0)))
+        voided = False
+        void_terminal_actions = {
+            "move",
+            "reopen",
+            "assign",
+            "unassign",
+            "claim",
+            "release_claim",
+            "complete",
+        }
         for e in events:
             action = e.get("action")
-            if action == "move":
+            if voided and action in void_terminal_actions:
+                card.updated_at = e.get("ts", card.updated_at)
+                continue
+            if action == "void":
+                voided = True
+                card.archived = True
+                card.owner = None
+                card.meta.pop("_claim_revision", None)
+                card.meta["voided"] = True
+                card.meta["voided_at"] = e.get("ts")
+                card.meta["voided_by"] = e.get("writer")
+            elif action == "move":
                 col = e.get("column")
                 if col in {c.value for c in Column}:
                     card.status = Column(col)
@@ -2276,6 +2309,8 @@ def export_to_legacy(home: Path, dry_run: bool = False) -> dict:
     completed: dict[str, list[str]] = {}
     in_progress: dict[str, list[str]] = {}
     for c in coord_cards:
+        if c.meta.get("voided"):
+            continue
         status = _COLUMN_TO_LEGACY_STATUS.get(c.status.value, "open")
         if status == "open":
             continue
