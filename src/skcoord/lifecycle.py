@@ -674,6 +674,12 @@ def transition_task(
         current = cards.get(task_id)
         if current is None:
             raise ValueError(f"Task {task_id} not found")
+        terminal_action = current.meta.get("terminal_action")
+        if terminal_action in {"complete", "void"}:
+            raise ValueError(
+                f"terminal card {task_id} ({terminal_action}) cannot be moved; "
+                "create a superseding card or record correction evidence instead"
+            )
         before = _audit_lifecycle_unlocked(root, task_ids={task_id})
         _assert_no_active_conflicts(Board(root), before, stale_after_seconds=3600)
 
