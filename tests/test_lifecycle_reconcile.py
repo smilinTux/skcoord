@@ -225,6 +225,22 @@ def test_transition_task_moves_and_reconciles_before_return(tmp_path) -> None:
     assert receipt.after.clean is True
 
 
+def test_transition_rejects_voided_card_before_moving(tmp_path) -> None:
+    board = Board(tmp_path)
+    task = _task(board)
+    store = CardStore(tmp_path)
+    store.append_event(task.id, "void", "chef", reason="Superseded by successor")
+    store.append_event(task.id, "archive", "chef")
+
+    with pytest.raises(ValueError, match="voided and cannot be moved"):
+        transition_task(tmp_path, task_id=task.id, column="ready", actor="coord-move")
+
+    events = store._read_events(task.id)
+    assert [event["action"] for event in events][-2:] == ["void", "archive"]
+    assert store.fold(task.id).archived is True
+    assert events[-2]["reason"] == "Superseded by successor"
+
+
 def test_transition_rejects_active_conflict_before_moving(tmp_path) -> None:
     board = Board(tmp_path)
     task = _task(board)

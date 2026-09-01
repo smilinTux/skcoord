@@ -89,6 +89,9 @@ class CardEvent(BaseModel):
 
     card_id: str
     action: str
+    # Optional cross-store identity. Records written before graph-truth
+    # verification do not have this field and remain valid.
+    event_id: str | None = None
     writer: str = ""
     ts: str = Field(default_factory=_now_iso)
     seq: int = 0
@@ -258,11 +261,23 @@ class CardEventLog:
 
     def append(self, event: CardEvent) -> None:
         """Append one overlay event to this host's log."""
-        if event.action in {"describe", "link"}:
-            from .card_store import CardStore
+        from .card_store import CardStore
 
-            if CardStore(self.home).fold(event.card_id) is None:
-                raise ValueError(f"CardStore card {event.card_id} has no foldable core")
+        store = None
+        if event.action in {"describe", "link"} or (
+            self.home / "cards" / event.card_id / "core.json"
+        ).exists():
+            store = CardStore(self.home)
+        if event.action in {"describe", "link"} and (
+            store is None or store.fold(event.card_id) is None
+        ):
+            raise ValueError(f"CardStore card {event.card_id} has no foldable core")
+        if store is not None and event.action in {"move", "assign", "unassign"} and any(
+            item.get("action") == "void" for item in store._read_events(event.card_id)
+        ):
+            raise ValueError(
+                f"CardStore card {event.card_id} is voided; void is a terminal decision"
+            )
         if not event.writer:
             event.writer = socket.gethostname()
         filename = f"{socket.gethostname()}.jsonl"
@@ -641,7 +656,19 @@ class KanbanBoard:
         # Apply the kanban overlay (explicit moves, order, labels, links).
         overlay = fold_overlay(CardEventLog(self.home).read_all())
         valid_cols = {c.value for c in Column}
+        from .card_store import CardStore
+
+        store = CardStore(self.home)
+        voided_ids = {
+            c.id
+            for c in out
+            if any(event.get("action") == "void" for event in store._read_events(c.id))
+        }
         for c in out:
+            if c.id in voided_ids:
+                c.archived = True
+                c.owner = None
+                continue
             patch = overlay.get(c.id)
             if not patch:
                 continue

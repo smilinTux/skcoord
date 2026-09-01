@@ -819,8 +819,10 @@ class Board:
         # Reason: filename includes id + slug for human readability
         filename = f"{task.id}-{slug}.json"
         path = self.tasks_dir / filename
-        atomic_write_text(path, json.dumps(task.model_dump(), indent=2) + "\n")
+        # CardStore is the creation policy choke point. Govern before writing the
+        # legacy projection so a refused CLI or MCP call cannot leave an orphan.
         self._mirror_card_store("create", task=task)
+        atomic_write_text(path, json.dumps(task.model_dump(), indent=2) + "\n")
         return path
 
     def _mirror_card_store(self, op: str, **kw) -> None:
@@ -898,6 +900,7 @@ class Board:
         except Exception as exc:  # noqa: BLE001
             logger.warning("CardStore mirror (%s) failed: %s", op, exc)
             if op in {
+                "create",
                 "claim",
                 "complete",
                 "demote",

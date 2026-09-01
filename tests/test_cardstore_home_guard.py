@@ -54,12 +54,16 @@ def test_cardstore_event_requires_foldable_core(tmp_path, action) -> None:
     assert not (tmp_path / "cards" / "orphan0001").exists()
 
 
-def test_cardstore_core_guard_is_sensitive(tmp_path, monkeypatch) -> None:
+def test_cardstore_core_guard_cannot_be_bypassed_after_lock_hardening(
+    tmp_path, monkeypatch
+) -> None:
     monkeypatch.setattr(CardStore, "_require_foldable_core", lambda self, card_id: None)
 
-    CardStore(tmp_path).append_event("orphan0001", "link", "reviewer")
+    with pytest.raises(ValueError, match="no foldable core"):
+        CardStore(tmp_path).append_event("orphan0001", "link", "reviewer")
 
-    assert (tmp_path / "cards" / "orphan0001" / "events").is_dir()
+    assert not (tmp_path / "cards" / "orphan0001").exists()
+    assert not (tmp_path / "coordination").exists()
 
 
 def _legacy_task(home, monkeypatch, task_id: str) -> None:

@@ -5,9 +5,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import time
 from concurrent.futures import ProcessPoolExecutor
 from multiprocessing import Event, Process
+from threading import Thread
 
 import pytest
 
@@ -151,6 +153,53 @@ def test_board_lock_times_out_when_another_process_holds_it(tmp_path) -> None:
     assert process.exitcode == 0
 
 
+def test_home_replacement_keeps_direct_same_card_writer_excluded(tmp_path) -> None:
+    parent = tmp_path / "namespace"
+    home = parent / "home"
+    home.mkdir(parents=True)
+    CardStore(home).create(CardCore(id="hard0001", title="home replacement"))
+    helper_entered = Event()
+    release_helper = Event()
+    ordinary_done = Event()
+    errors: list[BaseException] = []
+
+    def helper() -> None:
+        try:
+            with card_mutation_lock(home, "hard0001"):
+                helper_entered.set()
+                if not release_helper.wait(timeout=5):
+                    raise TimeoutError("helper release timeout")
+        except BaseException as exc:
+            errors.append(exc)
+
+    def ordinary() -> None:
+        try:
+            CardStore(home).append_event("hard0001", "note", "ordinary")
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            ordinary_done.set()
+
+    helper_thread = Thread(target=helper)
+    helper_thread.start()
+    assert helper_entered.wait(timeout=2)
+    old_home = parent / "home-old"
+    home.rename(old_home)
+    shutil.copytree(old_home, home)
+    ordinary_thread = Thread(target=ordinary)
+    ordinary_thread.start()
+
+    assert not ordinary_done.wait(timeout=0.2)
+    release_helper.set()
+    helper_thread.join(timeout=5)
+    ordinary_thread.join(timeout=5)
+
+    assert not helper_thread.is_alive()
+    assert not ordinary_thread.is_alive()
+    assert errors == []
+    assert any(event.get("action") == "note" for event in CardStore(home)._read_events("hard0001"))
+
+
 @pytest.mark.parametrize("task_id", ["../escape", "bad\x00id", "bad\ncontrol", "x" * 129])
 def test_invalid_identifier_is_rejected_before_any_lock_path_is_opened(tmp_path, task_id) -> None:
     home = tmp_path / "new-home"
@@ -174,8 +223,11 @@ def test_board_and_card_lock_symlinks_and_hardlinks_are_rejected(tmp_path) -> No
     locks = home / "coordination" / "locks"
     outside = tmp_path / "outside"
     home.mkdir()
-    (home / "coordination").mkdir()
+    CardStore(home).create(CardCore(id="hard0001", title="lock fixture"))
     outside.mkdir()
+    for path in locks.iterdir():
+        path.unlink()
+    locks.rmdir()
     locks.symlink_to(outside, target_is_directory=True)
     with pytest.raises(ValueError, match="lock directory"):
         with _board_mutation_lock(home):
