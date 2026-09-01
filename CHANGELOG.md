@@ -11,6 +11,12 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
 
 ### Fixed
 
+- An exact owner and claim revision can now release one losing concurrent
+  claim without replacing the authoritative owner, column, or revision. The
+  append-only fold retains every original claim event, removes only the exact
+  active conflict, and rejects stale, malformed, or ambiguous generations
+  before changing the losing agent projection (card `2b71fd2e`).
+
 - `lifecycle_reassessment` now reads supersession from the EVIDENCE store, not
   only from the structure store. `superseded_by` is normally recorded as an
   evidence link, and none of those were visible, so a superseded card stayed

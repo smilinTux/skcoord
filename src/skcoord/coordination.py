@@ -703,6 +703,48 @@ class Board:
                 return False
         return True
 
+    def _release_transition_is_applied(
+        self,
+        task_id: str,
+        transition_id: str,
+        owner: str,
+        revision: str,
+        before,
+    ) -> bool:
+        """Return whether one exact current or conflicting claim was released."""
+        from .card import Column
+        from .card_store import CardStore
+
+        store = CardStore(self.home)
+        if not store.has_transition(task_id, transition_id):
+            return False
+        card = store.fold(task_id)
+        if card is None:
+            return False
+        if before.owner == owner and before.meta.get("_claim_revision") == revision:
+            return (
+                card.owner is None
+                and card.status == Column.BACKLOG
+                and "_claim_revision" not in card.meta
+            )
+        conflicts = list(before.meta.get("claim_conflicts", []))
+        matching = [
+            conflict
+            for conflict in conflicts
+            if isinstance(conflict, dict)
+            and conflict.get("owner") == owner
+            and conflict.get("claim_revision") == revision
+        ]
+        if len(matching) != 1:
+            return False
+        expected_conflicts = [conflict for conflict in conflicts if conflict is not matching[0]]
+        return (
+            card.owner == before.owner
+            and card.status == before.status
+            and card.meta.get("_claim_revision") == before.meta.get("_claim_revision")
+            and list(card.meta.get("claim_conflicts", [])) == expected_conflicts
+        )
+
     def _card_matches_snapshot(self, task_id: str, snapshot) -> bool:
         """Return whether a CardStore card has its captured owner and column."""
         from .card_store import CardStore
@@ -1920,7 +1962,13 @@ class Board:
                     raise
                 return agent
 
-    def release_claim(self, owner: str, task_id: str, actor: str = "") -> bool:
+    def release_claim(
+        self,
+        owner: str,
+        task_id: str,
+        actor: str = "",
+        expected_claim_revision: str | None = None,
+    ) -> bool:
         """Release one exact active claim without completing the task."""
         from .card_store import card_mutation_lock, validate_card_lock_identifier
 
@@ -1928,7 +1976,12 @@ class Board:
         validate_card_lock_identifier(task_id)
         audit_actor = AgentFile.validate_agent_name(actor or canonical_owner)
         with _board_mutation_lock(self.home), card_mutation_lock(self.home, task_id):
-            return self._release_claim_locked(canonical_owner, task_id, actor=audit_actor)
+            return self._release_claim_locked(
+                canonical_owner,
+                task_id,
+                actor=audit_actor,
+                expected_claim_revision=expected_claim_revision,
+            )
 
     def _release_claim_locked(
         self,
@@ -1936,6 +1989,7 @@ class Board:
         task_id: str,
         *,
         actor: str,
+        expected_claim_revision: str | None = None,
         allow_missing_card_store: bool = False,
     ) -> bool:
         """Release one exact claim while the board and card locks are held."""
@@ -1950,11 +2004,28 @@ class Board:
             raise ValueError(f"claim owner {owner} not found")
         if task_id not in agent.claimed_tasks and agent.current_task != task_id:
             return False
-        expected_claim_revision: str | None = None
+        current_claim_revision: str | None = None
+        card_before = None
         should_mirror = card_store_write_enabled()
         if should_mirror:
             try:
-                expected_claim_revision = current_claim_precondition(self.home, task_id, owner)
+                card_before = CardStore(self.home).fold(task_id)
+                current_claim_revision = current_claim_precondition(self.home, task_id, owner)
+                releases_conflict = card_before is not None and card_before.owner != owner
+                if releases_conflict and (
+                    not isinstance(expected_claim_revision, str) or not expected_claim_revision
+                ):
+                    raise ValueError(
+                        f"exact expected claim revision required to release conflict on {task_id}"
+                    )
+                if (
+                    expected_claim_revision is not None
+                    and current_claim_revision != expected_claim_revision
+                ):
+                    raise ValueError(
+                        f"claim revision conflict for {task_id}: expected "
+                        f"{expected_claim_revision}, current {current_claim_revision}"
+                    )
             except ValueError:
                 if (
                     not allow_missing_card_store
@@ -1976,11 +2047,33 @@ class Board:
                 task_id=task_id,
                 owner=owner,
                 actor=actor,
-                expected_claim_revision=expected_claim_revision,
+                expected_claim_revision=current_claim_revision,
                 transition_id=transitions[0][1],
             )
+            if (
+                card_before is None
+                or current_claim_revision is None
+                or not self._release_transition_is_applied(
+                    task_id,
+                    transitions[0][1],
+                    owner,
+                    current_claim_revision,
+                    card_before,
+                )
+            ):
+                raise RuntimeError("release transition did not reach its postcondition")
         except Exception as exc:
-            if self._store_transitions_are_applied(transitions, [(task_id, None, "backlog")]):
+            if (
+                card_before is not None
+                and current_claim_revision is not None
+                and self._release_transition_is_applied(
+                    task_id,
+                    transitions[0][1],
+                    owner,
+                    current_claim_revision,
+                    card_before,
+                )
+            ):
                 return True
             self._recover_store_failure(
                 operation="release_claim",
