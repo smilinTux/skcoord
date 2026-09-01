@@ -1005,6 +1005,25 @@ class CardStore:
                 # claimed_by is None. Match that so parity holds on done cards.
                 card.owner = None
                 card.meta.pop("_claim_revision", None)
+            elif action == "review_result":
+                # Raw append remains a supported primitive. Validate the complete
+                # canonical contract at the authoritative fold boundary so a
+                # malformed event cannot bypass the transactional helper.
+                from .review_result import validate_review_result_event
+
+                reason = validate_review_result_event(card, e)
+                if reason is None:
+                    card.meta["review_result"] = dict(e)
+                    card.links["review-result"] = json.dumps(
+                        e, sort_keys=True, separators=(",", ":")
+                    )
+                    card.status = _COMPLETE_COLUMN
+                    card.owner = None
+                    card.meta.pop("_claim_revision", None)
+                else:
+                    card.meta.setdefault("review_result_conflicts", []).append(
+                        {"event_id": e.get("event_id"), "reason": reason}
+                    )
             elif action == "priority" and e.get("priority"):
                 card.priority = e["priority"]
             elif action == "swimlane" and e.get("swimlane"):

@@ -57,6 +57,7 @@ from .lifecycle import (
     repair_lifecycle,
     transition_task,
 )
+from .review_result import ReviewResultReceipt, record_review_result
 
 __all__ = [
     "AgentCapability",
@@ -79,6 +80,7 @@ __all__ = [
     "LifecycleConflictError",
     "LifecycleIssue",
     "LifecycleRepairReceipt",
+    "ReviewResultReceipt",
     "Task",
     "TaskPriority",
     "TaskStatus",
@@ -89,6 +91,7 @@ __all__ = [
     "audit_lifecycle",
     "get_briefing_json",
     "get_briefing_text",
+    "record_review_result",
     "render_html",
     "repair_lifecycle",
     "transition_task",
