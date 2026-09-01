@@ -263,10 +263,16 @@ class CardEventLog:
         """Append one overlay event to this host's log."""
         from .card_store import CardStore
 
-        store = CardStore(self.home)
-        if event.action in {"describe", "link"} and store.fold(event.card_id) is None:
+        store = None
+        if event.action in {"describe", "link"} or (
+            self.home / "cards" / event.card_id / "core.json"
+        ).exists():
+            store = CardStore(self.home)
+        if event.action in {"describe", "link"} and (
+            store is None or store.fold(event.card_id) is None
+        ):
             raise ValueError(f"CardStore card {event.card_id} has no foldable core")
-        if event.action in {"move", "assign", "unassign"} and any(
+        if store is not None and event.action in {"move", "assign", "unassign"} and any(
             item.get("action") == "void" for item in store._read_events(event.card_id)
         ):
             raise ValueError(
