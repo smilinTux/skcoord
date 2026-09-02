@@ -16,7 +16,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .scheduler_truth import evaluate_scheduler_truth
+from ._scheduler_truth_impl import evaluate_scheduler_truth
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -58,7 +58,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.no_reason_actions:
         truth.reason_actions = {}
-    print(json.dumps(truth.model_dump(), indent=2, sort_keys=True, default=str))
+    payload = truth.model_dump()
+    print(json.dumps(payload, indent=2, sort_keys=True, default=str))
     return 0
 
 

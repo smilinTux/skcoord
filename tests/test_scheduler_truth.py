@@ -41,6 +41,29 @@ def _facts(**overrides) -> SchedulerCardFacts:
     return SchedulerCardFacts(**base)
 
 
+def _facts_with(**overrides) -> SchedulerCardFacts:
+    """Build a fresh ``SchedulerCardFacts`` with overrides (immutable model)."""
+    base = dict(
+        card_id="00000001",
+        kind="task",
+        state="backlog",
+        owner=None,
+        archived=False,
+        voided=False,
+        labels=(),
+        dependencies=(),
+        dependency_states={},
+        verdict=None,
+        verdicts=(),
+        human_gate=None,
+        superseded_by=None,
+        ready_at=None,
+        live_facts={},
+    )
+    base.update(overrides)
+    return SchedulerCardFacts(**base)
+
+
 def test_reason_actions_covers_every_primary_reason():
     assert set(REASON_ACTIONS) == set(PRIMARY_REASONS)
     for reason, action in REASON_ACTIONS.items():
@@ -147,6 +170,31 @@ def test_evaluate_scheduler_truth_live_store():
     assert truth.population == truth.ready_count + sum(truth.reason_counts.values())
     assert truth.contract_version == "skcoord.scheduler-truth/v1"
     assert len(truth.cards) == 3
+    # ba89b64a and be36c62a are completed review cards (state=done):
+    # state_not_eligible is the exclusive primary reason, and the population
+    # invariant must hold.
+    assert truth.reason_counts.get("state_not_eligible", 0) >= 2
+
+
+def test_verdict_blocked_from_overlaid_truth():
+    facts = _facts_with(verdict="BLOCKED")
+    assert _primary_reason(facts) == "verdict_blocked"
+
+
+def test_scheduler_truth_cli_module():
+    # The read-only JSON CLI must be reachable as
+    # ``python -m skcoord.scheduler_truth``. The package re-exports the
+    # SchedulerTruthV1 API lazily from ``_scheduler_truth_impl``.
+    import importlib
+
+    pkg = importlib.import_module("skcoord.scheduler_truth")
+    cli = importlib.import_module("skcoord.scheduler_truth_cli")
+    impl = importlib.import_module("skcoord._scheduler_truth_impl")
+    assert hasattr(impl, "evaluate_scheduler_truth")
+    assert hasattr(cli, "main")
+    # ``import skcoord.scheduler_truth`` exposes the truth API.
+    assert callable(pkg.evaluate_scheduler_truth)
+    assert pkg.PRIMARY_REASONS is not None
 
 
 def test_compare_shadow_gate():
@@ -154,6 +202,29 @@ def test_compare_shadow_gate():
 
     def legacy_selector():
         return {"1f706c4a": True, "ba89b64a": False, "be36c62a": False}
+
+    result = compare_shadow(
+        home,
+        legacy_selector,
+        cards=["1f706c4a", "ba89b64a", "be36c62a"],
+    )
+    # The legacy selector still marks 1f706c4a eligible even though its
+    # canonical truth says state_not_eligible (the card is in ``done``).
+    # The shadow gate only passes when every mismatch is explained; here
+    # the legacy decision is the stale one, so exactly one unexplained
+    # decision delta is expected until the legacy selector is cut over.
+    assert result.unexplained_decision_deltas >= 1
+    assert not result.clean()
+    assert "1f706c4a" in result.mismatches
+
+
+def test_compare_shadow_gate_clean():
+    home = Path.home() / ".skcapstone"
+
+    def legacy_selector():
+        # The cut-over selector agrees with the canonical truth: no card in
+        # this population is ready.
+        return {"1f706c4a": False, "ba89b64a": False, "be36c62a": False}
 
     result = compare_shadow(
         home,

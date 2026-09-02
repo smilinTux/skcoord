@@ -15,6 +15,12 @@ Guarantees:
 - Legacy label and verdict aliases remain readable; new writes use the
   canonical vocabulary.
 - The module is read-only and deterministic: same inputs, same output.
+
+Naming note: this module lives at ``_scheduler_truth_impl.py`` while the
+public import path ``skcoord.scheduler_truth`` is a namespace package that
+lazily re-exports the API from here. That split keeps ``python -m
+skcoord.scheduler_truth`` (CLI entry point) and ``import skcoord.scheduler_truth``
+(API access) from fighting over the same name via an import cycle.
 """
 
 from __future__ import annotations
@@ -278,6 +284,12 @@ def _primary_reason(
     incomplete = [dep for dep in facts.dependencies if states.get(dep) != "done"]
     if incomplete:
         return "dependency_incomplete"
+    # A BLOCKED verdict in the card's evidence links blocks scheduling.
+    # Check the overlay-derived ``facts.verdict`` (canonical, from
+    # joined-truth) plus any live-fact verdict links carried opaquely by
+    # SKCapstone. Structural events and evidence events stay separate.
+    if facts.verdict == "BLOCKED":
+        return "verdict_blocked"
     if _latest_verdict(facts.live_facts.get("verdict_links") or {}) == "BLOCKED":
         return "verdict_blocked"
     if facts.owner:
@@ -358,19 +370,22 @@ def evaluate_scheduler_truth(
             raise TypeError("live_facts must be a mapping")
         # Overlay the evidence links (verdicts, gates, supersession) from the
         # joined-truth reader, which already folds every legacy spelling.
+        #
+        # The reader returns a JoinedCardTruth whose ``verdicts`` and
+        # ``supersession`` lists already contain only the annotations that
+        # matched their needles. Reading those lists directly (instead of
+        # re-scanning ``annotations``) keeps the reader's classification as
+        # the single source of truth.
         try:
             truth = read_joined_truth(home, card_id)
-            facts.verdict = _latest_verdict(
-                {a.key: a.value for a in truth.annotations}
-            )
             facts.verdicts = tuple(sorted(a.value for a in truth.verdicts))
-            for a in truth.annotations:
-                if a.key == "gate_status" or a.key == "gate":
-                    facts.human_gate = a.value
-            for a in truth.annotations:
-                if a.key in ("superseded_by", "supersedes", "superseded"):
-                    facts.superseded_by = a.value
-                    break
+            if truth.verdicts:
+                facts.verdict = facts.verdicts[-1]
+            gate = [a for a in truth.gate_status if a.key in ("gate_status", "gate")]
+            if gate:
+                facts.human_gate = gate[-1].value
+            if truth.supersession:
+                facts.superseded_by = truth.supersession[-1].value
         except Exception:
             # Joined truth read is best-effort; structural fold already gives
             # the core facts.
