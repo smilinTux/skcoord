@@ -22,7 +22,6 @@ avoiding the import cycle between the CLI module and the truth module.
 
 from __future__ import annotations
 
-
 # Expose the SchedulerTruthV1 read-only CLI as ``python -m skcoord.scheduler_truth``.
 # Import the CLI last so the package import stays side-effect free otherwise.
 __all__ = []  # placeholder
@@ -75,7 +74,6 @@ from .scheduler_truth_cli import main as scheduler_truth_main
 
 __all__ = [
     "scheduler_truth_main",
-
     "AgentCapability",
     "AgentCard",
     "AgentFile",

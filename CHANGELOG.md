@@ -46,6 +46,10 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
 
 ### Added
 
+- Card b426f8e6 adds a versioned scheduler-truth contract with separate
+  structural and runtime reasons, exclusive primary counts, diagnostic facets,
+  canonical legacy aliases, a read-only JSON interface, and operator actions.
+
 - Card creation now enforces review-chain governance at `CardStore.create`, so
   coordination CLI and MCP callers share the same fail-closed policy. Live
   review or repair duplicates for one parent and class are refused with the

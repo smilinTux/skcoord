@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from skcoord.card_store import CardCore, CardStore
 from skcoord.scheduler_truth import (
     PRIMARY_REASONS,
     REASON_ACTIONS,
@@ -164,13 +165,19 @@ def test_scheduler_truth_v1_rejects_mismatched_population():
         )
 
 
-def test_evaluate_scheduler_truth_live_store():
-    home = Path.home() / ".skcapstone"
-    truth = evaluate_scheduler_truth(home, cards=["1f706c4a", "ba89b64a", "be36c62a"])
+def test_evaluate_scheduler_truth_live_store(tmp_path):
+    store = CardStore(tmp_path)
+    card_ids = ("source01", "review01", "review02")
+    for card_id in card_ids:
+        store.create(CardCore(id=card_id, title=card_id))
+    store.append_event("review01", "complete", "reviewer")
+    store.append_event("review02", "complete", "reviewer")
+
+    truth = evaluate_scheduler_truth(tmp_path, cards=card_ids)
     assert truth.population == truth.ready_count + sum(truth.reason_counts.values())
     assert truth.contract_version == "skcoord.scheduler-truth/v1"
     assert len(truth.cards) == 3
-    # ba89b64a and be36c62a are completed review cards (state=done):
+    # review01 and review02 are completed review cards (state=done):
     # state_not_eligible is the exclusive primary reason, and the population
     # invariant must hold.
     assert truth.reason_counts.get("state_not_eligible", 0) >= 2
