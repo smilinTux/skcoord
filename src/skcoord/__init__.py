@@ -11,9 +11,20 @@ gtd_tools, pubsub, activity) are runtime-lazy inside the methods that use them,
 so there is no import-time cycle. ``skcapstone.coordination`` / ``.card`` /
 ``.card_store`` / ``.itil`` / ``.cmdb`` / ``.agent_card`` / ``.atomic_io``
 remain as re-export shims so every existing importer keeps working.
+
+The ``skcoord.scheduler_truth`` subpackage is a namespace shim: it exists so
+``python -m skcoord.scheduler_truth`` resolves to the read-only CLI entry
+point. The heavy ``skcoord.scheduler_truth`` module with the
+SchedulerTruthV1 logic is reachable as an attribute of the package for
+``import skcoord.scheduler_truth`` while ``-m`` runs ``__main__`` instead,
+avoiding the import cycle between the CLI module and the truth module.
 """
 
 from __future__ import annotations
+
+# Expose the SchedulerTruthV1 read-only CLI as ``python -m skcoord.scheduler_truth``.
+# Import the CLI last so the package import stays side-effect free otherwise.
+__all__ = []  # placeholder
 
 __version__ = "0.1.0"
 
@@ -58,7 +69,11 @@ from .lifecycle import (
     transition_task,
 )
 
+# SchedulerTruthV1 read-only CLI: run as ``python -m skcoord.scheduler_truth``.
+from .scheduler_truth_cli import main as scheduler_truth_main
+
 __all__ = [
+    "scheduler_truth_main",
     "AgentCapability",
     "AgentCard",
     "AgentFile",
@@ -91,5 +106,6 @@ __all__ = [
     "get_briefing_text",
     "render_html",
     "repair_lifecycle",
+    "scheduler_truth_main",
     "transition_task",
 ]
