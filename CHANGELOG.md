@@ -11,6 +11,10 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
 
 ### Fixed
 
+- Card daeac75b refreshes the exact guarded claim-conflict release candidate
+  against current main while preserving authoritative owner state and requiring
+  the exact losing owner and claim revision before mutation.
+
 - Completed agent work now projects availability as `idle`, preserves `offline`,
   and normalizes malformed legacy `state=completed` input before serialization.
 
