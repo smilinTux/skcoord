@@ -57,6 +57,21 @@ from .lifecycle import (
     repair_lifecycle,
     transition_task,
 )
+from .scheduler_truth import (
+    BlockerCategory,
+    EligibilityReason,
+    HumanDecision,
+    SchedulerBlockerV1,
+    SchedulerOutcome,
+    SchedulerTruthSnapshotV1,
+    SchedulerTruthV1,
+    WorkClass,
+    canonical_label,
+    canonical_labels_for_write,
+    classify_structural_cards,
+    normalize_scheduler_outcome,
+    snapshot_json,
+)
 
 __all__ = [
     "AgentCapability",
@@ -85,6 +100,16 @@ __all__ = [
     "TaskView",
     "FileAuthorizedCardPolicyBackend",
     "StaticAuthorizedCardPolicyBackend",
+    "BlockerCategory",
+    "EligibilityReason",
+    "HumanDecision",
+    "SchedulerBlockerV1",
+    "SchedulerOutcome",
+    "SchedulerTruthSnapshotV1",
+    "SchedulerTruthV1",
+    "WorkClass",
+    "canonical_label",
+    "canonical_labels_for_write",
     "atomic_write_text",
     "audit_lifecycle",
     "get_briefing_json",
@@ -92,4 +117,7 @@ __all__ = [
     "render_html",
     "repair_lifecycle",
     "transition_task",
+    "classify_structural_cards",
+    "normalize_scheduler_outcome",
+    "snapshot_json",
 ]
