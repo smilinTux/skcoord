@@ -196,6 +196,12 @@ class AgentFile(BaseModel):
     itil_claims: list[str] = Field(default_factory=list)
     notes: str = ""
 
+    @field_validator("state", mode="before")
+    @classmethod
+    def normalize_legacy_terminal_state(cls, value: object) -> object:
+        """Map the old task outcome spelling to an availability state."""
+        return AgentState.IDLE if value == "completed" else value
+
     @field_validator("agent", mode="before")
     @classmethod
     def validate_agent_name(cls, value: object) -> str:
@@ -2011,6 +2017,10 @@ class Board:
             agent.completed_tasks.append(task_id)
         if agent.current_task == task_id:
             agent.current_task = agent.claimed_tasks[0] if agent.claimed_tasks else None
+        if agent.current_task:
+            agent.state = AgentState.ACTIVE
+        elif agent.state == AgentState.ACTIVE:
+            agent.state = AgentState.IDLE
         self.save_agent(agent)
 
         return agent
