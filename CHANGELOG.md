@@ -9,7 +9,27 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
 
 ## [Unreleased]
 
+### Added
+
+- SKCOORD-OPERATOR-PRINCIPAL-01: immutable `operator_principal` provenance
+  records for candidate authors, recommenders, reviewers, and integration
+  actors (`src/skcoord/operator_principal.py`). Records live in the separate
+  evidence store (`coordination/card_events/*.jsonl`) joined with - never
+  inferred from - the structural CardStore events, and carry only identity
+  facts (principal, actor identity, optional subject); no credentials or
+  personal secrets are stored.
+
+- Reviewer independence gate: assignment, independent review, and merge
+  eligibility fail closed when the author and reviewer resolve to the same
+  operator principal across different identities, hosts, sessions, or forge
+  accounts (default alias table covers chef, jarvis, Lumina, Mero families).
+  Backwards compatibility is explicit and conservative: a card with no
+  principal records stays merge-eligible (legacy); once the gate is adopted
+  (at least one record exists), a missing role or principal fails closed.
+
 ### Fixed
+
+
 
 - Completed agent work now projects availability as `idle`, preserves `offline`,
   and normalizes malformed legacy `state=completed` input before serialization.
