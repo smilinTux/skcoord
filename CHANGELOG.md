@@ -9,6 +9,19 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
 
 ## [Unreleased]
 
+### Changed
+
+- Docs: SOP.md now grounds the CHI census and the shared home path in
+  `SITE_AND_HOST_NAMING_STANDARD`. The estate boundary is the control plane (one
+  `~/.skcapstone`, one Syncthing ring, one trust root, one operator), not the
+  tailnet, which is why unrelated tailnet devices are correctly out of census
+  scope; and a CI is never renamed to adopt the standard, because a CI id is a key
+  whose rename deletes the event history that current state is folded from.
+  `docs/cmdb-workflow-proposals.md` P8 gets the same boundary: canonicalisation
+  collapses addresses, never respells names. The `chioc09` alias of canonical
+  `chiap09` and every other host reference are statements of fact and are
+  unchanged.
+
 ### Fixed
 
 - Completed agent work now projects availability as `idle`, preserves `offline`,
