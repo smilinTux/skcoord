@@ -9,92 +9,25 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
 
 ## [Unreleased]
 
+## [Unreleased]
+
 ### Added
 
-- Added a durable bounded owner-policy backend for authorized CardStore reads.
-  It loads exact immutable entries from owner-controlled storage, rejects
-  malformed or unsafe files, and suppresses results when policy identity,
-  revision, or validity changes during a protected read (card `19acf874`).
+- SKCOORD-OPERATOR-PRINCIPAL-01: immutable `operator_principal` provenance
+  records for candidate authors, recommenders, reviewers, and integration
+  actors (`src/skcoord/operator_principal.py`). Records live in the separate
+  evidence store (`coordination/card_events/*.jsonl`) joined with - never
+  inferred from - the structural CardStore events, and carry only identity
+  facts (principal, actor identity, optional subject); no credentials or
+  personal secrets are stored.
 
-- Added a frozen SKCoord owner-policy index and provider that binds only an
-  exact policy-selected CardStore identifier set to the current attributable
-  CapAuth decision before the authorized snapshot reader can access records
-  (card `cf0e34cd`).
-
-- Added a pure bounded authorized CardStore snapshot reader that validates a
-  fully bound CapAuth and owner-policy decision before folding only the
-  policy-visible identifier set, emits only allowlisted record and graph
-  evidence, and returns one constant no-value result on every authorization
-  failure (card `a110cadc`).
-
-- Added immutable, persona-neutral Portfolio Steward contracts and a pure
-  shadow-only readiness evaluator with deterministic ordering, explicit
-  abstention, exact content bindings, and independent-review completion gates
-  (card `7efc76c0`). The slice has no board, authorization, model, network,
-  execution, or mutation integration.
-
-- Added `Board.record_success`, the write half of cross-run success memory
-  (card 506782a4, S9). Sibling of `record_attempt`, writing distilled
-  terminal-PASS entries to `meta.autopilot.successes[]` -- a key
-  `clear_attempts` never touches, so a success recorded on the same pass
-  that triggers `clear_attempts` survives it instead of being wiped by the
-  event that created it. Mirrors `record_attempt`'s (run_id, outcome)
-  idempotency and 10-entry corruption cap; the reader side (skharness)
-  decides how much of it reaches a prompt.
-- Added secret-free Syncthing discovery for each scanned node, including
-  service health, version and schema, folder state, pending work, connected
-  devices, and governed service relationships.
-
-- Added scheduled CMDB reconciliation policy helpers with validated,
-  versioned configuration, a nonblocking application lease, configurable
-  drift and collection-failure thresholds, deduplicated ITIL incident routing,
-  and bounded checksummed run-artifact retention.
-
-- Added secret-free CapAuth identity-estate discovery for actual and alternate
-  user homes, canonical and compatibility roots, Syncthing folders, signer
-  fingerprints and roles, material placement, verification age, and requested
-  identity drift findings.
-
-- Added a fail-closed CMDB write guard that rejects secret-looking attribute
-  keys, including nested mappings, before a write-once core or append-only event
-  can be created. Matching is case-insensitive and substring-based; the shared
-  matcher also drives reconciliation-artifact redaction.
-
-- **Kanban lifecycle and agent projection reconciliation.** The authoritative
-  event-sourced card can reach Review or Done while an interrupted caller leaves
-  `agents/<name>.json` reporting the card as current work. `audit_lifecycle()`
-  now reports those disagreements without writing, and `repair_lifecycle()`
-  explicitly converges only the mutable agent projection. Review retains the
-  accountable owner but clears active execution, Done clears claims while
-  preserving completion history, and reopen removes stale completion state.
-  Recent orphan work or multiple recent active owners stop the repair rather
-  than guessing. Every repair appends a conflict-free JSONL receipt under
-  `coordination/reconciliation/`; a second repair is idempotent.
-
-- Added fail-closed CMDB evidence validation, explicit relationship deltas,
-  secret-redaction findings, stale/retirement plan fields, checksum-verified
-  artifact reads, and concurrent-writer coverage for the supported plan/apply
-  workflow (`e57ef91a`). The legacy seed method is now a versioned compatibility
-  bridge over declared discovery rather than a hard-coded three-host inventory.
-
-- Expanded observed CMDB discovery from four collectors to nine. Cross-node
-  scans now cover user/system cron entries (with command arguments redacted),
-  non-loopback network interfaces, persistent mounts and database containers,
-  remote agent homes, Ollama endpoint/model health, Podman containers, and
-  Docker/Podman Compose labels in addition to host, systemd, container, and
-  listening-port evidence. Collector totals remain part of the checksummed
-  shadow scope, so a release cannot silently claim the old coverage contract.
-  Each target now also records command attempt/success/unavailable counts and a
-  complete/partial/unavailable collector status without retaining command text
-  or output, making WSL, permission, and missing-tool gaps explicit. A fully
-  unavailable collector makes its target and scan incomplete; a successful
-  fallback with unavailable optional commands remains explicit `partial`.
-
-- Defined the operator-reviewed CHI fleet Node objects as the authoritative
-  CMDB discovery census, including identity/source precedence, the
-  `chiap09`/`chioc09` alias decision, `chipv05` and Windows/WSL handling,
-  deterministic CI identity, four-hour staleness, three-complete-pass
-  retirement, relationship vocabulary, and no-secret credential metadata.
+- Reviewer independence gate: assignment, independent review, and merge
+  eligibility fail closed when the author and reviewer resolve to the same
+  operator principal across different identities, hosts, sessions, or forge
+  accounts (default alias table covers chef, jarvis, Lumina, Mero families).
+  Backwards compatibility is explicit and conservative: a card with no
+  principal records stays merge-eligible (legacy); once the gate is adopted
+  (at least one record exists), a missing role or principal fails closed.
 
 ### Changed
 
@@ -170,6 +103,39 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
 - Recorded the verified three-shadow CMDB scope, authenticated Chef approval,
   exact ATLAS network unit contract, freeze/report-only cutover sequence, and
   rollback acceptance checks in the operational rollout SOP.
+
+- Completed agent work now projects availability as `idle`, preserves `offline`,
+  and normalizes malformed legacy `state=completed` input before serialization.
+
+- Card fc2d87bf makes void terminal at the mutation boundary: lifecycle moves
+  now refuse any card carrying a void audit event, preventing later bulk moves
+  from overriding the archive event and returning retired work to the board.
+
+- `lifecycle_reassessment` now reads supersession from the EVIDENCE store, not
+  only from the structure store. `superseded_by` is normally recorded as an
+  evidence link, and none of those were visible, so a superseded card stayed
+  assignable alongside its own successor. This is the same two-store defect
+  already documented in this module for BLOCKED verdicts, fixed there and never
+  carried across. Measured 2026-08-28: `c91a7504` carried `superseded_by`
+  `2209f7fe` since 2026-08-23 and was never excluded; detection rises from 7
+  superseded cards to 28.
+- Evidence-derived supersession can no longer retire a HUMAN approval gate.
+  `superseded_by` in the evidence store is free-form and any worker can write
+  one, so honouring it unguarded let a machine card discharge an approval only a
+  person can give. Without the guard this change retired gate `36afc5e8` in
+  favour of machine task `6dd21df9`. Structure-store supersession is a
+  deliberate authored act and still applies.
+
+- `lifecycle_reassessment` now isolates a card whose `core.json` cannot be
+  parsed instead of raising, and skips an event line that is not yet whole.
+  `~/.skcapstone` is a single Syncthing folder, so a file written on one host
+  is observable mid-write on the others; `assess` raising on that aborted the
+  fleet rotation, which exits non-zero when the assessment fails, on every host
+  simultaneously. Measured 2026-08-27: all five hosts stopped launching on a
+  `core.json` that was two bytes long at the instant it was read, and nothing
+  was actually corrupt. Damaged cards are reported in a new `unreadable_cards`
+  class and added to `excluded_card_ids`, so the failure mode is to withhold
+  one card rather than to stop all work.
 
 ## [0.1.5] - 2026-08-14
 
