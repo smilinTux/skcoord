@@ -57,6 +57,17 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
   class and added to `excluded_card_ids`, so the failure mode is to withhold
   one card rather than to stop all work.
 
+- Datastore discovery now normalizes container identity against restart tokens, the
+  same `_stable_container_name` rule PR 50 added for the service collector. The
+  SKLegal job launcher names PostgreSQL containers `<subject>-<pid>-<8 hex run
+  token>`, and `collect_datastores` embedded the raw name, so every restart of a
+  job database minted a new undeclared datastore CI (47 such CIs were created after
+  the PR 50 merge, most recently 2026-08-31). Identity is now derived from the
+  stable subject; the launcher PID and restart token are preserved as attributes
+  and the raw name is kept as an alias, exactly like `collect_docker_containers`.
+  Regression tests cover the restart pair and the no-suffix negative control
+  (card 151323cb, follows 72f49960).
+
 ### Added
 
 - Card b426f8e6 adds a versioned scheduler-truth contract with separate
