@@ -9,6 +9,7 @@ from typing import Any, Iterable
 from .cmdb import CIType, make_ci_id
 from .discovery_base import DISCOVERED_TAG, CommandRunner, DiscoveredCI
 from .discovery_runtime import _PERSISTENT_FILESYSTEMS, _PSEUDO_FILESYSTEMS
+from .discovery_systemd import _stable_container_name
 
 
 def _walk_filesystems(rows: object) -> Iterable[dict]:
@@ -71,10 +72,19 @@ def collect_datastores(runner: CommandRunner) -> list[DiscoveredCI]:
         if not containers:
             continue
         for line in containers.splitlines():
-            name, _, image = line.partition("\t")
-            name = name.strip()
+            observed_name, _, image = line.partition("\t")
+            observed_name = observed_name.strip()
             image = image.strip()
-            if not name or name in seen or not database_hint.search(f"{name} {image}"):
+            if not observed_name:
+                continue
+            # The SKLegal job launcher names containers <subject>-<pid>-<token>.
+            # Derive identity from the stable subject only: embedding the PID or
+            # restart token mints a brand new undeclared CI on every restart,
+            # which is exactly the volatile-identity defect card 72f49960 fixed
+            # for the service collector. Volatile fields stay as attributes and
+            # the raw name is kept as an alias, same as collect_docker_containers.
+            name, volatile_identity = _stable_container_name(observed_name)
+            if name in seen or not database_hint.search(f"{name} {image}"):
                 continue
             seen.add(name)
             out.append(
@@ -84,8 +94,14 @@ def collect_datastores(runner: CommandRunner) -> list[DiscoveredCI]:
                     source=f"{runtime}:datastore",
                     observed=True,
                     node=runner.host,
-                    attributes={"runtime": runtime, "container": name, "image": image},
+                    attributes={
+                        "runtime": runtime,
+                        "container": name,
+                        "image": image,
+                        **volatile_identity,
+                    },
                     tags=(runtime, "database", "datastore", DISCOVERED_TAG),
+                    aliases=(observed_name,) if observed_name != name else (),
                     relationships=(("runs_on", make_ci_id(CIType.HOST.value, runner.host)),),
                 )
             )

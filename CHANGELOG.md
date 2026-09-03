@@ -9,6 +9,19 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
 
 ## [Unreleased]
 
+### Changed
+
+- Docs: SOP.md now grounds the CHI census and the shared home path in
+  `SITE_AND_HOST_NAMING_STANDARD`. The estate boundary is the control plane (one
+  `~/.skcapstone`, one Syncthing ring, one trust root, one operator), not the
+  tailnet, which is why unrelated tailnet devices are correctly out of census
+  scope; and a CI is never renamed to adopt the standard, because a CI id is a key
+  whose rename deletes the event history that current state is folded from.
+  `docs/cmdb-workflow-proposals.md` P8 gets the same boundary: canonicalisation
+  collapses addresses, never respells names. The `chioc09` alias of canonical
+  `chiap09` and every other host reference are statements of fact and are
+  unchanged.
+
 ### Fixed
 
 - Card daeac75b refreshes the exact guarded claim-conflict release candidate
@@ -47,6 +60,17 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
   was actually corrupt. Damaged cards are reported in a new `unreadable_cards`
   class and added to `excluded_card_ids`, so the failure mode is to withhold
   one card rather than to stop all work.
+
+- Datastore discovery now normalizes container identity against restart tokens, the
+  same `_stable_container_name` rule PR 50 added for the service collector. The
+  SKLegal job launcher names PostgreSQL containers `<subject>-<pid>-<8 hex run
+  token>`, and `collect_datastores` embedded the raw name, so every restart of a
+  job database minted a new undeclared datastore CI (47 such CIs were created after
+  the PR 50 merge, most recently 2026-08-31). Identity is now derived from the
+  stable subject; the launcher PID and restart token are preserved as attributes
+  and the raw name is kept as an alias, exactly like `collect_docker_containers`.
+  Regression tests cover the restart pair and the no-suffix negative control
+  (card 151323cb, follows 72f49960).
 
 ### Added
 
