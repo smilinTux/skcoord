@@ -9,8 +9,6 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
 
 ## [Unreleased]
 
-## [Unreleased]
-
 ### Added
 
 - Added a durable bounded owner-policy backend for authorized CardStore reads.
