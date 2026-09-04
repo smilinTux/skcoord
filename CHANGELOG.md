@@ -466,6 +466,13 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
   describes it as the kill switch it is, and states that the CardStore root is
   `~/.skcapstone/cards/`, a sibling of `coordination/` rather than a child.
 
+## Unreleased
+
+### Added
+- Add a claim-bound `record_review_result` API that validates local evidence and
+  appends one authoritative terminal CardStore event before best-effort SKMail
+  notification. The CardStore fold rejects malformed raw result events.
+
 ## [0.1.5] - 2026-08-14
 
 ### Added

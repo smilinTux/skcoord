@@ -68,6 +68,7 @@ from .lifecycle import (
     repair_lifecycle,
     transition_task,
 )
+from .review_result import ReviewResultReceipt, record_review_result
 
 # SchedulerTruthV1 read-only CLI: run as ``python -m skcoord.scheduler_truth``.
 from .scheduler_truth_cli import main as scheduler_truth_main
@@ -94,6 +95,7 @@ __all__ = [
     "LifecycleConflictError",
     "LifecycleIssue",
     "LifecycleRepairReceipt",
+    "ReviewResultReceipt",
     "Task",
     "TaskPriority",
     "TaskStatus",
@@ -104,6 +106,7 @@ __all__ = [
     "audit_lifecycle",
     "get_briefing_json",
     "get_briefing_text",
+    "record_review_result",
     "render_html",
     "repair_lifecycle",
     "scheduler_truth_main",
