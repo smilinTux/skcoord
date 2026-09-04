@@ -35,6 +35,15 @@ from .atomic_io import atomic_write_text
 
 logger = logging.getLogger(__name__)
 
+_SYNC_CONFLICT_SUFFIX = re.compile(
+    r"\.sync-conflict-\d{8}-\d{6}-[A-Z0-9]+\.json$", re.IGNORECASE
+)
+
+
+def _is_legacy_agent_projection(path: Path) -> bool:
+    """Identify only named Syncthing conflict/archive projection artifacts."""
+    return ".stversions" in path.parts or bool(_SYNC_CONFLICT_SUFFIX.search(path.name))
+
 
 def validate_shared_home(home: Path) -> Path:
     """Return the SKCapstone root, rejecting its coordination child.
@@ -386,6 +395,8 @@ class Board:
         if self.agents_dir.is_symlink() or not self.agents_dir.is_dir():
             raise ValueError("agent projection directory must be a regular directory")
         for f in sorted(self.agents_dir.glob("*.json")):
+            if _is_legacy_agent_projection(f):
+                continue
             try:
                 if f.is_symlink() or not f.is_file():
                     raise ValueError("agent projection must be a regular file")

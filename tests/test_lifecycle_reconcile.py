@@ -328,6 +328,30 @@ def test_agent_payload_identity_must_match_filename(tmp_path) -> None:
     assert board.load_agents() == []
 
 
+def test_load_agents_ignores_only_conflict_artifacts(tmp_path) -> None:
+    board = Board(tmp_path)
+    board.ensure_dirs()
+    valid = AgentFile(agent="jarvis").model_dump()
+    (board.agents_dir / "jarvis.json").write_text(json.dumps(valid), encoding="utf-8")
+    for name in (
+        "jarvis.sync-conflict-20260904-120000-ABC123.json",
+        "jarvis.sync-conflict-bad-name.json",
+    ):
+        (board.agents_dir / name).write_text("not-json", encoding="utf-8")
+
+    agents = board.load_agents()
+
+    assert [agent.agent for agent in agents] == ["jarvis"]
+
+
+def test_load_agents_still_rejects_malformed_canonical_projection(tmp_path) -> None:
+    board = Board(tmp_path)
+    board.ensure_dirs()
+    (board.agents_dir / "jarvis.json").write_text("not-json", encoding="utf-8")
+
+    assert board.load_agents() == []
+
+
 def test_agent_projection_directory_symlink_is_rejected(tmp_path) -> None:
     board = Board(tmp_path)
     board.ensure_dirs()
