@@ -1,0 +1,116 @@
+{
+  "card_id": "6097241e",
+  "fixtures": [
+    {
+      "facts": {
+        "blank_physical_lines": [
+          1
+        ],
+        "malformed_jsonl_physical_lines": 54,
+        "physical_lines": 55
+      },
+      "path": "tests/fixtures/skcoord-6097241e/malformed-range.jsonl",
+      "sha256": "0706003a6e3dc5cd7decd0f6b279e1cf61b56b3608796606e780aacc86914658"
+    },
+    {
+      "facts": {
+        "authoritative_verdict": {
+          "physical_line": 3,
+          "seq": 1,
+          "verdict": "FAIL"
+        },
+        "blank_physical_lines": [
+          2
+        ],
+        "sequence_gaps": [
+          {
+            "after_physical_line": 3,
+            "from_seq": 1,
+            "to_seq": 3,
+            "writer": "pi-glm-chiap02-6097241e"
+          }
+        ]
+      },
+      "path": "tests/fixtures/skcoord-6097241e/authoritative-native.jsonl",
+      "sha256": "2be398399f60c745ecea47bd804c22b545cd586149e19ed2ca8f807f512e1ddc"
+    },
+    {
+      "facts": {
+        "contiguous_sequences": [
+          0,
+          1
+        ],
+        "expected_integrity": "valid",
+        "valid_json_lines": 2
+      },
+      "path": "tests/fixtures/skcoord-6097241e/valid-control.jsonl",
+      "sha256": "ab0db145bfb92c9159df246ff73bce0fded4431c55e6fa02fe954522dcb6ed23"
+    }
+  ],
+  "focused_test_contract": [
+    {
+      "expected_fold": "integrity_error",
+      "expected_scheduler_ready": false,
+      "input": "malformed-range.jsonl",
+      "name": "malformed_physical_lines_fail_closed"
+    },
+    {
+      "expected_fold": "integrity_error",
+      "expected_scheduler_ready": false,
+      "input": "authoritative-native.jsonl",
+      "name": "sequence_gap_fails_closed"
+    },
+    {
+      "expected_evidence_verdict": "FAIL",
+      "expected_scheduler_ready": false,
+      "input": "authoritative-native.jsonl",
+      "name": "authoritative_fail_is_joined_as_evidence",
+      "rule": "Do not infer verdict from lifecycle state or links."
+    },
+    {
+      "expected_fold": "valid",
+      "expected_scheduler_ready": "determined_by_structural_and_evidence_inputs",
+      "input": "valid-control.jsonl",
+      "name": "clean_valid_event_control"
+    }
+  ],
+  "pinned_source": {
+    "commit": "abdfd1f1398a06fafcfe1591895d38002dcf3522",
+    "paths": [
+      {
+        "git_blob": "8847845ed0d8ef07183d45e9da804b095d2b2a9b",
+        "path": "src/skcoord/card_store.py",
+        "role": "strict CardStore event read and fold",
+        "sha256": "2e071a53c3fd0a0e94af64690d69493ac453c449b9a5262d6c632c47f5805340"
+      },
+      {
+        "git_blob": "d0f73d8336927d11b39d5b1aa529ba88f5a2b3c2",
+        "path": "src/skcoord/_scheduler_truth_impl.py",
+        "role": "scheduler truth evaluation and readiness selection",
+        "sha256": "b9c75d427024fd6c9009b500e04cbc42bbc340e2d9023a6ca3df988159df6277"
+      },
+      {
+        "git_blob": "c3d981e10b5523b582978e9f9eb07e54fa907a20",
+        "path": "src/skcoord/scheduler_truth/__init__.py",
+        "role": "public selector API",
+        "sha256": "2c5913253eb0fe07868b2b39641b2c2899b9e1ad2d7aac399cb96aa555d50ecd"
+      }
+    ],
+    "repository": "https://github.com/smilinTux/skcoord.git",
+    "tree": "a39a37adeb9e2dddb2b3a0bb63bd91d5e71d9d90"
+  },
+  "provenance": {
+    "classification": "No credentials, secrets, tokens, or protected payloads are present in these fixtures.",
+    "legacy_source_repository_relative": "coordination/card_events/chiap02.jsonl",
+    "legacy_source_sha256": "c6fadf0180893ad30384d3dee77c3b6409e32dc7e44b4fc4e13b7e387afdaaac",
+    "native_source_repository_relative": "cards/6097241e/events/pi-glm-chiap02-6097241e@chiap02.jsonl",
+    "native_source_sha256": "2be398399f60c745ecea47bd804c22b545cd586149e19ed2ca8f807f512e1ddc",
+    "physical_lines": {
+      "count": 55,
+      "first": 1893,
+      "last": 1947
+    }
+  },
+  "purpose": "Offline prerequisites for card 6f4a9c21. No live event is rewritten or applied.",
+  "schema": "skcoord.offline-malformed-fixture.v1"
+}
