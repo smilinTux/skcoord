@@ -523,6 +523,42 @@ def test_mounts_and_database_containers_are_datastore_cis() -> None:
     assert not any(ci.attributes.get("mountpoint") == "/proc" for ci in found)
 
 
+def test_datastore_restart_identity_excludes_pid_and_run_token() -> None:
+    """Card 151323cb: the datastore collector must normalize identity exactly
+    like the service collector, so a restarted sklegal job container keeps one
+    CI instead of minting a new undeclared one per restart."""
+    first = FakeRunner(
+        answers={
+            "docker": "sklegal-s102-3620007-4e13b305\tpostgres:17.7-alpine\n",
+        }
+    )
+    restarted = FakeRunner(
+        answers={
+            "docker": "sklegal-s102-3521761-73688fd1\tpostgres:17.7-alpine\n",
+        }
+    )
+
+    before = collect_datastores(first)[0]
+    after = collect_datastores(restarted)[0]
+
+    assert before.name == after.name == "testnode:container:sklegal-s102"
+    assert before.attributes["launcher_pid"] == "3620007"
+    assert after.attributes["restart_token"] == "73688fd1"
+    assert before.attributes["image"] == "postgres:17.7-alpine"
+    assert before.aliases == ("sklegal-s102-3620007-4e13b305",)
+    assert after.aliases == ("sklegal-s102-3521761-73688fd1",)
+
+
+def test_datastore_container_without_known_restart_suffix_keeps_full_name() -> None:
+    runner = FakeRunner(answers={"podman": "api-1234-deadbeef-extra\tpostgres:16\n"})
+
+    found = collect_datastores(runner)[0]
+
+    assert found.name == "testnode:container:api-1234-deadbeef-extra"
+    assert "launcher_pid" not in found.attributes
+    assert found.aliases == ()
+
+
 def test_remote_agent_homes_are_observed_on_their_host() -> None:
     found = collect_observed_agents(
         FakeRunner(host="alpha", answers={"python3": '["jarvis", "lumina-template"]\n'})

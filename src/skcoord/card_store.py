@@ -21,6 +21,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import secrets
 import socket
 import stat
@@ -50,6 +51,9 @@ _TASK_VIEW_CURSOR_SECRET = secrets.token_bytes(32)
 _HELD_CARD_LOCKS: ContextVar[frozenset[tuple[str, str]]] = ContextVar(
     "skcoord_held_card_locks", default=frozenset()
 )
+_GOVERNED_CARD_CLASS = re.compile(r"\[(REVIEW|REREVIEW|REPAIR)\]", re.IGNORECASE)
+_CARD_PARENT_LABEL_PREFIX = "parent-"
+HUMAN_CARD_CREATION_OVERRIDE_LABEL = "human-override"
 
 
 def _card_lock_key(home: Path, card_id: str) -> tuple[str, str]:
@@ -564,55 +568,141 @@ class CardStore:
         with _open_home_ancestor_lock(self.home, card_id):
             pass
 
-    def create(self, core: CardCore) -> str:
-        """Write ``cards/<id>/core.json`` write-once. Returns the card id.
+    @staticmethod
+    def _creation_class(core: CardCore | dict) -> str | None:
+        """Return the governed title class, independent of caller or labels."""
+        title = core.get("title", "") if isinstance(core, dict) else core.title
+        match = _GOVERNED_CARD_CLASS.search(title if isinstance(title, str) else "")
+        creation_class = match.group(1).lower() if match else None
+        return "review" if creation_class == "rereview" else creation_class
 
-        Uses O_CREAT|O_EXCL so a concurrent create on the same id is safe (the
-        loser sees the existing core).
+    @staticmethod
+    def _creation_parent(labels: list[str], card_id: str) -> str:
+        parents = {
+            label[len(_CARD_PARENT_LABEL_PREFIX) :]
+            for label in labels
+            if isinstance(label, str)
+            and label.lower().startswith(_CARD_PARENT_LABEL_PREFIX)
+            and label[len(_CARD_PARENT_LABEL_PREFIX) :]
+        }
+        if len(parents) != 1:
+            raise ValueError(
+                f"Governed card {card_id} requires exactly one parent-<card_id> label"
+            )
+        return parents.pop()
+
+    def _is_terminal_card(self, card: Card) -> bool:
+        """Use structural CardStore state only, never evidence annotations."""
+        if card.status == Column.DONE or card.archived:
+            return True
+        return any(event.get("action") == "void" for event in self._read_events(card.id))
+
+    def _govern_create(self, core: CardCore) -> None:
+        """Fail closed on duplicate or over-depth review and repair creation."""
+        creation_class = self._creation_class(core)
+        if creation_class is None:
+            return
+        labels = list(core.initial_labels)
+        if HUMAN_CARD_CREATION_OVERRIDE_LABEL in {label.lower() for label in labels}:
+            return
+        parent_id = self._creation_parent(labels, core.id)
+
+        cards = self.list_cards(include_archived=True)
+        cards_by_id = {card.id: card for card in cards}
+        if parent_id not in cards_by_id:
+            raise ValueError(f"Governed card {core.id} names unknown parent {parent_id}")
+
+        for existing in cards:
+            existing_core = self._load_core(existing.id) or {}
+            if self._creation_class(existing_core) != creation_class:
+                continue
+            try:
+                existing_parent = self._creation_parent(
+                    list(existing_core.get("initial_labels", [])), existing.id
+                )
+            except ValueError:
+                continue
+            if existing_parent == parent_id and not self._is_terminal_card(existing):
+                raise ValueError(
+                    f"Refusing live {creation_class} duplicate for parent {parent_id}; "
+                    f"existing card {existing.id} is non-terminal"
+                )
+
+        if creation_class != "review":
+            return
+        review_depth = 0
+        root_id = parent_id
+        visited = {core.id}
+        while True:
+            if root_id in visited:
+                raise ValueError(f"Review ancestry for {core.id} contains a cycle at {root_id}")
+            visited.add(root_id)
+            ancestor = cards_by_id.get(root_id)
+            if ancestor is None:
+                raise ValueError(f"Review ancestry for {core.id} names unknown card {root_id}")
+            ancestor_core = self._load_core(root_id) or {}
+            if self._creation_class(ancestor_core) != "review":
+                break
+            review_depth += 1
+            root_id = self._creation_parent(
+                list(ancestor_core.get("initial_labels", [])), ancestor.id
+            )
+
+        if review_depth >= 2:
+            raise ValueError(
+                f"Refusing third review level for root {root_id}; human escalation is required"
+            )
+
+    def create(self, core: CardCore) -> str:
+        """Govern and write ``cards/<id>/core.json`` exactly once.
+
+        All callers, including coordination CLI and MCP adapters, converge here.
+        The creation lock makes the scan and O_EXCL write one local transaction;
+        the immutable core remains the final collision boundary for identical IDs.
         """
         validate_card_lock_identifier(core.id)
-        rec_fd = self._open_card_directory(core.id)
-        payload = (core.model_dump_json(indent=2) + "\n").encode("utf-8")
-        fd = -1
-        try:
+        if self._load_core(core.id) is not None:
+            return core.id
+        with _open_lockfile(self.home, "card-creation-governor.lock", "card creation") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
             try:
-                existing = os.stat("core.json", dir_fd=rec_fd, follow_symlinks=False)
-            except FileNotFoundError:
-                existing = None
-            if existing is not None:
-                if (
-                    stat.S_ISLNK(existing.st_mode)
-                    or not stat.S_ISREG(existing.st_mode)
-                    or existing.st_nlink != 1
-                ):
-                    raise ValueError("CardStore core destination is unsafe")
-                return core.id
-            try:
-                fd = os.open(
-                    "core.json",
-                    os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0),
-                    0o644,
-                    dir_fd=rec_fd,
-                )
-            except FileExistsError:
-                existing = os.stat("core.json", dir_fd=rec_fd, follow_symlinks=False)
-                if (
-                    stat.S_ISLNK(existing.st_mode)
-                    or not stat.S_ISREG(existing.st_mode)
-                    or existing.st_nlink != 1
-                ):
-                    raise ValueError("CardStore core destination is unsafe")
-                return core.id
-            offset = 0
-            while offset < len(payload):
-                offset += os.write(fd, payload[offset:])
-            os.fsync(fd)
-        finally:
-            if fd >= 0:
-                os.close(fd)
-            os.fsync(rec_fd)
-            os.close(rec_fd)
-        # New cards carry their namespace-stable card-ID anchor from birth.
+                if self._load_core(core.id) is not None:
+                    return core.id
+                self._govern_create(core)
+                rec_fd = self._open_card_directory(core.id)
+                payload = (core.model_dump_json(indent=2) + "\n").encode("utf-8")
+                fd = -1
+                try:
+                    try:
+                        fd = os.open(
+                            "core.json",
+                            os.O_CREAT
+                            | os.O_EXCL
+                            | os.O_WRONLY
+                            | getattr(os, "O_NOFOLLOW", 0),
+                            0o644,
+                            dir_fd=rec_fd,
+                        )
+                    except FileExistsError:
+                        existing = os.stat("core.json", dir_fd=rec_fd, follow_symlinks=False)
+                        if (
+                            stat.S_ISLNK(existing.st_mode)
+                            or not stat.S_ISREG(existing.st_mode)
+                            or existing.st_nlink != 1
+                        ):
+                            raise ValueError("CardStore core destination is unsafe")
+                        return core.id
+                    offset = 0
+                    while offset < len(payload):
+                        offset += os.write(fd, payload[offset:])
+                    os.fsync(fd)
+                finally:
+                    if fd >= 0:
+                        os.close(fd)
+                    os.fsync(rec_fd)
+                    os.close(rec_fd)
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
         self._ensure_card_lock_anchor(core.id)
         return core.id
 
@@ -631,6 +721,18 @@ class CardStore:
             with card_mutation_lock(self.home, card_id):
                 return self.append_event(card_id, action, agent, **payload)
         self._require_foldable_core(card_id)
+        if action in {
+            "move",
+            "reopen",
+            "assign",
+            "unassign",
+            "claim",
+            "release_claim",
+            "complete",
+        } and any(event.get("action") == "void" for event in self._read_events(card_id)):
+            raise ValueError(
+                f"CardStore card {card_id} is voided; void is a terminal decision"
+            )
         writer_filename = f"{self._writer_id(agent)}.jsonl"
         rec_fd = self._open_card_directory(card_id)
         try:
@@ -862,9 +964,30 @@ class CardStore:
         if legacy_events:
             events = events + legacy_events
             events.sort(key=lambda e: (e.get("ts", ""), e.get("writer", ""), e.get("seq", 0)))
+        voided = False
+        void_terminal_actions = {
+            "move",
+            "reopen",
+            "assign",
+            "unassign",
+            "claim",
+            "release_claim",
+            "complete",
+        }
         for e in events:
             action = e.get("action")
-            if action == "move":
+            if voided and action in void_terminal_actions:
+                card.updated_at = e.get("ts", card.updated_at)
+                continue
+            if action == "void":
+                voided = True
+                card.archived = True
+                card.owner = None
+                card.meta.pop("_claim_revision", None)
+                card.meta["voided"] = True
+                card.meta["voided_at"] = e.get("ts")
+                card.meta["voided_by"] = e.get("writer")
+            elif action == "move":
                 col = e.get("column")
                 if col in {c.value for c in Column}:
                     card.status = Column(col)
@@ -880,14 +1003,46 @@ class CardStore:
                 released_owner = e.get("released_owner")
                 expected_revision = e.get("expected_claim_revision")
                 actual_revision = card.meta.get("_claim_revision")
-                if (
-                    not isinstance(released_owner, str)
-                    or not released_owner
-                    or not isinstance(expected_revision, str)
-                    or not expected_revision
-                    or card.owner != released_owner
-                    or actual_revision != expected_revision
-                ):
+                valid_release = (
+                    isinstance(released_owner, str)
+                    and bool(released_owner)
+                    and isinstance(expected_revision, str)
+                    and bool(expected_revision)
+                )
+                releases_current = (
+                    valid_release
+                    and card.owner == released_owner
+                    and actual_revision == expected_revision
+                )
+                conflicts = card.meta.get("claim_conflicts", [])
+                matching_conflicts = [
+                    conflict
+                    for conflict in conflicts
+                    if isinstance(conflict, dict)
+                    and conflict.get("owner") == released_owner
+                    and conflict.get("claim_revision") == expected_revision
+                ]
+                releases_conflict = (
+                    valid_release
+                    and len(matching_conflicts) == 1
+                    and isinstance(actual_revision, str)
+                    and bool(actual_revision)
+                    and card.owner == matching_conflicts[0].get("existing_owner")
+                    and actual_revision == matching_conflicts[0].get("existing_claim_revision")
+                )
+                if releases_current:
+                    card.owner = None
+                    card.status = Column.BACKLOG
+                    card.meta.pop("_claim_revision", None)
+                elif releases_conflict:
+                    remaining = [
+                        conflict for conflict in conflicts if conflict is not matching_conflicts[0]
+                    ]
+                    if remaining:
+                        card.meta["claim_conflicts"] = remaining
+                    else:
+                        card.meta.pop("claim_conflicts", None)
+                else:
                     card.meta.setdefault("release_conflicts", []).append(
                         {
                             "event_id": e.get("event_id"),
@@ -898,12 +1053,9 @@ class CardStore:
                             "actual_claim_revision": actual_revision,
                         }
                     )
-                else:
-                    card.owner = None
-                    card.status = Column.BACKLOG
-                    card.meta.pop("_claim_revision", None)
             elif action == "claim":
                 owner = e.get("owner")
+                revision = e.get("claim_revision") or e.get("event_id")
                 was_unowned_backlog = card.owner is None and card.status == Column.BACKLOG
                 if (
                     isinstance(owner, str)
@@ -916,14 +1068,15 @@ class CardStore:
                         {
                             "event_id": e.get("event_id"),
                             "owner": owner,
+                            "claim_revision": e.get("claim_revision"),
                             "existing_owner": card.owner,
+                            "existing_claim_revision": card.meta.get("_claim_revision"),
                             "reason": "concurrent claim requires explicit release or completion",
                         }
                     )
                 else:
                     card.owner = owner
                     card.status = _CLAIM_COLUMN
-                    revision = e.get("claim_revision") or e.get("event_id")
                     if isinstance(revision, str) and revision:
                         card.meta["_claim_revision"] = revision
                     else:
@@ -1778,6 +1931,27 @@ def current_claim_precondition(home: Path, task_id: str, owner: str) -> str | No
         if isinstance(revision, str) and revision:
             return revision
         raise ValueError(f"CardStore claim on {task_id} has no revision")
+    conflicts = [
+        conflict
+        for conflict in card.meta.get("claim_conflicts", [])
+        if isinstance(conflict, dict) and conflict.get("owner") == owner
+    ]
+    if len(conflicts) > 1:
+        raise ValueError(f"CardStore claim conflict for {task_id} owned by {owner} is ambiguous")
+    if conflicts:
+        conflict = conflicts[0]
+        revision = conflict.get("claim_revision")
+        authoritative_revision = conflict.get("existing_claim_revision")
+        if (
+            isinstance(revision, str)
+            and revision
+            and isinstance(authoritative_revision, str)
+            and authoritative_revision
+            and conflict.get("existing_owner") == card.owner
+            and authoritative_revision == card.meta.get("_claim_revision")
+        ):
+            return revision
+        raise ValueError(f"CardStore claim conflict on {task_id} has no exact revision")
     if card.owner is None and card.status == Column.BACKLOG:
         for event in reversed(CardStore(home)._read_events(task_id)):
             if event.get("action") == "release_claim" and event.get("released_owner") == owner:
@@ -2207,6 +2381,8 @@ def export_to_legacy(home: Path, dry_run: bool = False) -> dict:
     completed: dict[str, list[str]] = {}
     in_progress: dict[str, list[str]] = {}
     for c in coord_cards:
+        if c.meta.get("voided"):
+            continue
         status = _COLUMN_TO_LEGACY_STATUS.get(c.status.value, "open")
         if status == "open":
             continue

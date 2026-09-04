@@ -18,8 +18,31 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
   pass (the chain starts at the first chained event). Card 887643f5.
 
 
+### Changed
+
+- Docs: SOP.md now grounds the CHI census and the shared home path in
+  `SITE_AND_HOST_NAMING_STANDARD`. The estate boundary is the control plane (one
+  `~/.skcapstone`, one Syncthing ring, one trust root, one operator), not the
+  tailnet, which is why unrelated tailnet devices are correctly out of census
+  scope; and a CI is never renamed to adopt the standard, because a CI id is a key
+  whose rename deletes the event history that current state is folded from.
+  `docs/cmdb-workflow-proposals.md` P8 gets the same boundary: canonicalisation
+  collapses addresses, never respells names. The `chioc09` alias of canonical
+  `chiap09` and every other host reference are statements of fact and are
+  unchanged.
 
 ### Fixed
+
+- Card daeac75b refreshes the exact guarded claim-conflict release candidate
+  against current main while preserving authoritative owner state and requiring
+  the exact losing owner and claim revision before mutation.
+
+- Completed agent work now projects availability as `idle`, preserves `offline`,
+  and normalizes malformed legacy `state=completed` input before serialization.
+
+- Card fc2d87bf makes void terminal at the mutation boundary: lifecycle moves
+  now refuse any card carrying a void audit event, preventing later bulk moves
+  from overriding the archive event and returning retired work to the board.
 
 - `lifecycle_reassessment` now reads supersession from the EVIDENCE store, not
   only from the structure store. `superseded_by` is normally recorded as an
@@ -47,8 +70,31 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
   class and added to `excluded_card_ids`, so the failure mode is to withhold
   one card rather than to stop all work.
 
+- Datastore discovery now normalizes container identity against restart tokens, the
+  same `_stable_container_name` rule PR 50 added for the service collector. The
+  SKLegal job launcher names PostgreSQL containers `<subject>-<pid>-<8 hex run
+  token>`, and `collect_datastores` embedded the raw name, so every restart of a
+  job database minted a new undeclared datastore CI (47 such CIs were created after
+  the PR 50 merge, most recently 2026-08-31). Identity is now derived from the
+  stable subject; the launcher PID and restart token are preserved as attributes
+  and the raw name is kept as an alias, exactly like `collect_docker_containers`.
+  Regression tests cover the restart pair and the no-suffix negative control
+  (card 151323cb, follows 72f49960).
+
 ### Added
 
+- Card b426f8e6 adds a versioned scheduler-truth contract with separate
+  structural and runtime reasons, exclusive primary counts, diagnostic facets,
+  canonical legacy aliases, a read-only JSON interface, and operator actions.
+
+- Card creation now enforces review-chain governance at `CardStore.create`, so
+  coordination CLI and MCP callers share the same fail-closed policy. Live
+  review or repair duplicates for one parent and class are refused with the
+  existing card ID, review depth is capped at one review plus one re-review,
+  and only the exact `human-override` label bypasses those checks. Refused
+  mirrored creates no longer leave a legacy task projection behind. CapAuth is
+  temporarily bounded below 0.3.10 because that release makes the existing
+  operator-session currentness contract fail closed in clean installations.
 - Schemas and validators for the two coordination stores, derived from live data
   rather than intent: `schemas/itil-record.v1.schema.json` and
   `schemas/itil-event.v1.schema.json` (all 318 records and 1702 events scanned,
