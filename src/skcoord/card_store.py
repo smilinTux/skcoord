@@ -781,6 +781,11 @@ class CardStore:
                             if existing_event.get("transition_id") == transition_id:
                                 return existing_event
                     seq = len(lines)
+                    prev_hash = ""
+                    if lines:
+                        prev_hash = hashlib.sha256(
+                            lines[-1].strip().encode("utf-8")
+                        ).hexdigest()
                     event = {
                         "event_id": uuid.uuid4().hex,
                         "ts": _now_iso(),
@@ -788,6 +793,7 @@ class CardStore:
                         "node": _HOSTNAME,
                         "seq": seq,
                         "action": action,
+                        "prev_hash": prev_hash,
                     }
                     event.update(payload)
                     fh.seek(0, os.SEEK_END)
@@ -874,6 +880,7 @@ class CardStore:
                     lines = raw.decode("utf-8").splitlines()
                 except UnicodeError as exc:
                     raise ValueError(f"CardStore event source for {card_id} is malformed") from exc
+                prev_line_hash = ""
                 for line in lines:
                     line = line.strip()
                     if not line:
@@ -888,7 +895,21 @@ class CardStore:
                         raise ValueError(
                             f"CardStore event source for {card_id} must contain JSON objects"
                         )
+                    # Hash-chain verification: each chained event must link
+                    # to the hash of the preceding line in this writer file.
+                    # Legacy events without prev_hash pass (chain starts at
+                    # the first chained event).
+                    event_prev = event.get("prev_hash")
+                    if isinstance(event_prev, str) and event_prev:
+                        if event_prev != prev_line_hash:
+                            raise ValueError(
+                                f"CardStore event chain broken in {card_id}/{name}: "
+                                f"event {event.get('event_id', '?')} prev_hash mismatch"
+                            )
                     out.append(event)
+                    prev_line_hash = hashlib.sha256(
+                        line.encode("utf-8")
+                    ).hexdigest()
         finally:
             os.close(events_fd)
         # Deterministic order: ts, then writer, then per-writer seq.

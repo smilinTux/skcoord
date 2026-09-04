@@ -9,6 +9,15 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
 
 ## [Unreleased]
 
+### Added
+
+- Hash-chain event log integrity: `append_event` now computes `prev_hash`
+  (SHA-256 of the preceding line in the same writer file) and `_read_events`
+  verifies the chain at fold time. Tamper or truncation raises `ValueError`
+  with the exact break point. Backward compatible: legacy unchained events
+  pass (the chain starts at the first chained event). Card 887643f5.
+
+
 ### Changed
 
 - Docs: SOP.md now grounds the CHI census and the shared home path in
