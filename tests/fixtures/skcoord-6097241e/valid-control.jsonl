@@ -1,0 +1,2 @@
+{"action":"claim","claim_revision":"control-revision","event_id":"control-claim-0001","node":"fixture","owner":"offline-control","seq":0,"transition_id":"control-transition-0001","ts":"2026-09-04T00:00:00+00:00","writer":"offline-control"}
+{"action":"release_claim","event_id":"control-release-0002","expected_claim_revision":"control-revision","node":"fixture","released_owner":"offline-control","seq":1,"transition_id":"control-transition-0002","ts":"2026-09-04T00:00:01+00:00","writer":"offline-control"}
