@@ -721,6 +721,7 @@ class CardStore:
             with card_mutation_lock(self.home, card_id):
                 return self.append_event(card_id, action, agent, **payload)
         self._require_foldable_core(card_id)
+        existing_events = self._read_events(card_id)
         if action in {
             "move",
             "reopen",
@@ -729,10 +730,13 @@ class CardStore:
             "claim",
             "release_claim",
             "complete",
-        } and any(event.get("action") == "void" for event in self._read_events(card_id)):
+        } and any(event.get("action") == "void" for event in existing_events):
             raise ValueError(
                 f"CardStore card {card_id} is voided; void is a terminal decision"
             )
+        void_after_complete = action == "void" and any(
+            event.get("action") == "complete" for event in existing_events
+        )
         writer_filename = f"{self._writer_id(agent)}.jsonl"
         rec_fd = self._open_card_directory(card_id)
         try:
@@ -790,8 +794,38 @@ class CardStore:
                         "action": action,
                     }
                     event.update(payload)
+                    records = [event]
+                    if void_after_complete:
+                        warning_context = {
+                            "ts": _now_iso(),
+                            "writer": agent,
+                            "node": _HOSTNAME,
+                            "void_event_id": event["event_id"],
+                        }
+                        records.extend(
+                            [
+                                {
+                                    "event_id": uuid.uuid4().hex,
+                                    "seq": seq + 1,
+                                    "action": "void_after_complete",
+                                    **warning_context,
+                                },
+                                {
+                                    "event_id": uuid.uuid4().hex,
+                                    "seq": seq + 2,
+                                    "action": "card_voided_after_completion",
+                                    "warning": "void_after_complete",
+                                    **warning_context,
+                                },
+                            ]
+                        )
+                    encoded_records = []
+                    for record in records:
+                        encoded = json.dumps(record, default=str)
+                        json.loads(encoded)
+                        encoded_records.append(encoded)
                     fh.seek(0, os.SEEK_END)
-                    fh.write(json.dumps(event, default=str) + "\n")
+                    fh.write("".join(f"{encoded}\n" for encoded in encoded_records))
                     fh.flush()
                     os.fsync(fh.fileno())
                     return event
@@ -960,6 +994,7 @@ class CardStore:
                 continue
             if action == "void":
                 voided = True
+                card.status = Column.BACKLOG
                 card.archived = True
                 card.owner = None
                 card.meta.pop("_claim_revision", None)
