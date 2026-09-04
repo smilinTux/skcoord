@@ -24,6 +24,10 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
 
 ### Fixed
 
+- Card bd14161f makes void terminal on either side of completion and records
+  explicit `void_after_complete` and `card_voided_after_completion` audit events
+  when a completed card is voided.
+
 - Card daeac75b refreshes the exact guarded claim-conflict release candidate
   against current main while preserving authoritative owner state and requiring
   the exact losing owner and claim revision before mutation.

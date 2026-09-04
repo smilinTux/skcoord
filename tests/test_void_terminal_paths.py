@@ -36,6 +36,51 @@ def test_direct_cardstore_structural_append_rejects_voided_card(
     assert card.owner is None
 
 
+def test_void_after_complete_is_terminal_and_emits_audit_warnings(tmp_path) -> None:
+    store = CardStore(tmp_path)
+    store.create(CardCore(id="voiddone1", kind="task", title="Void completed"))
+    complete = store.append_event("voiddone1", "complete", "finisher")
+
+    void = store.append_event("voiddone1", "void", "governor", reason="superseded")
+
+    card = store.fold("voiddone1")
+    assert card is not None
+    assert card.status.value != "done"
+    assert card.archived is True
+    assert card.meta["voided"] is True
+    events = store._read_events("voiddone1")
+    assert [event["action"] for event in events] == [
+        "complete",
+        "void",
+        "void_after_complete",
+        "card_voided_after_completion",
+    ]
+    assert events[0]["event_id"] == complete["event_id"]
+    assert events[1]["event_id"] == void["event_id"]
+    assert events[2]["void_event_id"] == void["event_id"]
+    assert events[3]["void_event_id"] == void["event_id"]
+    assert events[3]["warning"] == "void_after_complete"
+
+
+def test_void_before_complete_remains_terminal_in_historical_audit(tmp_path) -> None:
+    store = _voided_store(tmp_path)
+    complete = {
+        "action": "complete",
+        "writer": "historical-bypass",
+        "ts": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+        "seq": 0,
+    }
+    store._legacy_cache = {"voidterm1": [complete]}
+
+    card = store.fold("voidterm1")
+
+    assert card is not None
+    assert card.status.value != "done"
+    assert card.archived is True
+    assert [event["action"] for event in store._read_events("voidterm1")] == ["void"]
+    assert store._legacy_events("voidterm1") == [complete]
+
+
 def test_fold_ignores_historical_store_resurrection_after_void(tmp_path) -> None:
     store = _voided_store(tmp_path)
     move = {
