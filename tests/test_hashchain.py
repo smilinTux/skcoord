@@ -1,9 +1,10 @@
 """Hash-chain event log integrity tests (card 887643f5)."""
 import json
-import hashlib
-import pytest
 from pathlib import Path
-from skcoord.card_store import CardStore, CardCore
+
+import pytest
+
+from skcoord.card_store import CardCore, CardStore
 
 
 @pytest.fixture()
@@ -42,7 +43,7 @@ def test_chain_links_correctly(store):
 def test_tamper_detection(store):
     store.append_event("test01", "note", "alice", body="original")
     store.append_event("test01", "note", "alice", body="second")
-    
+
     wf = _last_writer_file(store, "test01")
     lines = wf.read_text().splitlines()
     # Tamper: modify the first event's body
@@ -50,7 +51,7 @@ def test_tamper_detection(store):
     first["body"] = "tampered"
     lines[0] = json.dumps(first)
     wf.write_text("\n".join(lines) + "\n")
-    
+
     # Second event's prev_hash should now mismatch
     with pytest.raises(ValueError, match="chain broken"):
         store._read_events("test01")
@@ -60,12 +61,12 @@ def test_truncation_detection(store):
     store.append_event("test01", "note", "alice", body="one")
     store.append_event("test01", "note", "alice", body="two")
     store.append_event("test01", "note", "alice", body="three")
-    
+
     wf = _last_writer_file(store, "test01")
     lines = wf.read_text().splitlines()
     # Truncate: remove the second line
     wf.write_text(lines[0] + "\n" + lines[2] + "\n")
-    
+
     # Third event's prev_hash now points to a nonexistent second line
     with pytest.raises(ValueError, match="chain broken"):
         store._read_events("test01")
@@ -81,7 +82,7 @@ def test_legacy_unchained_events_pass(store, tmp_path):
     legacy2 = {"event_id": "legacy2", "ts": "2026-01-01T00:01:00Z", "writer": "old",
                "seq": 1, "action": "note"}
     wf.write_text(json.dumps(legacy1) + "\n" + json.dumps(legacy2) + "\n")
-    
+
     # Should not raise - legacy events have no prev_hash
     events = store._read_events("legacy01")
     assert len(events) >= 2
@@ -95,7 +96,7 @@ def test_mixed_legacy_then_chained(store):
     legacy = json.dumps({"event_id": "leg", "ts": "2026-01-01T00:00:00Z",
                           "writer": "old", "seq": 0, "action": "note"})
     wf.write_text(legacy + "\n")
-    
+
     # Append a chained event through the normal path (different writer file)
     store.append_event("mixed01", "note", "new-agent", body="chained")
     events = store._read_events("mixed01")
