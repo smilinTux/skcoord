@@ -36,6 +36,7 @@ from typing import Any, Optional
 from pydantic import BaseModel, Field
 
 from .card import Card, Column, Kind
+from .card_event_schema import CARD_EVENT_SCHEMA_VERSION, validate_card_event
 from .coordination import validate_shared_home
 
 logger = logging.getLogger(__name__)
@@ -771,16 +772,45 @@ class CardStore:
                 try:
                     fh.seek(0)
                     lines = list(fh)
+                    parsed_lines: list[dict[str, Any]] = []
+                    for line_number, line in enumerate(lines, start=1):
+                        if not line.strip():
+                            continue
+                        try:
+                            existing_event = json.loads(line)
+                        except json.JSONDecodeError as exc:
+                            raise ValueError(
+                                "CardStore event destination contains malformed JSON "
+                                f"at line {line_number}"
+                            ) from exc
+                        if not isinstance(existing_event, dict):
+                            raise ValueError(
+                                "CardStore event destination contains a non-object "
+                                f"at line {line_number}"
+                            )
+                        parsed_lines.append(existing_event)
                     transition_id = payload.get("transition_id")
                     if isinstance(transition_id, str) and transition_id:
-                        for line in lines:
-                            try:
-                                existing_event = json.loads(line)
-                            except json.JSONDecodeError:
-                                continue
+                        for existing_event in parsed_lines:
                             if existing_event.get("transition_id") == transition_id:
                                 return existing_event
                     seq = len(lines)
+                    reserved = {
+                        "event_id",
+                        "ts",
+                        "writer",
+                        "node",
+                        "seq",
+                        "action",
+                        "schema_version",
+                        "provenance",
+                    }
+                    collisions = sorted(reserved.intersection(payload))
+                    if collisions:
+                        raise ValueError(
+                            "CardStore event payload overrides reserved fields: "
+                            + ", ".join(collisions)
+                        )
                     event = {
                         "event_id": uuid.uuid4().hex,
                         "ts": _now_iso(),
@@ -788,8 +818,21 @@ class CardStore:
                         "node": _HOSTNAME,
                         "seq": seq,
                         "action": action,
+                        "schema_version": CARD_EVENT_SCHEMA_VERSION,
+                        "provenance": {
+                            "host": _HOSTNAME,
+                            "agent_id": agent,
+                            "harness": os.environ.get("SKCOORD_HARNESS", "direct"),
+                        },
                     }
                     event.update(payload)
+                    findings = validate_card_event(event, historical=False)
+                    errors = [finding for finding in findings if finding.level == "error"]
+                    if errors:
+                        details = ", ".join(
+                            f"{finding.field}: {finding.message}" for finding in errors
+                        )
+                        raise ValueError(f"invalid new CardStore event: {details}")
                     fh.seek(0, os.SEEK_END)
                     fh.write(json.dumps(event, default=str) + "\n")
                     fh.flush()

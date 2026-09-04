@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import fcntl
 import html
+import json
 import logging
 import os
 import socket
@@ -299,11 +300,31 @@ class CardEventLog:
             event_stat = os.fstat(descriptor)
             if not stat.S_ISREG(event_stat.st_mode) or event_stat.st_nlink != 1:
                 raise ValueError("card event destination is unsafe")
-            with os.fdopen(descriptor, "a", encoding="utf-8") as fh:
+            with os.fdopen(descriptor, "a+", encoding="utf-8") as fh:
                 descriptor = -1
                 fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
                 try:
-                    fh.write(event.model_dump_json() + "\n")
+                    fh.seek(0)
+                    for line_number, line in enumerate(fh, start=1):
+                        if not line.strip():
+                            continue
+                        try:
+                            existing_event = json.loads(line)
+                        except json.JSONDecodeError as exc:
+                            raise ValueError(
+                                "card event destination contains malformed JSON "
+                                f"at line {line_number}"
+                            ) from exc
+                        if not isinstance(existing_event, dict):
+                            raise ValueError(
+                                "card event destination contains a non-object "
+                                f"at line {line_number}"
+                            )
+                    serialized = event.model_dump_json()
+                    if not isinstance(json.loads(serialized), dict):
+                        raise ValueError("serialized card event must be a JSON object")
+                    fh.seek(0, os.SEEK_END)
+                    fh.write(serialized + "\n")
                     fh.flush()
                     os.fsync(fh.fileno())
                 finally:
