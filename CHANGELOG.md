@@ -37,10 +37,10 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
 
 ### Fixed
 
-- `archive_done_tasks` now ages via CardStore task views and completion time
-  (`meta._board_updated_at`), not legacy-only `created_at` scans that left
-  thousands of done cards on the active board. `age_stale_open` skips
-  `human-gate` / `[HUMAN]` cards.
+- `archive_done_tasks` ages done cards from the legacy+CardStore union and
+  prefers CardStore `updated_at` as completion time, while `age_stale_open`
+  still trusts authoritative legacy claim status and skips `human-gate` /
+  `[HUMAN]` cards.
 
 - Card daeac75b refreshes the exact guarded claim-conflict release candidate
   against current main while preserving authoritative owner state and requiring

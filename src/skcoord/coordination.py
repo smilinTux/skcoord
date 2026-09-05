@@ -1734,10 +1734,9 @@ class Board:
     ) -> list[str]:
         """Age done tasks off the active board.
 
-        Eligibility uses board completion time when available
-        (``Task.meta['_board_updated_at']`` from CardStore folds), otherwise
-        ``created_at``. Reads go through ``get_task_views`` so CardStore-cutover
-        boards are drained; legacy-only boards still work.
+        Status for eligibility prefers the authoritative legacy claim/completion
+        projection (Phase 4e). CardStore-only done cards are also eligible, and
+        CardStore ``updated_at`` is preferred as the completion age when present.
 
         Archiving appends to this host's archive index and never mutates the
         task file.
@@ -1752,14 +1751,44 @@ class Board:
         """
         ref = now or datetime.now(timezone.utc)
         cutoff = ref - timedelta(days=older_than_days)
-        eligible: list[str] = []
-        for view in self.get_task_views():
+        done_ages: dict[str, object] = {}
+
+        # Authoritative legacy status: a completion recorded only in the legacy
+        # agent file must count even when the store mirror is behind.
+        for view in self._legacy_task_views():
             if view.status != TaskStatus.DONE:
                 continue
-            age_raw = view.task.meta.get("_board_updated_at") or view.task.created_at
+            done_ages[view.task.id] = (
+                view.task.meta.get("_board_updated_at") or view.task.created_at
+            )
+
+        # CardStore may hold done cards with no legacy task file (cutover gap).
+        try:
+            from . import card_store
+            from .card import Column
+
+            if card_store.card_store_read_enabled():
+                store = card_store.CardStore(self.home)
+                for card in store.list_cards(
+                    include_archived=False, degrade_unreadable=True
+                ):
+                    if getattr(card.kind, "value", card.kind) not in ("task", "epic"):
+                        continue
+                    if card.status != Column.DONE:
+                        continue
+                    age = card.updated_at or card.created_at or done_ages.get(card.id)
+                    if card.updated_at:
+                        done_ages[card.id] = card.updated_at
+                    else:
+                        done_ages.setdefault(card.id, age)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("CardStore archive scan failed: %s", exc)
+
+        eligible: list[str] = []
+        for tid, age_raw in done_ages.items():
             ts = self._parse_board_timestamp(age_raw, cutoff=cutoff)
             if ts <= cutoff:
-                eligible.append(view.task.id)
+                eligible.append(tid)
         if not dry_run:
             for tid in eligible:
                 self.archive_task(tid, by="archive-done")
@@ -1773,11 +1802,11 @@ class Board:
     ) -> list[str]:
         """Archive ancient unclaimed open tasks (backlog rot).
 
-        Only tasks that are still OPEN (never claimed, never worked) and whose
-        created_at exceeds ``older_than_days`` are eligible. Cards tagged
-        ``human-gate`` or titled with ``[HUMAN]`` are skipped so recorded
-        decisions are not archived as abandoned backlog. Conservative by
-        default so live backlog is not swept prematurely.
+        Only tasks that are still OPEN on the authoritative legacy projection
+        (never claimed, never worked) and whose created_at exceeds
+        ``older_than_days`` are eligible. Cards tagged ``human-gate`` or titled
+        with ``[HUMAN]`` are skipped so recorded decisions are not archived as
+        abandoned backlog.
 
         Args:
             older_than_days: Age threshold in days.
@@ -1790,7 +1819,9 @@ class Board:
         ref = now or datetime.now(timezone.utc)
         cutoff = ref - timedelta(days=older_than_days)
         eligible: list[str] = []
-        for view in self.get_task_views():
+        # Authoritative legacy status: a claim recorded only in the legacy agent
+        # file must protect a task from backlog aging (store may show it open).
+        for view in self._legacy_task_views():
             if view.status != TaskStatus.OPEN:
                 continue
             if self._is_human_held_task(view.task):
