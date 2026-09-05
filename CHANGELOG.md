@@ -11,6 +11,10 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
 
 ### Added
 
+- Board scan-cost helpers: `Board.prune_stale_locks`, live-only defaults for
+  `generate_board_md` / `get_briefing_*` (`include_done`), and CardStore folds
+  that stash `_board_updated_at` for archive aging. Cards b0a0d002/b0a0d003/b0a0d005.
+
 - Hash-chain event log integrity: `append_event` now computes `prev_hash`
   (SHA-256 of the preceding line in the same writer file) and `_read_events`
   verifies the chain at fold time. Tamper or truncation raises `ValueError`
@@ -32,6 +36,11 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
   unchanged.
 
 ### Fixed
+
+- `archive_done_tasks` now ages via CardStore task views and completion time
+  (`meta._board_updated_at`), not legacy-only `created_at` scans that left
+  thousands of done cards on the active board. `age_stale_open` skips
+  `human-gate` / `[HUMAN]` cards.
 
 - Card daeac75b refreshes the exact guarded claim-conflict release candidate
   against current main while preserving authoritative owner state and requiring

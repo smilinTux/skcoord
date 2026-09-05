@@ -13,8 +13,6 @@ from skcoord.coordination import (
     Board,
     Task,
     TaskPriority,
-    TaskStatus,
-    TaskView,
     get_briefing_text,
 )
 
