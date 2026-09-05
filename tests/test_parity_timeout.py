@@ -113,6 +113,7 @@ def test_source_drift_during_copy_is_non_actionable(tmp_path, monkeypatch):
     _seed_home(tmp_path)
     task_path = next((tmp_path / "coordination" / "tasks").glob("*.json"))
     original_read_bytes = card_store.Path.read_bytes
+
     def _read_bytes(path):
         payload = original_read_bytes(path)
         if path == task_path:
