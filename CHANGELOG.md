@@ -11,6 +11,10 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
 
 ### Added
 
+- Authoritative fleet node and model-server registry schema plus deterministic,
+  read-only discovery with explicit valid, stale, and missing evidence states,
+  duplicate detection, and secret-free source validation. Card a8958fd3.
+
 - Board scan-cost helpers: `Board.prune_stale_locks`, live-only defaults for
   `generate_board_md` / `get_briefing_*` (`include_done`), and CardStore folds
   that stash `_board_updated_at` for archive aging. Cards b0a0d002/b0a0d003/b0a0d005.
