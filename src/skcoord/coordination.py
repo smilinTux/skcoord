@@ -2239,9 +2239,9 @@ class Board:
         should_mint = False
         with _board_mutation_lock(self.home), card_mutation_lock(self.home, task_id):
             self._assert_no_claim_conflict(task_id, canonical)
-            for existing in self.load_agents():
-                if task_id in existing.completed_tasks:
-                    return existing
+            # Do not use completed_tasks as a mint deduplication gate. The
+            # append-only outbox is the source of retryable mint work, and a
+            # prior completion may have crashed before its intent was emitted.
             incomplete = self._incomplete_completion_dependencies(task_id)
             if incomplete:
                 raise ValueError(
