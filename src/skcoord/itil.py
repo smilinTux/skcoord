@@ -554,7 +554,11 @@ class ITILManager:
             fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
             try:
                 fh.seek(0)
-                seq = sum(1 for _ in fh)
+                lines = list(fh)
+                seq = len(lines)
+                prev_hash = ""
+                if lines:
+                    prev_hash = hashlib.sha256(lines[-1].strip().encode("utf-8")).hexdigest()
                 event = {
                     "event_id": uuid.uuid4().hex,
                     "ts": _now_iso(),
@@ -562,11 +566,13 @@ class ITILManager:
                     "node": _HOSTNAME,
                     "seq": seq,
                     "kind": kind,
+                    "prev_hash": prev_hash,
                 }
                 event.update(payload)
                 fh.seek(0, os.SEEK_END)
                 fh.write(json.dumps(event, default=str) + "\n")
                 fh.flush()
+                os.fsync(fh.fileno())
             finally:
                 fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
 
@@ -586,15 +592,35 @@ class ITILManager:
                 lines = f.read_text(encoding="utf-8").splitlines()
             except OSError:
                 continue
+            prev_line_hash = ""
+            file_events: list[dict] = []
+            file_broken = False
             for line in lines:
                 line = line.strip()
                 if not line:
                     continue
                 try:
-                    events.append(json.loads(line))
+                    event = json.loads(line)
                 except json.JSONDecodeError:
                     logger.warning("Skipping malformed event line in %s", f.name)
                     continue
+                event_prev = event.get("prev_hash")
+                if isinstance(event_prev, str) and event_prev and event_prev != prev_line_hash:
+                    logger.warning(
+                        "ITIL event chain broken in %s: event %s prev_hash mismatch",
+                        f.name, event.get("event_id", "?"),
+                    )
+                    # Keep a verified prefix when seq reveals a removed line;
+                    # discard it when the current event has the next sequence,
+                    # indicating the prefix itself was edited.
+                    if event.get("seq") == len(file_events):
+                        file_events.clear()
+                    file_broken = True
+                    break
+                file_events.append(event)
+                prev_line_hash = hashlib.sha256(line.encode("utf-8")).hexdigest()
+            if not file_broken:
+                events.extend(file_events)
         events.sort(
             key=lambda e: (
                 e.get("ts", ""),

@@ -52,9 +52,16 @@ def test_tamper_detection(store):
     lines[0] = json.dumps(first)
     wf.write_text("\n".join(lines) + "\n")
 
-    # Second event's prev_hash should now mismatch
-    with pytest.raises(ValueError, match="chain broken"):
-        store._read_events("test01")
+    # The tampered file is quarantined and the fold continues with the
+    # last verified state, so no exception is raised and the alert event
+    # is appended to the card.
+    events = store._read_events("test01")
+    bodies = [e.get("body") for e in events if e.get("body")]
+    assert "tampered" not in bodies
+    alert = [e for e in events if e.get("kind") == "alert"]
+    assert alert, "expected an alert event on the card after a break"
+    qdir = Path(store.home) / "cards" / "test01" / "events" / "quarantine"
+    assert any(p.name.endswith(".jsonl") for p in qdir.iterdir())
 
 
 def test_truncation_detection(store):
@@ -67,9 +74,16 @@ def test_truncation_detection(store):
     # Truncate: remove the second line
     wf.write_text(lines[0] + "\n" + lines[2] + "\n")
 
-    # Third event's prev_hash now points to a nonexistent second line
-    with pytest.raises(ValueError, match="chain broken"):
-        store._read_events("test01")
+    # The break is detected at fold time: the file is quarantined, the
+    # fold keeps the last verified state, and an alert event is appended.
+    events = store._read_events("test01")
+    bodies = [e.get("body") for e in events if e.get("body")]
+    assert "one" in bodies
+    assert "three" not in bodies
+    alert = [e for e in events if e.get("kind") == "alert"]
+    assert alert, "expected an alert event on the card after a break"
+    qdir = Path(store.home) / "cards" / "test01" / "events" / "quarantine"
+    assert any(p.name.endswith(".jsonl") for p in qdir.iterdir())
 
 
 def test_legacy_unchained_events_pass(store, tmp_path):

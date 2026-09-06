@@ -720,7 +720,9 @@ class CardStore:
         if _card_lock_key(self.home, card_id) not in _HELD_CARD_LOCKS.get():
             with card_mutation_lock(self.home, card_id):
                 return self.append_event(card_id, action, agent, **payload)
-        self._require_foldable_core(card_id)
+        # Fold once; the break is already quarantined at fold time and the
+        # alert event is appended here under the same card mutation lock.
+        events = self._read_events(card_id)
         if action in {
             "move",
             "reopen",
@@ -729,7 +731,7 @@ class CardStore:
             "claim",
             "release_claim",
             "complete",
-        } and any(event.get("action") == "void" for event in self._read_events(card_id)):
+        } and any(event.get("action") == "void" for event in events):
             raise ValueError(
                 f"CardStore card {card_id} is voided; void is a terminal decision"
             )
@@ -814,6 +816,22 @@ class CardStore:
         if card is None or card.id != card_id:
             raise ValueError(f"CardStore card {card_id} has no foldable core")
 
+    def _quarantine_writer_file(self, card_id: str, name: str) -> Path:
+        """Move a broken writer file into ``events/quarantine/`` and record it.
+
+        Called from ``_read_events`` when the prev_hash chain breaks. Returns
+        the quarantine path so the caller can reference it in the alert event.
+        """
+        card_dir = self.home / "cards" / card_id
+        events_dir = card_dir / "events"
+        quarantine_dir = events_dir / "quarantine"
+        quarantine_dir.mkdir(parents=True, exist_ok=True)
+        src = events_dir / name
+        dst = quarantine_dir / name
+        if src.exists():
+            src.rename(dst)
+        return dst
+
     def has_transition(self, card_id: str, transition_id: str) -> bool:
         """Return whether an exact intended CardStore event is durable."""
         return any(
@@ -862,9 +880,10 @@ class CardStore:
             os.close(card_fd)
         if events_fd is None:
             return out
+        break_info: Optional[dict] = None
         try:
             for name in sorted(os.listdir(events_fd)):
-                if not name.endswith(".jsonl"):
+                if name.startswith("quarantine") or not name.endswith(".jsonl"):
                     continue
                 try:
                     raw = self._read_regular_file_bytes(events_fd, name, "CardStore event source")
@@ -881,6 +900,8 @@ class CardStore:
                 except UnicodeError as exc:
                     raise ValueError(f"CardStore event source for {card_id} is malformed") from exc
                 prev_line_hash = ""
+                file_events: list[dict] = []
+                file_broken = False
                 for line in lines:
                     line = line.strip()
                     if not line:
@@ -895,23 +916,42 @@ class CardStore:
                         raise ValueError(
                             f"CardStore event source for {card_id} must contain JSON objects"
                         )
-                    # Hash-chain verification: each chained event must link
-                    # to the hash of the preceding line in this writer file.
-                    # Legacy events without prev_hash pass (chain starts at
-                    # the first chained event).
                     event_prev = event.get("prev_hash")
-                    if isinstance(event_prev, str) and event_prev:
-                        if event_prev != prev_line_hash:
-                            raise ValueError(
-                                f"CardStore event chain broken in {card_id}/{name}: "
-                                f"event {event.get('event_id', '?')} prev_hash mismatch"
-                            )
-                    out.append(event)
-                    prev_line_hash = hashlib.sha256(
-                        line.encode("utf-8")
-                    ).hexdigest()
+                    if isinstance(event_prev, str) and event_prev and event_prev != prev_line_hash:
+                        break_info = break_info or {
+                            "file": name, "event_id": event.get("event_id", "?")
+                        }
+                        # A sequence gap proves truncation, so the verified
+                        # prefix remains usable. A same-sequence mismatch may
+                        # mean the prefix itself was edited, so discard it.
+                        if event.get("seq") == len(file_events):
+                            file_events.clear()
+                        file_broken = True
+                        break
+                    file_events.append(event)
+                    prev_line_hash = hashlib.sha256(line.encode("utf-8")).hexdigest()
+                # A verified prefix remains usable for truncation recovery;
+                # tamper at the next sequence cleared it above.
+                out.extend(file_events)
         finally:
             os.close(events_fd)
+        if break_info is not None:
+            quarantined = self._quarantine_writer_file(card_id, break_info["file"])
+            if os.path.exists(str(quarantined)):
+                alert = self.append_event(
+                    card_id,
+                    "note",
+                    "system",
+                    kind="alert",
+                    subject=f"hash-chain break in {break_info['file']}",
+                    detail=(
+                        f"prev_hash mismatch at event {break_info['event_id']}; "
+                        f"{break_info['file']} quarantined to "
+                        f"events/quarantine/{break_info['file']}; "
+                        f"fold continues with last verified state"
+                    ),
+                )
+                out.append(alert)
         # Deterministic order: ts, then writer, then per-writer seq.
         out.sort(key=lambda e: (e.get("ts", ""), e.get("writer", ""), e.get("seq", 0)))
         return out
