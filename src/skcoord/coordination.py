@@ -900,6 +900,8 @@ class Board:
                     kw["task_id"],
                     kw["agent"],
                     transition_id=kw.get("transition_id", ""),
+                    joule_amount=kw.get("joule_amount", 0),
+                    task_id_value=kw.get("task_id_value", kw.get("task_id", "")),
                 )
             elif op == "archive":
                 card_store.mirror_coord_archive(self.home, kw["task_id"], kw["agent"])

@@ -10,7 +10,7 @@ import logging
 from pathlib import Path
 from typing import Callable, Any
 
-from .card_store import CardStore
+from .card_store import CardStore, card_mutation_lock
 
 logger = logging.getLogger(__name__)
 
@@ -29,35 +29,39 @@ def reconcile_joule_outbox(
     store = CardStore(home)
     emitted: list[dict] = []
     for card_id in store.list_card_ids():
-        events = store._read_events(card_id)
-        executed = {
-            str(e.get("task_id")) for e in events if e.get("action") == "mint_executed"
-        }
-        for intent in (e for e in events if e.get("action") == "mint_intent"):
-            task_id = str(intent.get("task_id", card_id))
-            if task_id in executed:
-                continue
-            amount = int(intent.get("joule_amount", 0))
-            completed_by = str(intent.get("completed_by", intent.get("agent", "")))
-            if amount <= 0 or not completed_by:
-                logger.error("invalid Joule mint intent for %s", card_id)
-                continue
-            if mint is None:
-                from skcapstone.skjoule import JouleEngine
-                task = {"id": task_id, "completed_by": completed_by,
-                        "priority": "medium", "title": task_id, "tags": ["community"]}
-                record = JouleEngine().auto_tokenize_task(task)
-                if record is None:
+        # Hold the same per-card lock across the evidence check, wallet call, and
+        # execution evidence append. This prevents two reconciler processes from
+        # both observing an outstanding task_id and double-minting it.
+        with card_mutation_lock(home, card_id):
+            events = store._read_events(card_id)
+            executed = {
+                str(e.get("task_id")) for e in events if e.get("action") == "mint_executed"
+            }
+            for intent in (e for e in events if e.get("action") == "mint_intent"):
+                task_id = str(intent.get("task_id", card_id))
+                if task_id in executed:
                     continue
-            else:
-                mint(task_id, amount, completed_by)
-            event = store.append_event(
-                card_id, "mint_executed", agent,
-                task_id=task_id, joule_amount=amount, completed_by=completed_by,
-                transition_id="mint-executed-" + str(intent.get("event_id", task_id)),
-            )
-            emitted.append(event)
-            executed.add(task_id)
+                amount = int(intent.get("joule_amount", 0))
+                completed_by = str(intent.get("completed_by", intent.get("agent", "")))
+                if amount <= 0 or not completed_by:
+                    logger.error("invalid Joule mint intent for %s", card_id)
+                    continue
+                if mint is None:
+                    from skcapstone.skjoule import JouleEngine
+                    task = {"id": task_id, "completed_by": completed_by,
+                            "priority": "medium", "title": task_id, "tags": ["community"]}
+                    record = JouleEngine().auto_tokenize_task(task)
+                    if record is None:
+                        continue
+                else:
+                    mint(task_id, amount, completed_by)
+                event = store.append_event(
+                    card_id, "mint_executed", agent,
+                    task_id=task_id, joule_amount=amount, completed_by=completed_by,
+                    transition_id="mint-executed-" + str(intent.get("event_id", task_id)),
+                )
+                emitted.append(event)
+                executed.add(task_id)
     return emitted
 
 
