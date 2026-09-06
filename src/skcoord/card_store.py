@@ -797,7 +797,11 @@ class CardStore:
                     }
                     event.update(payload)
                     fh.seek(0, os.SEEK_END)
-                    fh.write(json.dumps(event, default=str) + "\n")
+                    # Serialize once, then parse the exact bytes before append.  This
+                    # keeps the append-only log from ever receiving malformed JSON.
+                    serialized = json.dumps(event, default=str, separators=(",", ":"))
+                    json.loads(serialized)
+                    fh.write(serialized + "\n")
                     fh.flush()
                     os.fsync(fh.fileno())
                     return event
@@ -807,6 +811,18 @@ class CardStore:
             if descriptor >= 0:
                 os.close(descriptor)
             os.close(events_fd)
+
+    def append_events_atomic(self, card_id: str, events: list[tuple[str, str, dict[str, Any]]]) -> list[dict]:
+        """Append a batch while holding the card lock, fsyncing each JSON line.
+
+        Every record is serialized and parsed before it reaches the append-only log.
+        This is the transaction boundary used by completion plus mint intent.
+        """
+        validate_card_lock_identifier(card_id)
+        if _card_lock_key(self.home, card_id) not in _HELD_CARD_LOCKS.get():
+            with card_mutation_lock(self.home, card_id):
+                return self.append_events_atomic(card_id, events)
+        return [self.append_event(card_id, action, agent, **payload) for action, agent, payload in events]
 
     def _require_foldable_core(self, card_id: str) -> None:
         """Reject an event target before creating an orphan directory."""
@@ -1919,11 +1935,24 @@ def mirror_coord_claim(
     return revision
 
 
-def mirror_coord_complete(home: Path, task_id: str, agent: str, transition_id: str = "") -> None:
-    """Mirror a coord completion into the CardStore."""
-    CardStore(home).append_event(
-        task_id, "complete", agent, transition_id=transition_id or uuid.uuid4().hex
-    )
+def mirror_coord_complete(
+    home: Path, task_id: str, agent: str, transition_id: str = "", joule_amount: int = 0,
+    task_id_value: str = "",
+) -> None:
+    """Mirror completion and its mint intent in one card-lock transaction."""
+    store = CardStore(home)
+    tid = transition_id or uuid.uuid4().hex
+    amount = int(joule_amount)
+    if amount <= 0:
+        raise ValueError("joule_amount must be positive")
+    with card_mutation_lock(home, task_id):
+        store.append_events_atomic(task_id, [
+            ("complete", agent, {"transition_id": tid}),
+            ("mint_intent", agent, {
+                "task_id": task_id_value or task_id, "completed_by": agent,
+                "joule_amount": amount, "transition_id": "mint-intent-" + tid,
+            }),
+        ])
 
 
 def current_claim_precondition(home: Path, task_id: str, owner: str) -> str | None:

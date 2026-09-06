@@ -2249,6 +2249,10 @@ class Board:
                 )
             _, original = self._snapshot_agent_projection(canonical)
             agent = self._complete_task(canonical, task_id)
+            task_priority = next(
+                (str(task.priority) for task in self.load_tasks() if task.id == task_id), "medium"
+            )
+            task_joule_amount = _PRIORITY_JOULE_MAP.get(task_priority, ("community", "support_ticket", 50))[2]
             transitions = [(task_id, uuid.uuid4().hex)]
             try:
                 self._mirror_card_store(
@@ -2256,6 +2260,8 @@ class Board:
                     task_id=task_id,
                     agent=canonical,
                     transition_id=transitions[0][1],
+                    joule_amount=task_joule_amount,
+                    task_id_value=task_id,
                 )
             except Exception as exc:
                 if self._store_transitions_are_applied(transitions, [(task_id, None, "done")]):
@@ -2273,8 +2279,8 @@ class Board:
                     raise
             else:
                 should_mint = True
-        if should_mint:
-            _mint_joules_for_task(self, task_id, canonical)
+        # Minting is deliberately asynchronous. The atomic CardStore intent is
+        # the durable hand-off to the reconciler, never a best-effort side effect.
         return agent
 
     def generate_board_md(
