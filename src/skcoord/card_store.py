@@ -593,7 +593,9 @@ class CardStore:
 
     def _is_terminal_card(self, card: Card) -> bool:
         """Use structural CardStore state only, never evidence annotations."""
-        if card.status == Column.DONE or card.archived:
+        if card.archived or card.meta.get("unreadable"):
+            return True
+        if card.status == Column.DONE:
             return True
         return any(event.get("action") == "void" for event in self._read_events(card.id))
 
@@ -607,7 +609,7 @@ class CardStore:
             return
         parent_id = self._creation_parent(labels, core.id)
 
-        cards = self.list_cards(include_archived=True)
+        cards = self.list_cards(include_archived=True, degrade_unreadable=True)
         cards_by_id = {card.id: card for card in cards}
         if parent_id not in cards_by_id:
             raise ValueError(f"Governed card {core.id} names unknown parent {parent_id}")
