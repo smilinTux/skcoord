@@ -900,6 +900,8 @@ class Board:
                     kw["task_id"],
                     kw["agent"],
                     transition_id=kw.get("transition_id", ""),
+                    joule_amount=kw.get("joule_amount", 0),
+                    task_id_value=kw.get("task_id_value", kw.get("task_id", "")),
                 )
             elif op == "archive":
                 card_store.mirror_coord_archive(self.home, kw["task_id"], kw["agent"])
@@ -2239,9 +2241,9 @@ class Board:
         should_mint = False
         with _board_mutation_lock(self.home), card_mutation_lock(self.home, task_id):
             self._assert_no_claim_conflict(task_id, canonical)
-            for existing in self.load_agents():
-                if task_id in existing.completed_tasks:
-                    return existing
+            # Do not use completed_tasks as a mint deduplication gate. The
+            # append-only outbox is the source of retryable mint work, and a
+            # prior completion may have crashed before its intent was emitted.
             incomplete = self._incomplete_completion_dependencies(task_id)
             if incomplete:
                 raise ValueError(
@@ -2249,6 +2251,10 @@ class Board:
                 )
             _, original = self._snapshot_agent_projection(canonical)
             agent = self._complete_task(canonical, task_id)
+            task_priority = next(
+                (str(task.priority) for task in self.load_tasks() if task.id == task_id), "medium"
+            )
+            task_joule_amount = _PRIORITY_JOULE_MAP.get(task_priority, ("community", "support_ticket", 50))[2]
             transitions = [(task_id, uuid.uuid4().hex)]
             try:
                 self._mirror_card_store(
@@ -2256,6 +2262,8 @@ class Board:
                     task_id=task_id,
                     agent=canonical,
                     transition_id=transitions[0][1],
+                    joule_amount=task_joule_amount,
+                    task_id_value=task_id,
                 )
             except Exception as exc:
                 if self._store_transitions_are_applied(transitions, [(task_id, None, "done")]):
@@ -2273,8 +2281,8 @@ class Board:
                     raise
             else:
                 should_mint = True
-        if should_mint:
-            _mint_joules_for_task(self, task_id, canonical)
+        # Minting is deliberately asynchronous. The atomic CardStore intent is
+        # the durable hand-off to the reconciler, never a best-effort side effect.
         return agent
 
     def generate_board_md(
