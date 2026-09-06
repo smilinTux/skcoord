@@ -610,11 +610,9 @@ class ITILManager:
                         "ITIL event chain broken in %s: event %s prev_hash mismatch",
                         f.name, event.get("event_id", "?"),
                     )
-                    # Keep a verified prefix when seq reveals a removed line;
-                    # discard it when the current event has the next sequence,
-                    # indicating the prefix itself was edited.
-                    if event.get("seq") == len(file_events):
-                        file_events.clear()
+                    # Keep the verified prefix. ITIL fold consumers can use
+                    # it as the last known-good state while the broken file is
+                    # excluded from replay.
                     file_broken = True
                     break
                 file_events.append(event)
