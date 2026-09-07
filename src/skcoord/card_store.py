@@ -279,6 +279,8 @@ class CardCore(BaseModel):
     initial_priority: str = "medium"
     initial_swimlane: str = "feature"
     initial_labels: list[str] = Field(default_factory=list)
+    initial_owner: str | None = None
+    initial_claim_revision: str | None = None
     meta: dict = Field(default_factory=dict)
 
 
@@ -676,10 +678,7 @@ class CardStore:
                     try:
                         fd = os.open(
                             "core.json",
-                            os.O_CREAT
-                            | os.O_EXCL
-                            | os.O_WRONLY
-                            | getattr(os, "O_NOFOLLOW", 0),
+                            os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0),
                             0o644,
                             dir_fd=rec_fd,
                         )
@@ -730,9 +729,7 @@ class CardStore:
             "release_claim",
             "complete",
         } and any(event.get("action") == "void" for event in self._read_events(card_id)):
-            raise ValueError(
-                f"CardStore card {card_id} is voided; void is a terminal decision"
-            )
+            raise ValueError(f"CardStore card {card_id} is voided; void is a terminal decision")
         writer_filename = f"{self._writer_id(agent)}.jsonl"
         rec_fd = self._open_card_directory(card_id)
         try:
@@ -783,9 +780,7 @@ class CardStore:
                     seq = len(lines)
                     prev_hash = ""
                     if lines:
-                        prev_hash = hashlib.sha256(
-                            lines[-1].strip().encode("utf-8")
-                        ).hexdigest()
+                        prev_hash = hashlib.sha256(lines[-1].strip().encode("utf-8")).hexdigest()
                     event = {
                         "event_id": uuid.uuid4().hex,
                         "ts": _now_iso(),
@@ -907,9 +902,7 @@ class CardStore:
                                 f"event {event.get('event_id', '?')} prev_hash mismatch"
                             )
                     out.append(event)
-                    prev_line_hash = hashlib.sha256(
-                        line.encode("utf-8")
-                    ).hexdigest()
+                    prev_line_hash = hashlib.sha256(line.encode("utf-8")).hexdigest()
         finally:
             os.close(events_fd)
         # Deterministic order: ts, then writer, then per-writer seq.
@@ -952,6 +945,7 @@ class CardStore:
             swimlane=core.get("initial_swimlane", "feature"),
             priority=core.get("initial_priority", "medium"),
             originator=core.get("created_by", ""),
+            owner=core.get("initial_owner"),
             labels=list(core.get("initial_labels", [])),
             acceptance_criteria=list(core.get("acceptance_criteria", []) or []),
             dependencies=list(core.get("dependencies", [])),
@@ -959,6 +953,12 @@ class CardStore:
             created_at=core.get("created_at", ""),
             source="cards",
         )
+        initial_revision = core.get("initial_claim_revision")
+        if card.owner is not None:
+            if not isinstance(initial_revision, str) or not initial_revision:
+                raise ValueError(f"CardStore card {card_id} has an owner without a claim revision")
+            card.status = _CLAIM_COLUMN
+            card.meta["_claim_revision"] = initial_revision
         events = self._read_events(card_id)
         legacy_events = self._legacy_events(card_id)
         if legacy_events:
@@ -1543,9 +1543,7 @@ def task_views_from_store(home: Path, include_archived: bool = False) -> list:
     store = CardStore(home)
     return [
         _task_view_from_card(card)
-        for card in store.list_cards(
-            include_archived=include_archived, degrade_unreadable=True
-        )
+        for card in store.list_cards(include_archived=include_archived, degrade_unreadable=True)
         # get_task_views is the COORD task board: coord-origin kinds only.
         # ITIL cards (incident/problem/change) live in the kanban view, not here.
         if card.kind.value in ("task", "epic")
@@ -1903,6 +1901,64 @@ def mirror_coord_create(home: Path, task) -> None:
     )
 
 
+def mirror_coord_create_claimed(
+    home: Path,
+    task,
+    owner: str,
+    claim_revision: str = "",
+) -> str:
+    """Create a card whose first observable fold is already claimed."""
+    from .card import _swimlane_for_tags
+
+    tags_lower = {t.lower() for t in task.tags}
+    kind = "epic" if "epic" in tags_lower else "task"
+    store = CardStore(home)
+    existing = store._load_core(task.id)
+    if existing is not None:
+        stored_revision = existing.get("initial_claim_revision")
+        if not isinstance(stored_revision, str) or not stored_revision:
+            raise ValueError(f"CardStore create-and-claim conflict for {task.id}")
+        revision = claim_revision or stored_revision
+    else:
+        revision = claim_revision or uuid.uuid4().hex
+    expected = CardCore(
+        id=task.id,
+        kind=kind,
+        title=task.title,
+        description=task.description,
+        created_by=task.created_by,
+        created_at=task.created_at,
+        acceptance_criteria=list(getattr(task, "acceptance_criteria", []) or []),
+        dependencies=list(task.dependencies),
+        initial_priority=task.priority.value,
+        initial_swimlane=_swimlane_for_tags(task.tags),
+        initial_labels=list(task.tags),
+        initial_owner=owner,
+        initial_claim_revision=revision,
+        meta=dict(task.meta),
+    )
+    if existing is not None:
+        if CardCore.model_validate(existing).model_dump() != expected.model_dump():
+            raise ValueError(f"CardStore create-and-claim conflict for {task.id}")
+        current = store.fold(task.id)
+        if (
+            current is None
+            or current.owner != owner
+            or current.status != _CLAIM_COLUMN
+            or current.meta.get("_claim_revision") != revision
+        ):
+            raise ValueError(
+                f"CardStore create-and-claim claim is no longer current for {task.id}"
+            )
+        return revision
+
+    store.create(expected)
+    created = store._load_core(task.id)
+    if created is None or CardCore.model_validate(created).model_dump() != expected.model_dump():
+        raise ValueError(f"CardStore create-and-claim conflict for {task.id}")
+    return revision
+
+
 def mirror_coord_claim(
     home: Path,
     task_id: str,
@@ -2042,9 +2098,7 @@ def mirror_coord_archive(home: Path, task_id: str, agent: str) -> None:
 OPEN_DRIFT_THRESHOLD = 5
 
 
-def _open_count(
-    cards: dict, known_status_ids: Optional[set[str]] = None
-) -> int:
+def _open_count(cards: dict, known_status_ids: Optional[set[str]] = None) -> int:
     """Count comparable coord-board OPEN cards.
 
     Args:
@@ -2141,9 +2195,7 @@ def parity_check(home: Path, open_drift_threshold: int = OPEN_DRIFT_THRESHOLD) -
         diff = {}
         # Legacy task JSON is a birth record. A projected status default for
         # a record without that field is unknown and cannot disagree.
-        if cid in legacy_status_ids and _bucket(lc.status.value) != _bucket(
-            sc.status.value
-        ):
+        if cid in legacy_status_ids and _bucket(lc.status.value) != _bucket(sc.status.value):
             diff["status"] = [lc.status.value, sc.status.value]
         if (lc.owner or None) != (sc.owner or None):
             diff["owner"] = [lc.owner, sc.owner]
