@@ -1828,13 +1828,31 @@ class Board:
         self.save_agent(agent)
         return agent, bumped
 
-    def claim_task(self, agent_name: str, task_id: str, force: bool = False) -> AgentFile:
+    def claim_task(
+        self, agent_name: str, task_id: str, force: bool = False,
+        startup_evidence: dict | None = None, claim_generation: str | None = None,
+    ) -> AgentFile:
         """Claim under the board lock and every affected card lock.
+
+        When startup evidence is supplied it is validated before acquiring
+        mutation locks, so a rejected worker consumes no slot and changes no
+        ownership. Callers should provide a fresh claim_generation token.
 
         A new current task demotes the old current task. Both IDs therefore
         take sorted card locks after the shared board lock, preventing a second
         card from escaping the mutation protocol.
         """
+        if startup_evidence is not None:
+            from .startup_evidence import validate_startup_evidence
+            if not claim_generation:
+                raise ValueError("pre-claim rejected: claim_generation is required")
+            check = validate_startup_evidence(
+                startup_evidence, card_id=task_id, agent=agent_name,
+                claim_generation=claim_generation,
+            )
+            if not check.ok:
+                raise ValueError(check.message)
+
         from .card_store import (
             CardStore,
             card_mutation_lock,
