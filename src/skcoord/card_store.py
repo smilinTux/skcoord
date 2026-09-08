@@ -705,6 +705,40 @@ class CardStore:
         self._ensure_card_lock_anchor(core.id)
         return core.id
 
+    _TERMINAL_LINK_KEYS = frozenset({
+        "verdict", "blocked_on", "evidence", "evidence_sha256", "completion",
+        "terminal_review", "review", "review_verdict",
+    })
+
+    @classmethod
+    def _requires_terminal_owner(cls, action: str, payload: dict[str, Any]) -> bool:
+        """Whether an event can change terminal evidence or completion state."""
+        if action == "complete":
+            return True
+        return action == "link" and payload.get("link_key") in cls._TERMINAL_LINK_KEYS
+
+    def _authorize_terminal_event(self, card_id: str, action: str, agent: str,
+                                  payload: dict[str, Any]) -> None:
+        """Fence terminal mutations to the exact live owner and generation.
+
+        A claim loser may still append ordinary historical annotations, but must
+        never be able to manufacture a terminal verdict or its supporting links.
+        Review writers can bypass this only when an explicit review contract is
+        carried in the event itself.
+        """
+        if not self._requires_terminal_owner(action, payload):
+            return
+        if payload.get("independent_review_contract"):
+            return
+        card = self.fold(card_id)
+        expected_revision = payload.get("claim_revision") or payload.get("expected_claim_revision")
+        if (card is None or card.owner != agent or
+                not isinstance(expected_revision, str) or
+                card.meta.get("_claim_revision") != expected_revision):
+            raise ValueError(
+                f"terminal mutation rejected: {card_id} requires current owner and claim generation"
+            )
+
     def append_event(self, card_id: str, action: str, agent: str, **payload: Any) -> dict:
         """Append one event line under the common same-card lock protocol.
 
@@ -720,6 +754,7 @@ class CardStore:
             with card_mutation_lock(self.home, card_id):
                 return self.append_event(card_id, action, agent, **payload)
         self._require_foldable_core(card_id)
+        self._authorize_terminal_event(card_id, action, agent, payload)
         if action in {
             "move",
             "reopen",
@@ -1084,6 +1119,8 @@ class CardStore:
                     if was_unowned_backlog and owner:
                         card.meta.pop("claim_conflicts", None)
             elif action == "complete":
+                # Completion is accepted only from the exact live claim. The
+                # append path enforces this before the event becomes durable.
                 card.status = _COMPLETE_COLUMN
                 # coord drops a completed task from claimed_tasks, so its derived
                 # claimed_by is None. Match that so parity holds on done cards.
@@ -1979,10 +2016,16 @@ def mirror_coord_claim(
     return revision
 
 
-def mirror_coord_complete(home: Path, task_id: str, agent: str, transition_id: str = "") -> None:
-    """Mirror a coord completion into the CardStore."""
+def mirror_coord_complete(
+    home: Path, task_id: str, agent: str, transition_id: str = "", claim_revision: str = ""
+) -> None:
+    """Mirror a coord completion into the CardStore with its claim generation."""
     CardStore(home).append_event(
-        task_id, "complete", agent, transition_id=transition_id or uuid.uuid4().hex
+        task_id,
+        "complete",
+        agent,
+        transition_id=transition_id or uuid.uuid4().hex,
+        claim_revision=claim_revision,
     )
 
 
