@@ -43,6 +43,14 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
 
 ### Fixed
 
+- CardStore and sanctioned overlay describe events now reject explicit empty
+  or whitespace titles before appending an event, while an omitted title
+  leaves the folded title unchanged. The regression fixtures reproduce
+  live card `6daf24f5` and historical event
+  `1b4b8feaf90f443c94fab2852b9eb852` with explicit empty titles and prove
+  that they cause no filesystem mutation. A description-only `x` update also
+  preserves the title. Cards `f8b46dae` and `8466152c`.
+
 - Atomic create-and-claim retries now require exact equality across every
   immutable card field before accepting an existing ID, including concurrent
   same-owner requests with different payloads. An exact replay also fails

@@ -35,6 +35,14 @@ def _core_on_disk(store: CardStore, card_id: str) -> dict:
     return json.loads((store.cards_dir / card_id / "core.json").read_text(encoding="utf-8"))
 
 
+def _files_on_disk(root) -> dict:
+    return {
+        path.relative_to(root): path.read_bytes()
+        for path in root.rglob("*")
+        if path.is_file()
+    }
+
+
 def test_describe_event_updates_folded_description(tmp_path):
     store = CardStore(tmp_path)
     store.create(CardCore(id="d1", title="Card", description="original wording"))
@@ -143,12 +151,25 @@ def test_kanban_board_applies_describe_overlay_to_legacy_projection(tmp_path, mo
 def test_mirror_coord_describe_omits_untouched_fields(tmp_path):
     """The CLI-facing mirror must not write a null title over a real one."""
     store = CardStore(tmp_path)
-    store.create(CardCore(id="d12", title="Card", description="original"))
-    mirror_coord_describe(tmp_path, "d12", "lumina", description="edited")
-    ev = store._read_events("d12")[0]
+    title = (
+        "[SKLEGAL-PRODUCT-STATUS-R8-R][S][REVIEW] "
+        "Verify delivery-wave status design and route truth"
+    )
+    store.create(CardCore(id="45d600a5", title="Product status source"))
+    store.create(
+        CardCore(
+            id="034b791d",
+            title=title,
+            description="original",
+            initial_labels=["parent-45d600a5"],
+        )
+    )
+    mirror_coord_describe(tmp_path, "034b791d", "worker", description="x")
+    ev = store._read_events("034b791d")[0]
     assert "title" not in ev
-    assert ev["description"] == "edited"
-    assert store.fold("d12").title == "Card"
+    assert ev["description"] == "x"
+    assert store.fold("034b791d").title == title
+    assert store.fold("034b791d").description == "x"
 
 
 def test_mirror_coord_describe_rejects_empty_title_without_event(tmp_path):
@@ -167,18 +188,50 @@ def test_mirror_coord_describe_rejects_empty_title_without_event(tmp_path):
     assert store.fold("d13").title == "Original title"
 
 
-def test_regression_event_does_not_clear_title_when_title_omitted(tmp_path):
+def test_regression_historical_empty_title_event_is_rejected_without_mutation(tmp_path):
     store = CardStore(tmp_path)
     store.create(CardCore(id="7eb035a6", title="Immutable active card", description="original"))
+    before = _files_on_disk(tmp_path)
 
-    # Regression shape from event 1b4b8feaf90f443c94fab2852b9eb852:
-    # description/status update without a title must preserve the title.
-    event = store.append_event(
-        "7eb035a6", "describe", "worker", description="updated description"
-    )
-    assert event["event_id"] != "1b4b8feaf90f443c94fab2852b9eb852"
-    assert "title" not in event
+    # Exact payload shape from historical event 1b4b8feaf90f443c94fab2852b9eb852.
+    try:
+        store.append_event("7eb035a6", "describe", "mcp", title="")
+    except DescribeTitleError as exc:
+        assert "non-empty title" in str(exc)
+    else:
+        raise AssertionError("historical empty-title event unexpectedly accepted")
+
+    assert _files_on_disk(tmp_path) == before
+    assert store._read_events("7eb035a6") == []
     assert store.fold("7eb035a6").title == "Immutable active card"
+
+
+def test_regression_live_overlay_empty_title_is_rejected_without_mutation(tmp_path):
+    store = CardStore(tmp_path)
+    title = (
+        "[SKLEGAL-QUALITY-R1D][S] "
+        "Make failed attempts evidence instead of accidental gates"
+    )
+    store.create(CardCore(id="6daf24f5", title=title, description="original"))
+    before = _files_on_disk(tmp_path)
+
+    event = CardEvent(
+        card_id="6daf24f5",
+        action="describe",
+        writer="chiap03",
+        ts="2026-09-08T04:39:58.414459+00:00",
+        title="",
+    )
+    try:
+        CardEventLog(tmp_path).append(event)
+    except DescribeTitleError as exc:
+        assert "non-empty title" in str(exc)
+    else:
+        raise AssertionError("live overlay empty-title event unexpectedly accepted")
+
+    assert _files_on_disk(tmp_path) == before
+    assert store._read_events("6daf24f5") == []
+    assert store.fold("6daf24f5").title == title
 
 
 def test_describe_does_not_disturb_other_folded_state(tmp_path):

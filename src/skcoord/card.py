@@ -261,7 +261,12 @@ class CardEventLog:
 
     def append(self, event: CardEvent) -> None:
         """Append one overlay event to this host's log."""
-        from .card_store import CardStore
+        from .card_store import CardStore, DescribeTitleError
+
+        if event.action == "describe" and event.title is not None and not event.title.strip():
+            raise DescribeTitleError(
+                "ordinary describe requires a non-empty title; explicit title clearing is unavailable"
+            )
 
         store = None
         if event.action in {"describe", "link"} or (
