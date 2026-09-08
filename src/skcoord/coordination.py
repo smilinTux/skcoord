@@ -877,6 +877,7 @@ class Board:
         """Create a task whose authoritative first fold is owned by ``agent_name``."""
         from .card_store import (
             CardStore,
+            current_dependency_kind,
             card_store_write_enabled,
             mirror_coord_create_claimed,
         )
@@ -892,8 +893,8 @@ class Board:
                 incomplete = [
                     dependency
                     for dependency in task.dependencies
-                    if dependency not in views
-                    or views[dependency].status != TaskStatus.DONE
+                    if current_dependency_kind(self.home, task.id, dependency) == "gate"
+                    and (dependency not in views or views[dependency].status != TaskStatus.DONE)
                 ]
                 if incomplete:
                     raise ValueError(
@@ -1981,6 +1982,7 @@ class Board:
                 f"{target.claimed_by or 'unknown owner'}"
             )
         if target.task.dependencies:
+            from .card_store import current_dependency_kind
             # Dependency statuses are looked up across archived tasks too, so a
             # dependency that was completed and later archived still counts as
             # done. An unknown dependency ID (no card anywhere) is treated as
@@ -1990,7 +1992,8 @@ class Board:
             incomplete = [
                 dep_id
                 for dep_id in target.task.dependencies
-                if dep_id not in dep_views or dep_views[dep_id].status != TaskStatus.DONE
+                if current_dependency_kind(self.home, task_id, dep_id) == "gate"
+                and (dep_id not in dep_views or dep_views[dep_id].status != TaskStatus.DONE)
             ]
             if incomplete:
                 raise ValueError(
@@ -2018,6 +2021,7 @@ class Board:
         """
         from .card_store import (
             CardStore,
+            current_dependency_kind,
             card_mutation_lock,
             card_store_write_enabled,
             validate_card_lock_identifier,

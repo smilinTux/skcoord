@@ -276,6 +276,10 @@ class CardCore(BaseModel):
     created_at: str = Field(default_factory=_now_iso)
     acceptance_criteria: list[str] = Field(default_factory=list)
     dependencies: list[str] = Field(default_factory=list)
+    # Dependency semantics are explicit: ``gate`` blocks dispatch, while
+    # ``provenance`` records a failed/voided attempt without blocking a
+    # successor. Birth dependencies are gates for backwards compatibility.
+    dependency_kinds: dict[str, str] = Field(default_factory=dict)
     initial_priority: str = "medium"
     initial_swimlane: str = "feature"
     initial_labels: list[str] = Field(default_factory=list)
@@ -949,6 +953,11 @@ class CardStore:
             labels=list(core.get("initial_labels", [])),
             acceptance_criteria=list(core.get("acceptance_criteria", []) or []),
             dependencies=list(core.get("dependencies", [])),
+            dependency_kinds={
+                str(key): value
+                for key, value in dict(core.get("dependency_kinds", {})).items()
+                if value in {"gate", "provenance"}
+            },
             meta=dict(core.get("meta", {})),
             created_at=core.get("created_at", ""),
             source="cards",
@@ -1118,12 +1127,18 @@ class CardStore:
                 card.acceptance_criteria = list(criteria)
             elif action == "add_dependency" and isinstance(e.get("dependency"), str):
                 dependency = e["dependency"]
+                kind = e.get("dependency_kind", "gate")
+                if kind not in {"gate", "provenance"}:
+                    raise ValueError("dependency_kind must be gate or provenance")
                 if dependency and dependency not in card.dependencies:
                     card.dependencies.append(dependency)
+                if dependency:
+                    card.dependency_kinds[dependency] = kind
             elif action == "remove_dependency" and isinstance(e.get("dependency"), str):
                 dependency = e["dependency"]
                 if dependency in card.dependencies:
                     card.dependencies.remove(dependency)
+                card.dependency_kinds.pop(dependency, None)
             elif action == "note" and e.get("text"):
                 card.meta.setdefault("comments", []).append(
                     {"ts": e.get("ts"), "writer": e.get("writer"), "text": e["text"]}
@@ -1304,6 +1319,7 @@ def import_from_legacy(home: Path, dry_run: bool = False) -> dict:
                 created_at=c.created_at or _now_iso(),
                 acceptance_criteria=list(c.acceptance_criteria),
                 dependencies=list(c.dependencies),
+                dependency_kinds=dict(getattr(c, "dependency_kinds", {}) or {}),
                 initial_priority=c.priority,
                 initial_swimlane=c.swimlane,
                 initial_labels=list(c.labels),
@@ -1560,6 +1576,14 @@ def _card_exists(home: Path, card_id: str) -> bool:
     return any(task.id == card_id for task in Board(home).load_tasks(include_archived=True))
 
 
+def current_dependency_kind(home: Path, card_id: str, dependency_id: str) -> str:
+    """Return explicit dependency semantics, defaulting legacy edges to gates."""
+    card = CardStore(home).fold(card_id)
+    if card is not None:
+        return card.dependency_kinds.get(dependency_id, "gate")
+    return "gate"
+
+
 def current_dependencies(
     home: Path, card_id: str, birth_dependencies: Optional[list[str]] = None
 ) -> list[str]:
@@ -1624,6 +1648,7 @@ def amend_dependency(
     action: str,
     agent: str = "",
     reason: str = "",
+    dependency_kind: str = "gate",
 ) -> bool:
     """Append one idempotent dependency amendment to a known card.
 
@@ -1651,6 +1676,8 @@ def amend_dependency(
     home = Path(home).expanduser()
     if action not in {"add_dependency", "remove_dependency"}:
         raise ValueError("action must be add_dependency or remove_dependency")
+    if dependency_kind not in {"gate", "provenance"}:
+        raise ValueError("dependency_kind must be gate or provenance")
     if not card_id or not dependency_id:
         raise ValueError("card and dependency identifiers are required")
     if card_id == dependency_id:
@@ -1669,12 +1696,23 @@ def amend_dependency(
             action == "remove_dependency" and not present
         ):
             return False
+        if action == "add_dependency" and dependency_kind == "gate":
+            # A gate cycle is never dispatchable and must be rejected at
+            # authoring, rather than becoming a permanent accidental block.
+            seen = {card_id}
+            pending = [dependency_id]
+            while pending:
+                current = pending.pop()
+                if current in seen:
+                    raise ValueError("dependency cycle detected")
+                seen.add(current)
+                pending.extend(
+                    d for d in current_dependencies(home, current)
+                    if current_dependency_kind(home, current, d) == "gate"
+                )
         CardStore(home).append_event(
-            card_id,
-            action,
-            agent or "coord",
-            dependency=dependency_id,
-            reason=reason.strip(),
+            card_id, action, agent or "coord", dependency=dependency_id,
+            dependency_kind=dependency_kind, reason=reason.strip(),
         )
         return True
 
@@ -1864,10 +1902,13 @@ def card_mutation_lock(
 
 
 def add_dependency(
-    home: Path, card_id: str, dependency_id: str, agent: str = "", reason: str = ""
+    home: Path, card_id: str, dependency_id: str, agent: str = "", reason: str = "",
+    dependency_kind: str = "gate",
 ) -> bool:
-    """Append an idempotent dependency addition for a coordination card."""
-    return amend_dependency(home, card_id, dependency_id, "add_dependency", agent, reason)
+    """Append an idempotent gate or non-blocking provenance edge."""
+    return amend_dependency(
+        home, card_id, dependency_id, "add_dependency", agent, reason, dependency_kind
+    )
 
 
 def remove_dependency(
@@ -1893,6 +1934,7 @@ def mirror_coord_create(home: Path, task) -> None:
             created_at=task.created_at,
             acceptance_criteria=list(getattr(task, "acceptance_criteria", []) or []),
             dependencies=list(task.dependencies),
+            dependency_kinds=dict(getattr(task, "dependency_kinds", {}) or {}),
             initial_priority=task.priority.value,
             initial_swimlane=_swimlane_for_tags(task.tags),
             initial_labels=list(task.tags),

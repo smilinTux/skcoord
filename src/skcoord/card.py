@@ -66,6 +66,9 @@ class Card(BaseModel):
     labels: list[str] = Field(default_factory=list)
     acceptance_criteria: list[str] = Field(default_factory=list)
     dependencies: list[str] = Field(default_factory=list)
+    # A gate blocks dispatch; provenance preserves failed attempts without
+    # blocking a replacement successor. Legacy edges remain gates.
+    dependency_kinds: dict[str, str] = Field(default_factory=dict)
     links: dict = Field(default_factory=dict)
     meta: dict = Field(default_factory=dict)
     archived: bool = False
