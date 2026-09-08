@@ -22,7 +22,12 @@ from __future__ import annotations
 import json
 
 from skcoord.card import CardEvent, CardEventLog, Column, KanbanBoard, fold_overlay
-from skcoord.card_store import CardCore, CardStore, mirror_coord_describe
+from skcoord.card_store import (
+    CardCore,
+    CardStore,
+    DescribeTitleError,
+    mirror_coord_describe,
+)
 from skcoord.coordination import Board, Task
 
 
@@ -144,6 +149,36 @@ def test_mirror_coord_describe_omits_untouched_fields(tmp_path):
     assert "title" not in ev
     assert ev["description"] == "edited"
     assert store.fold("d12").title == "Card"
+
+
+def test_mirror_coord_describe_rejects_empty_title_without_event(tmp_path):
+    store = CardStore(tmp_path)
+    store.create(CardCore(id="d13", title="Original title", description="original"))
+
+    for title in ("", "   ", "\t"):
+        try:
+            mirror_coord_describe(tmp_path, "d13", "worker", title=title)
+        except DescribeTitleError as exc:
+            assert "non-empty title" in str(exc)
+        else:
+            raise AssertionError("empty title unexpectedly accepted")
+
+    assert store._read_events("d13") == []
+    assert store.fold("d13").title == "Original title"
+
+
+def test_regression_event_does_not_clear_title_when_title_omitted(tmp_path):
+    store = CardStore(tmp_path)
+    store.create(CardCore(id="7eb035a6", title="Immutable active card", description="original"))
+
+    # Regression shape from event 1b4b8feaf90f443c94fab2852b9eb852:
+    # description/status update without a title must preserve the title.
+    event = store.append_event(
+        "7eb035a6", "describe", "worker", description="updated description"
+    )
+    assert event["event_id"] != "1b4b8feaf90f443c94fab2852b9eb852"
+    assert "title" not in event
+    assert store.fold("7eb035a6").title == "Immutable active card"
 
 
 def test_describe_does_not_disturb_other_folded_state(tmp_path):

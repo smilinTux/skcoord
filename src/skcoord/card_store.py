@@ -384,6 +384,10 @@ def load_legacy_mutations(home: Path) -> dict[str, list[dict]]:
     return out
 
 
+class DescribeTitleError(ValueError):
+    """Raised when an ordinary describe attempts to clear a card title."""
+
+
 class CardStore:
     """Event-sourced store for unified work-item cards.
 
@@ -716,6 +720,12 @@ class CardStore:
         mutation protocol.
         """
         validate_card_lock_identifier(card_id)
+        if action == "describe" and "title" in payload:
+            title = payload["title"]
+            if not isinstance(title, str) or not title.strip():
+                raise DescribeTitleError(
+                    "ordinary describe requires a non-empty title; explicit title clearing is unavailable"
+                )
         if _card_lock_key(self.home, card_id) not in _HELD_CARD_LOCKS.get():
             with card_mutation_lock(self.home, card_id):
                 return self.append_event(card_id, action, agent, **payload)
@@ -2079,6 +2089,10 @@ def mirror_coord_describe(
     """
     payload: dict[str, str] = {}
     if title is not None:
+        if not isinstance(title, str) or not title.strip():
+            raise DescribeTitleError(
+                "ordinary describe requires a non-empty title; explicit title clearing is unavailable"
+            )
         payload["title"] = title
     if description is not None:
         payload["description"] = description
