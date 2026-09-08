@@ -949,6 +949,7 @@ class Board:
                     kw["task_id"],
                     kw["agent"],
                     transition_id=kw.get("transition_id", ""),
+                    claim_revision=kw.get("claim_revision", ""),
                 )
             elif op == "archive":
                 card_store.mirror_coord_archive(self.home, kw["task_id"], kw["agent"])
@@ -2295,6 +2296,14 @@ class Board:
                     f"Task {task_id} has incomplete dependencies: {', '.join(incomplete)}"
                 )
             _, original = self._snapshot_agent_projection(canonical)
+            claim_revision = ""
+            try:
+                from .card_store import CardStore
+                folded = CardStore(self.home).fold(task_id)
+                if folded is not None and folded.owner == canonical:
+                    claim_revision = folded.meta.get("_claim_revision", "")
+            except Exception:
+                claim_revision = ""
             agent = self._complete_task(canonical, task_id)
             transitions = [(task_id, uuid.uuid4().hex)]
             try:
@@ -2303,6 +2312,7 @@ class Board:
                     task_id=task_id,
                     agent=canonical,
                     transition_id=transitions[0][1],
+                    claim_revision=claim_revision,
                 )
             except Exception as exc:
                 if self._store_transitions_are_applied(transitions, [(task_id, None, "done")]):
