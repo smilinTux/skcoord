@@ -12,6 +12,23 @@ def _core(card_id: str, title: str, *labels: str) -> CardCore:
     return CardCore(id=card_id, title=title, initial_labels=list(labels))
 
 
+def _pass_review(store: CardStore, card_id: str) -> None:
+    for key in (
+        "verdict",
+        "ci_check_docs",
+        "ci_check_gitleaks",
+        "ci_check_lint",
+        "ci_check_shim_imports",
+        "ci_check_python311",
+        "ci_check_python312",
+    ):
+        value = "PASS" if key == "verdict" else "SUCCESS"
+        store.append_event(
+            card_id, "link", "reviewer", link_key=key, link_value=value
+        )
+    store.append_event(card_id, "complete", "reviewer")
+
+
 def test_second_live_review_for_parent_is_refused_and_names_existing(tmp_path: Path) -> None:
     store = CardStore(tmp_path)
     store.create(_core("parent01", "Implementation"))
@@ -27,13 +44,13 @@ def test_terminal_review_allows_rereview_but_third_level_requires_human(tmp_path
     store = CardStore(tmp_path)
     store.create(_core("root0001", "Implementation"))
     store.create(_core("review01", "[REVIEW] First", "parent-root0001"))
-    store.append_event("review01", "complete", "reviewer")
+    _pass_review(store, "review01")
 
     assert (
         store.create(_core("review02", "[REVIEW] Re-review", "parent-review01"))
         == "review02"
     )
-    store.append_event("review02", "complete", "reviewer")
+    _pass_review(store, "review02")
 
     with pytest.raises(ValueError, match=r"root0001.*human escalation"):
         store.create(_core("review03", "[REREVIEW] Third", "parent-review02"))
@@ -119,9 +136,9 @@ def test_cli_and_mcp_paths_refuse_third_rereview_without_human_override(
     board = Board(cli_home)
     board.create_task(Task(id="cliroot1", title="Implementation"))
     board.create_task(Task(id="clirev01", title="[REVIEW] First", tags=["parent-cliroot1"]))
-    CardStore(cli_home).append_event("clirev01", "complete", "reviewer")
+    _pass_review(CardStore(cli_home), "clirev01")
     board.create_task(Task(id="clirev02", title="[REVIEW] Second", tags=["parent-clirev01"]))
-    CardStore(cli_home).append_event("clirev02", "complete", "reviewer")
+    _pass_review(CardStore(cli_home), "clirev02")
 
     third_cli = Task(id="clirev03", title="[REREVIEW] Third", tags=["parent-clirev02"])
     with pytest.raises(ValueError, match=r"cliroot1.*human escalation"):
@@ -135,9 +152,9 @@ def test_cli_and_mcp_paths_refuse_third_rereview_without_human_override(
     store = CardStore(mcp_home)
     store.create(_core("mcproot1", "Implementation"))
     store.create(_core("mcprev01", "[REVIEW] First", "parent-mcproot1"))
-    store.append_event("mcprev01", "complete", "reviewer")
+    _pass_review(store, "mcprev01")
     store.create(_core("mcprev02", "[REVIEW] Second", "parent-mcprev01"))
-    store.append_event("mcprev02", "complete", "reviewer")
+    _pass_review(store, "mcprev02")
 
     third_mcp = Task(id="mcprev03", title="[REREVIEW] Third", tags=["parent-mcprev02"])
     with pytest.raises(ValueError, match=r"mcproot1.*human escalation"):

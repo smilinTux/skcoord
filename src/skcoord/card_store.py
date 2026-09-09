@@ -720,6 +720,12 @@ class CardStore:
             with card_mutation_lock(self.home, card_id):
                 return self.append_event(card_id, action, agent, **payload)
         self._require_foldable_core(card_id)
+        target_column = payload.get("column")
+        target_value = getattr(target_column, "value", target_column)
+        if action == "complete" or (action == "move" and target_value == "done"):
+            from .review_completion import validate_governed_review_completion
+
+            validate_governed_review_completion(self.home, card_id)
         if action in {
             "move",
             "reopen",

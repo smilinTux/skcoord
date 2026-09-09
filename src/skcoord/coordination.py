@@ -2280,11 +2280,13 @@ class Board:
     def complete_task(self, agent_name: str, task_id: str) -> AgentFile:
         """Complete under locks, then mint Joules after those locks are released."""
         from .card_store import card_mutation_lock, validate_card_lock_identifier
+        from .review_completion import validate_governed_review_completion
 
         canonical = AgentFile.validate_agent_name(agent_name)
         validate_card_lock_identifier(task_id)
         should_mint = False
         with _board_mutation_lock(self.home), card_mutation_lock(self.home, task_id):
+            validate_governed_review_completion(self.home, task_id)
             self._assert_no_claim_conflict(task_id, canonical)
             for existing in self.load_agents():
                 if task_id in existing.completed_tasks:
