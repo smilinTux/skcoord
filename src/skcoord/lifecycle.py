@@ -666,6 +666,10 @@ def transition_task(
     validate_card_lock_identifier(task_id)
     target = Column(column)
     root = Path(home)
+    if target == Column.DONE:
+        from .review_completion import validate_governed_review_completion
+
+        validate_governed_review_completion(root, task_id)
     with (
         _board_mutation_lock(root),
         card_mutation_lock(root, task_id),

@@ -43,6 +43,11 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
 
 ### Fixed
 
+- Governed REVIEW and REREVIEW cards now pass one fail-closed completion gate
+  at Board, lifecycle, and direct CardStore mutation boundaries. Reaching done
+  requires canonical `PASS` plus the complete required CI set at exact
+  `SUCCESS`; ordinary cards retain their existing behavior. Card `be4e7d37`.
+
 - Atomic create-and-claim retries now require exact equality across every
   immutable card field before accepting an existing ID, including concurrent
   same-owner requests with different payloads. An exact replay also fails
