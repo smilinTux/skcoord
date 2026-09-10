@@ -456,6 +456,8 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
   inventory. Decision recorded in `adr/ADR-002-cmdb-canonical-store.md`.
 
 ### Fixed
+- Lifecycle reassessment now keeps completed, voided, and archived cards terminal
+  when a late claim event appears, preventing false dead worker claims.
 - **Ephemeral listening ports accreted as permanent CIs.** The port collector
   recorded every socket in LISTEN, including the random high ports that RPC,
   mDNS, tailscale and short-lived servers bind. The CMDB is append-only and the
