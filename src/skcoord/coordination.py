@@ -888,8 +888,7 @@ class Board:
         with _board_mutation_lock(self.home):
             if task.dependencies:
                 views = {
-                    view.task.id: view
-                    for view in self.get_task_views(include_archived=True)
+                    view.task.id: view for view in self.get_task_views(include_archived=True)
                 }
                 incomplete = [
                     dependency
@@ -1472,9 +1471,7 @@ class Board:
                         transition_id=transition_id,
                     )
                 except Exception:
-                    if not self._store_transitions_are_durable(
-                        [(task_id, transition_id)]
-                    ):
+                    if not self._store_transitions_are_durable([(task_id, transition_id)]):
                         raise
                 completed_events.append((action, tag, transition_id))
         except Exception as mirror_error:
@@ -2369,8 +2366,7 @@ class Board:
         return [
             dependency_id
             for dependency_id in target.task.dependencies
-            if dependency_id not in by_id
-            or by_id[dependency_id].status != TaskStatus.DONE
+            if dependency_id not in by_id or by_id[dependency_id].status != TaskStatus.DONE
         ]
 
     def complete_task(
@@ -2408,9 +2404,7 @@ class Board:
                     transition_id=transitions[0][1],
                 )
             except Exception as exc:
-                if self._store_transitions_are_applied(
-                    transitions, [(task_id, None, "done")]
-                ):
+                if self._store_transitions_are_applied(transitions, [(task_id, None, "done")]):
                     should_mint = True
                 else:
                     self._recover_store_failure(

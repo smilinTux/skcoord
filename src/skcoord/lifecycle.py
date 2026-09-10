@@ -672,9 +672,7 @@ def transition_task(
         card_mutation_lock(root, task_id),
         _lifecycle_lock(root, exclusive=True),
     ):
-        cards = {
-            card.id: card for card in KanbanBoard(root).cards(include_archived=True)
-        }
+        cards = {card.id: card for card in KanbanBoard(root).cards(include_archived=True)}
         current = cards.get(task_id)
         if current is None:
             raise ValueError(f"Task {task_id} not found")
