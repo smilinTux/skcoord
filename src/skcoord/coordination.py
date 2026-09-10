@@ -863,15 +863,16 @@ class Board:
             Path to the written file.
         """
         self.ensure_dirs()
-        slug = _slugify_filename(task.title)[:40]
-        # Reason: filename includes id + slug for human readability
-        filename = f"{task.id}-{slug}.json"
-        path = self.tasks_dir / filename
-        # CardStore is the creation policy choke point. Govern before writing the
-        # legacy projection so a refused CLI or MCP call cannot leave an orphan.
-        self._mirror_card_store("create", task=task)
-        atomic_write_text(path, json.dumps(task.model_dump(), indent=2) + "\n")
-        return path
+        with _board_mutation_lock(self.home):
+            slug = _slugify_filename(task.title)[:40]
+            # Reason: filename includes id + slug for human readability
+            filename = f"{task.id}-{slug}.json"
+            path = self.tasks_dir / filename
+            # CardStore is the creation policy choke point. Govern before writing the
+            # legacy projection so a refused CLI or MCP call cannot leave an orphan.
+            self._mirror_card_store("create", task=task)
+            atomic_write_text(path, json.dumps(task.model_dump(), indent=2) + "\n")
+            return path
 
     def create_claimed_task(self, task: Task, agent_name: str) -> tuple[Path, str]:
         """Create a task whose authoritative first fold is owned by ``agent_name``."""
@@ -887,7 +888,8 @@ class Board:
         with _board_mutation_lock(self.home):
             if task.dependencies:
                 views = {
-                    view.task.id: view for view in self.get_task_views(include_archived=True)
+                    view.task.id: view
+                    for view in self.get_task_views(include_archived=True)
                 }
                 incomplete = [
                     dependency
@@ -1375,6 +1377,29 @@ class Board:
         the atomic raw-dict helper.
         """
 
+        from .card_store import card_mutation_lock, validate_card_lock_identifier
+
+        validate_card_lock_identifier(task_id)
+        with _board_mutation_lock(self.home), card_mutation_lock(self.home, task_id):
+            return self._update_task_unlocked(
+                task_id,
+                description=description,
+                acceptance_criteria=acceptance_criteria,
+                add_tags=add_tags,
+                remove_tags=remove_tags,
+                run_id=run_id,
+            )
+
+    def _update_task_unlocked(
+        self,
+        task_id: str,
+        description: str | None = None,
+        acceptance_criteria: list[str] | None = None,
+        add_tags: list[str] | None = None,
+        remove_tags: list[str] | None = None,
+        run_id: str | None = None,
+    ) -> Path:
+        """Apply an update while the caller holds board and card locks."""
         tag_events: list[tuple[str, str, str]] = []
 
         def _mutate(d: dict) -> None:
@@ -1447,7 +1472,9 @@ class Board:
                         transition_id=transition_id,
                     )
                 except Exception:
-                    if not self._store_transitions_are_durable([(task_id, transition_id)]):
+                    if not self._store_transitions_are_durable(
+                        [(task_id, transition_id)]
+                    ):
                         raise
                 completed_events.append((action, tag, transition_id))
         except Exception as mirror_error:
@@ -2342,10 +2369,16 @@ class Board:
         return [
             dependency_id
             for dependency_id in target.task.dependencies
-            if dependency_id not in by_id or by_id[dependency_id].status != TaskStatus.DONE
+            if dependency_id not in by_id
+            or by_id[dependency_id].status != TaskStatus.DONE
         ]
 
-    def complete_task(self, agent_name: str, task_id: str) -> AgentFile:
+    def complete_task(
+        self,
+        agent_name: str,
+        task_id: str,
+        precondition: Callable[[], None] | None = None,
+    ) -> AgentFile:
         """Complete under locks, then mint Joules after those locks are released."""
         from .card_store import card_mutation_lock, validate_card_lock_identifier
 
@@ -2362,6 +2395,8 @@ class Board:
                 raise ValueError(
                     f"Task {task_id} has incomplete dependencies: {', '.join(incomplete)}"
                 )
+            if precondition is not None:
+                precondition()
             _, original = self._snapshot_agent_projection(canonical)
             agent = self._complete_task(canonical, task_id)
             transitions = [(task_id, uuid.uuid4().hex)]
@@ -2373,7 +2408,9 @@ class Board:
                     transition_id=transitions[0][1],
                 )
             except Exception as exc:
-                if self._store_transitions_are_applied(transitions, [(task_id, None, "done")]):
+                if self._store_transitions_are_applied(
+                    transitions, [(task_id, None, "done")]
+                ):
                     should_mint = True
                 else:
                     self._recover_store_failure(

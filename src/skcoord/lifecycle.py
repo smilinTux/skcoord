@@ -19,7 +19,7 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterator
+from typing import Callable, Iterator
 
 from .atomic_io import atomic_write_text
 from .card import CardEvent, CardEventLog, Column, KanbanBoard
@@ -656,6 +656,7 @@ def transition_task(
     column: Column | str,
     actor: str,
     order: int | None = None,
+    precondition: Callable[[], None] | None = None,
 ) -> LifecycleRepairReceipt:
     """Move one card and reconcile its agent projection before returning.
 
@@ -671,7 +672,9 @@ def transition_task(
         card_mutation_lock(root, task_id),
         _lifecycle_lock(root, exclusive=True),
     ):
-        cards = {card.id: card for card in KanbanBoard(root).cards(include_archived=True)}
+        cards = {
+            card.id: card for card in KanbanBoard(root).cards(include_archived=True)
+        }
         current = cards.get(task_id)
         if current is None:
             raise ValueError(f"Task {task_id} not found")
@@ -685,6 +688,8 @@ def transition_task(
             )
         before = _audit_lifecycle_unlocked(root, task_ids={task_id})
         _assert_no_active_conflicts(Board(root), before, stale_after_seconds=3600)
+        if precondition is not None:
+            precondition()
 
         def append_move(column_value: str, position: int | None) -> None:
             CardEventLog(root).append(
