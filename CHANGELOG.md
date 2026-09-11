@@ -43,6 +43,10 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
 
 ### Fixed
 
+- Parity snapshot inventory and copy now run under the same wall-clock alarm
+  as projection, so blocking snapshot construction fails closed at the
+  configured deadline. Card 3cbe5bbd.
+
 - CardStore parity checks now capture consistent legacy and card snapshots,
   reject concurrent mutation, and fail closed within a bounded timeout instead
   of hanging on a large shared estate. Card 150d28ab.
