@@ -27,6 +27,8 @@ import shutil
 import signal
 import socket
 import stat
+import subprocess
+import sys
 import tempfile
 import time
 import uuid
@@ -2119,8 +2121,24 @@ class ParityTimeout(TimeoutError):
     """Compatibility exception for code that imported the old probe error."""
 
 
-class _SnapshotTimeout(ParityTimeout):
-    pass
+class _SnapshotTimeout(BaseException):
+    """Deadline signal that ordinary data-error handlers cannot swallow."""
+
+
+def _defer_snapshot_cleanup(snapshot: Path) -> None:
+    """Remove a timed-out partial snapshot without delaying the caller."""
+    program = "import shutil,sys; shutil.rmtree(sys.argv[1], ignore_errors=True)"
+    try:
+        subprocess.Popen(
+            [sys.executable, "-c", program, str(snapshot)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+            start_new_session=True,
+        )
+    except OSError:
+        logger.warning("could not start deferred parity snapshot cleanup for %s", snapshot)
 
 
 class _SnapshotUnstable(ValueError):
@@ -2310,8 +2328,17 @@ def _parity_snapshot(
             "files": len(entries),
         }
         return snapshot, manifest
+    except _SnapshotTimeout:
+        _defer_snapshot_cleanup(snapshot)
+        raise
     except Exception:
-        shutil.rmtree(snapshot, ignore_errors=True)
+        try:
+            shutil.rmtree(snapshot)
+        except _SnapshotTimeout:
+            _defer_snapshot_cleanup(snapshot)
+            raise
+        except OSError:
+            pass
         raise
 
 
@@ -2432,7 +2459,7 @@ def parity_check(
             return _parity_failure(
                 "snapshot_timeout", timeout, "deadline exceeded during CardStore read", open_drift_threshold
             )
-    except ParityTimeout as exc:
+    except (ParityTimeout, _SnapshotTimeout) as exc:
         return _parity_failure(
             "snapshot_timeout", timeout, str(exc), open_drift_threshold
         )
@@ -2441,7 +2468,11 @@ def parity_check(
             "snapshot_unstable", timeout, str(exc), open_drift_threshold
         )
     finally:
-        shutil.rmtree(snapshot_root, ignore_errors=True)
+        if snapshot_root is not None:
+            if deadline is not None and time.monotonic() >= deadline:
+                _defer_snapshot_cleanup(snapshot_root)
+            else:
+                shutil.rmtree(snapshot_root, ignore_errors=True)
 
     # Coarse lifecycle bucket: legacy coord can only derive todo/active/done from
     # its claim files, so kanban-native column moves (ready<->doing<->review) made
