@@ -24,6 +24,7 @@ import os
 import re
 import secrets
 import shutil
+import signal
 import socket
 import stat
 import tempfile
@@ -214,7 +215,9 @@ def _open_home_ancestor_lock(home: Path, card_id: str, *, create: bool = True):
             or not stat.S_ISREG(existing.st_mode)
             or existing.st_nlink != 1
         ):
-            raise ValueError("CardStore home ancestor lock must be a regular single-link file")
+            raise ValueError(
+                "CardStore home ancestor lock must be a regular single-link file"
+            )
         open_flags = os.O_RDWR | no_follow
         if create:
             open_flags |= os.O_CREAT
@@ -231,7 +234,9 @@ def _open_home_ancestor_lock(home: Path, card_id: str, *, create: bool = True):
     opened = os.fstat(descriptor)
     if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
         os.close(descriptor)
-        raise ValueError("CardStore home ancestor lock must be a regular single-link file")
+        raise ValueError(
+            "CardStore home ancestor lock must be a regular single-link file"
+        )
     return os.fdopen(descriptor, "a+", encoding="utf-8")
 
 
@@ -450,7 +455,9 @@ class CardStore:
         except OSError as exc:
             raise ValueError("CardStore home is unsafe") from exc
         try:
-            return self._open_or_create_directory(home_fd, "cards", "CardStore cards directory")
+            return self._open_or_create_directory(
+                home_fd, "cards", "CardStore cards directory"
+            )
         finally:
             os.close(home_fd)
 
@@ -459,7 +466,9 @@ class CardStore:
         validate_card_lock_identifier(card_id)
         cards_fd = self._open_cards_directory()
         try:
-            return self._open_or_create_directory(cards_fd, card_id, "CardStore card directory")
+            return self._open_or_create_directory(
+                cards_fd, card_id, "CardStore card directory"
+            )
         finally:
             os.close(cards_fd)
 
@@ -505,7 +514,9 @@ class CardStore:
         except OSError as exc:
             raise ValueError("CardStore home is unsafe") from exc
         try:
-            return self._open_existing_directory(home_fd, "cards", "CardStore cards directory")
+            return self._open_existing_directory(
+                home_fd, "cards", "CardStore cards directory"
+            )
         finally:
             os.close(home_fd)
 
@@ -516,7 +527,9 @@ class CardStore:
         if cards_fd is None:
             return None
         try:
-            return self._open_existing_directory(cards_fd, card_id, "CardStore card directory")
+            return self._open_existing_directory(
+                cards_fd, card_id, "CardStore card directory"
+            )
         finally:
             os.close(cards_fd)
 
@@ -599,7 +612,9 @@ class CardStore:
         """Use structural CardStore state only, never evidence annotations."""
         if card.status == Column.DONE or card.archived:
             return True
-        return any(event.get("action") == "void" for event in self._read_events(card.id))
+        return any(
+            event.get("action") == "void" for event in self._read_events(card.id)
+        )
 
     def _govern_create(self, core: CardCore) -> None:
         """Fail closed on duplicate or over-depth review and repair creation."""
@@ -614,7 +629,9 @@ class CardStore:
         cards = self.list_cards(include_archived=True)
         cards_by_id = {card.id: card for card in cards}
         if parent_id not in cards_by_id:
-            raise ValueError(f"Governed card {core.id} names unknown parent {parent_id}")
+            raise ValueError(
+                f"Governed card {core.id} names unknown parent {parent_id}"
+            )
 
         for existing in cards:
             existing_core = self._load_core(existing.id) or {}
@@ -639,11 +656,15 @@ class CardStore:
         visited = {core.id}
         while True:
             if root_id in visited:
-                raise ValueError(f"Review ancestry for {core.id} contains a cycle at {root_id}")
+                raise ValueError(
+                    f"Review ancestry for {core.id} contains a cycle at {root_id}"
+                )
             visited.add(root_id)
             ancestor = cards_by_id.get(root_id)
             if ancestor is None:
-                raise ValueError(f"Review ancestry for {core.id} names unknown card {root_id}")
+                raise ValueError(
+                    f"Review ancestry for {core.id} names unknown card {root_id}"
+                )
             ancestor_core = self._load_core(root_id) or {}
             if self._creation_class(ancestor_core) != "review":
                 break
@@ -667,7 +688,9 @@ class CardStore:
         validate_card_lock_identifier(core.id)
         if self._load_core(core.id) is not None:
             return core.id
-        with _open_lockfile(self.home, "card-creation-governor.lock", "card creation") as lock:
+        with _open_lockfile(
+            self.home, "card-creation-governor.lock", "card creation"
+        ) as lock:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
             try:
                 if self._load_core(core.id) is not None:
@@ -680,12 +703,17 @@ class CardStore:
                     try:
                         fd = os.open(
                             "core.json",
-                            os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0),
+                            os.O_CREAT
+                            | os.O_EXCL
+                            | os.O_WRONLY
+                            | getattr(os, "O_NOFOLLOW", 0),
                             0o644,
                             dir_fd=rec_fd,
                         )
                     except FileExistsError:
-                        existing = os.stat("core.json", dir_fd=rec_fd, follow_symlinks=False)
+                        existing = os.stat(
+                            "core.json", dir_fd=rec_fd, follow_symlinks=False
+                        )
                         if (
                             stat.S_ISLNK(existing.st_mode)
                             or not stat.S_ISREG(existing.st_mode)
@@ -707,7 +735,9 @@ class CardStore:
         self._ensure_card_lock_anchor(core.id)
         return core.id
 
-    def append_event(self, card_id: str, action: str, agent: str, **payload: Any) -> dict:
+    def append_event(
+        self, card_id: str, action: str, agent: str, **payload: Any
+    ) -> dict:
         """Append one event line under the common same-card lock protocol.
 
         ``transition_id`` is an optional deterministic caller token. Repeating
@@ -730,8 +760,12 @@ class CardStore:
             "claim",
             "release_claim",
             "complete",
-        } and any(event.get("action") == "void" for event in self._read_events(card_id)):
-            raise ValueError(f"CardStore card {card_id} is voided; void is a terminal decision")
+        } and any(
+            event.get("action") == "void" for event in self._read_events(card_id)
+        ):
+            raise ValueError(
+                f"CardStore card {card_id} is voided; void is a terminal decision"
+            )
         writer_filename = f"{self._writer_id(agent)}.jsonl"
         rec_fd = self._open_card_directory(card_id)
         try:
@@ -743,7 +777,9 @@ class CardStore:
         descriptor = -1
         try:
             try:
-                existing = os.stat(writer_filename, dir_fd=events_fd, follow_symlinks=False)
+                existing = os.stat(
+                    writer_filename, dir_fd=events_fd, follow_symlinks=False
+                )
             except FileNotFoundError:
                 existing = None
             if existing is not None and (
@@ -782,7 +818,9 @@ class CardStore:
                     seq = len(lines)
                     prev_hash = ""
                     if lines:
-                        prev_hash = hashlib.sha256(lines[-1].strip().encode("utf-8")).hexdigest()
+                        prev_hash = hashlib.sha256(
+                            lines[-1].strip().encode("utf-8")
+                        ).hexdigest()
                     event = {
                         "event_id": uuid.uuid4().hex,
                         "ts": _now_iso(),
@@ -814,7 +852,8 @@ class CardStore:
     def has_transition(self, card_id: str, transition_id: str) -> bool:
         """Return whether an exact intended CardStore event is durable."""
         return any(
-            event.get("transition_id") == transition_id for event in self._read_events(card_id)
+            event.get("transition_id") == transition_id
+            for event in self._read_events(card_id)
         )
 
     # ── reads ─────────────────────────────────────────────────────────────
@@ -825,7 +864,9 @@ class CardStore:
             return None
         try:
             try:
-                raw = self._read_regular_file_bytes(card_fd, "core.json", "CardStore core")
+                raw = self._read_regular_file_bytes(
+                    card_fd, "core.json", "CardStore core"
+                )
             except ValueError:
                 raise
             except Exception as exc:  # noqa: BLE001
@@ -864,7 +905,9 @@ class CardStore:
                 if not name.endswith(".jsonl"):
                     continue
                 try:
-                    raw = self._read_regular_file_bytes(events_fd, name, "CardStore event source")
+                    raw = self._read_regular_file_bytes(
+                        events_fd, name, "CardStore event source"
+                    )
                 except ValueError:
                     raise
                 except Exception as exc:  # noqa: BLE001
@@ -876,7 +919,9 @@ class CardStore:
                 try:
                     lines = raw.decode("utf-8").splitlines()
                 except UnicodeError as exc:
-                    raise ValueError(f"CardStore event source for {card_id} is malformed") from exc
+                    raise ValueError(
+                        f"CardStore event source for {card_id} is malformed"
+                    ) from exc
                 prev_line_hash = ""
                 for line in lines:
                     line = line.strip()
@@ -958,14 +1003,18 @@ class CardStore:
         initial_revision = core.get("initial_claim_revision")
         if card.owner is not None:
             if not isinstance(initial_revision, str) or not initial_revision:
-                raise ValueError(f"CardStore card {card_id} has an owner without a claim revision")
+                raise ValueError(
+                    f"CardStore card {card_id} has an owner without a claim revision"
+                )
             card.status = _CLAIM_COLUMN
             card.meta["_claim_revision"] = initial_revision
         events = self._read_events(card_id)
         legacy_events = self._legacy_events(card_id)
         if legacy_events:
             events = events + legacy_events
-            events.sort(key=lambda e: (e.get("ts", ""), e.get("writer", ""), e.get("seq", 0)))
+            events.sort(
+                key=lambda e: (e.get("ts", ""), e.get("writer", ""), e.get("seq", 0))
+            )
         voided = False
         void_terminal_actions = {
             "move",
@@ -1030,7 +1079,8 @@ class CardStore:
                     and isinstance(actual_revision, str)
                     and bool(actual_revision)
                     and card.owner == matching_conflicts[0].get("existing_owner")
-                    and actual_revision == matching_conflicts[0].get("existing_claim_revision")
+                    and actual_revision
+                    == matching_conflicts[0].get("existing_claim_revision")
                 )
                 if releases_current:
                     card.owner = None
@@ -1038,7 +1088,9 @@ class CardStore:
                     card.meta.pop("_claim_revision", None)
                 elif releases_conflict:
                     remaining = [
-                        conflict for conflict in conflicts if conflict is not matching_conflicts[0]
+                        conflict
+                        for conflict in conflicts
+                        if conflict is not matching_conflicts[0]
                     ]
                     if remaining:
                         card.meta["claim_conflicts"] = remaining
@@ -1058,7 +1110,9 @@ class CardStore:
             elif action == "claim":
                 owner = e.get("owner")
                 revision = e.get("claim_revision") or e.get("event_id")
-                was_unowned_backlog = card.owner is None and card.status == Column.BACKLOG
+                was_unowned_backlog = (
+                    card.owner is None and card.status == Column.BACKLOG
+                )
                 if (
                     isinstance(owner, str)
                     and owner
@@ -1095,7 +1149,11 @@ class CardStore:
                 card.priority = e["priority"]
             elif action == "swimlane" and e.get("swimlane"):
                 card.swimlane = e["swimlane"]
-            elif action == "add_label" and e.get("label") and e["label"] not in card.labels:
+            elif (
+                action == "add_label"
+                and e.get("label")
+                and e["label"] not in card.labels
+            ):
                 card.labels.append(e["label"])
             elif action == "remove_label" and e.get("label") in card.labels:
                 card.labels.remove(e["label"])
@@ -1114,9 +1172,14 @@ class CardStore:
                 if (
                     not isinstance(criteria, list)
                     or not criteria
-                    or any(not isinstance(value, str) or not value.strip() for value in criteria)
+                    or any(
+                        not isinstance(value, str) or not value.strip()
+                        for value in criteria
+                    )
                 ):
-                    raise ValueError(f"CardStore criteria amendment for {card_id} is malformed")
+                    raise ValueError(
+                        f"CardStore criteria amendment for {card_id} is malformed"
+                    )
                 card.acceptance_criteria = list(criteria)
             elif action == "add_dependency" and isinstance(e.get("dependency"), str):
                 dependency = e["dependency"]
@@ -1199,12 +1262,16 @@ class CardStore:
                 if not stat.S_ISDIR(entry.st_mode):
                     continue
                 validate_card_lock_identifier(name)
-                card_fd = self._open_existing_directory(cards_fd, name, "CardStore card directory")
+                card_fd = self._open_existing_directory(
+                    cards_fd, name, "CardStore card directory"
+                )
                 if card_fd is None:
                     continue
                 try:
                     if (
-                        self._read_regular_file_bytes(card_fd, "core.json", "CardStore core")
+                        self._read_regular_file_bytes(
+                            card_fd, "core.json", "CardStore core"
+                        )
                         is not None
                     ):
                         card_ids.append(name)
@@ -1416,7 +1483,9 @@ def _task_view_cursor_position(
     ):
         raise ValueError("task-view cursor is malformed")
     try:
-        raw = base64.b64decode(cursor + "=" * (-len(cursor) % 4), altchars=b"-_", validate=True)
+        raw = base64.b64decode(
+            cursor + "=" * (-len(cursor) % 4), altchars=b"-_", validate=True
+        )
         body, signature = raw[:-32], raw[-32:]
         expected = hmac.digest(_TASK_VIEW_CURSOR_SECRET, body, "sha256")
         if len(signature) != 32 or not hmac.compare_digest(signature, expected):
@@ -1424,7 +1493,8 @@ def _task_view_cursor_position(
         payload = json.loads(body)
         if (
             not isinstance(payload, dict)
-            or set(payload) != {"after", "archived", "limit", "population", "scope", "v"}
+            or set(payload)
+            != {"after", "archived", "limit", "population", "scope", "v"}
             or payload["v"] != 2
             or payload["scope"] != scope
             or payload["limit"] != limit
@@ -1440,7 +1510,9 @@ def _task_view_cursor_position(
         validate_card_lock_identifier(payload["after"])
         return payload["after"], payload["population"]
     except (ValueError, TypeError, UnicodeError, json.JSONDecodeError) as exc:
-        raise ValueError("task-view cursor is malformed, stale, or out of scope") from exc
+        raise ValueError(
+            "task-view cursor is malformed, stale, or out of scope"
+        ) from exc
 
 
 def task_view_page_from_store(
@@ -1466,7 +1538,9 @@ def task_view_page_from_store(
         or not isinstance(limit, int)
         or not 1 <= limit <= _TASK_VIEW_PAGE_LIMIT
     ):
-        raise ValueError(f"task-view limit must be between 1 and {_TASK_VIEW_PAGE_LIMIT}")
+        raise ValueError(
+            f"task-view limit must be between 1 and {_TASK_VIEW_PAGE_LIMIT}"
+        )
     after, expected_population = _task_view_cursor_position(
         cursor,
         scope=scope.authorization_scope,
@@ -1486,7 +1560,10 @@ def task_view_page_from_store(
         not isinstance(batch.population_state, str)
         or not batch.population_state
         or len(batch.population_state) > 256
-        or (expected_population is not None and batch.population_state != expected_population)
+        or (
+            expected_population is not None
+            and batch.population_state != expected_population
+        )
     ):
         raise ValueError("task-view cursor population is stale")
 
@@ -1545,7 +1622,9 @@ def task_views_from_store(home: Path, include_archived: bool = False) -> list:
     store = CardStore(home)
     return [
         _task_view_from_card(card)
-        for card in store.list_cards(include_archived=include_archived, degrade_unreadable=True)
+        for card in store.list_cards(
+            include_archived=include_archived, degrade_unreadable=True
+        )
         # get_task_views is the COORD task board: coord-origin kinds only.
         # ITIL cards (incident/problem/change) live in the kanban view, not here.
         if card.kind.value in ("task", "epic")
@@ -1559,7 +1638,9 @@ def _card_exists(home: Path, card_id: str) -> bool:
         return True
     from .coordination import Board
 
-    return any(task.id == card_id for task in Board(home).load_tasks(include_archived=True))
+    return any(
+        task.id == card_id for task in Board(home).load_tasks(include_archived=True)
+    )
 
 
 def current_dependencies(
@@ -1821,7 +1902,9 @@ def card_mutation_lock(
         return
 
     try:
-        ancestor_handle = _open_home_ancestor_lock(home, card_id, create=not artifact_neutral)
+        ancestor_handle = _open_home_ancestor_lock(
+            home, card_id, create=not artifact_neutral
+        )
         if ancestor_handle is None:
             raise ValueError(f"CardStore card {card_id} has no stable home lock anchor")
         with ancestor_handle:
@@ -1843,11 +1926,17 @@ def card_mutation_lock(
                     finally:
                         os.close(current_handle)
 
-                    filename = f"{hashlib.sha256(card_id.encode('utf-8')).hexdigest()}.lock"
+                    filename = (
+                        f"{hashlib.sha256(card_id.encode('utf-8')).hexdigest()}.lock"
+                    )
                     if artifact_neutral:
-                        lock_handle = _open_existing_coordination_lock(home, filename, "card")
+                        lock_handle = _open_existing_coordination_lock(
+                            home, filename, "card"
+                        )
                         if lock_handle is None:
-                            raise ValueError(f"CardStore card {card_id} has no stable lock anchor")
+                            raise ValueError(
+                                f"CardStore card {card_id} has no stable lock anchor"
+                            )
                     else:
                         lock_handle = _open_lockfile(home, filename, "card")
                     with lock_handle:
@@ -1869,14 +1958,18 @@ def add_dependency(
     home: Path, card_id: str, dependency_id: str, agent: str = "", reason: str = ""
 ) -> bool:
     """Append an idempotent dependency addition for a coordination card."""
-    return amend_dependency(home, card_id, dependency_id, "add_dependency", agent, reason)
+    return amend_dependency(
+        home, card_id, dependency_id, "add_dependency", agent, reason
+    )
 
 
 def remove_dependency(
     home: Path, card_id: str, dependency_id: str, agent: str = "", reason: str = ""
 ) -> bool:
     """Append an idempotent dependency removal for a coordination card."""
-    return amend_dependency(home, card_id, dependency_id, "remove_dependency", agent, reason)
+    return amend_dependency(
+        home, card_id, dependency_id, "remove_dependency", agent, reason
+    )
 
 
 def mirror_coord_create(home: Path, task) -> None:
@@ -1956,7 +2049,10 @@ def mirror_coord_create_claimed(
 
     store.create(expected)
     created = store._load_core(task.id)
-    if created is None or CardCore.model_validate(created).model_dump() != expected.model_dump():
+    if (
+        created is None
+        or CardCore.model_validate(created).model_dump() != expected.model_dump()
+    ):
         raise ValueError(f"CardStore create-and-claim conflict for {task.id}")
     return revision
 
@@ -1981,7 +2077,9 @@ def mirror_coord_claim(
     return revision
 
 
-def mirror_coord_complete(home: Path, task_id: str, agent: str, transition_id: str = "") -> None:
+def mirror_coord_complete(
+    home: Path, task_id: str, agent: str, transition_id: str = ""
+) -> None:
     """Mirror a coord completion into the CardStore."""
     CardStore(home).append_event(
         task_id, "complete", agent, transition_id=transition_id or uuid.uuid4().hex
@@ -2004,7 +2102,9 @@ def current_claim_precondition(home: Path, task_id: str, owner: str) -> str | No
         if isinstance(conflict, dict) and conflict.get("owner") == owner
     ]
     if len(conflicts) > 1:
-        raise ValueError(f"CardStore claim conflict for {task_id} owned by {owner} is ambiguous")
+        raise ValueError(
+            f"CardStore claim conflict for {task_id} owned by {owner} is ambiguous"
+        )
     if conflicts:
         conflict = conflicts[0]
         revision = conflict.get("claim_revision")
@@ -2021,7 +2121,10 @@ def current_claim_precondition(home: Path, task_id: str, owner: str) -> str | No
         raise ValueError(f"CardStore claim conflict on {task_id} has no exact revision")
     if card.owner is None and card.status == Column.BACKLOG:
         for event in reversed(CardStore(home)._read_events(task_id)):
-            if event.get("action") == "release_claim" and event.get("released_owner") == owner:
+            if (
+                event.get("action") == "release_claim"
+                and event.get("released_owner") == owner
+            ):
                 return None
     raise ValueError(f"CardStore owner conflict for {task_id}: expected {owner}")
 
@@ -2126,6 +2229,40 @@ class _SnapshotUnstable(ValueError):
     pass
 
 
+@contextmanager
+def _parity_deadline_alarm(deadline: Optional[float]):
+    """Interrupt synchronous projection work when its parity deadline expires."""
+    if deadline is None:
+        yield
+        return
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise _SnapshotTimeout("parity snapshot deadline exceeded before projection")
+
+    def _expired(_signum, _frame):
+        raise _SnapshotTimeout("parity snapshot deadline exceeded during projection")
+
+    try:
+        previous_handler = signal.signal(signal.SIGALRM, _expired)
+        previous_timer = signal.setitimer(signal.ITIMER_REAL, remaining)
+    except (AttributeError, ValueError):
+        yield
+        return
+    started = time.monotonic()
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        if previous_timer[0] > 0:
+            elapsed = time.monotonic() - started
+            signal.setitimer(
+                signal.ITIMER_REAL,
+                max(1e-6, previous_timer[0] - elapsed),
+                previous_timer[1],
+            )
+
+
 def _open_count(cards: dict, known_status_ids: Optional[set[str]] = None) -> int:
     """Count comparable coord-board OPEN cards.
 
@@ -2180,7 +2317,9 @@ def _legacy_status_ids(home: Path, deadline: Optional[float] = None) -> set[str]
     return card_ids
 
 
-def _parity_inventory(home: Path, deadline: Optional[float]) -> tuple[str, list[tuple[str, int, str]]]:
+def _parity_inventory(
+    home: Path, deadline: Optional[float]
+) -> tuple[str, list[tuple[str, int, str]]]:
     """Hash all parity inputs, rejecting links and non-regular records."""
     entries: list[tuple[str, int, str]] = []
     root = Path(home).expanduser()
@@ -2197,12 +2336,16 @@ def _parity_inventory(home: Path, deadline: Optional[float]) -> tuple[str, list[
         pending = [current]
         while pending:
             if deadline is not None and time.monotonic() >= deadline:
-                raise _SnapshotTimeout("parity snapshot deadline exceeded during inventory")
+                raise _SnapshotTimeout(
+                    "parity snapshot deadline exceeded during inventory"
+                )
             directory = pending.pop()
             try:
                 children = sorted(os.scandir(directory), key=lambda entry: entry.name)
             except OSError as exc:
-                raise _SnapshotUnstable(f"unreadable parity input: {directory}") from exc
+                raise _SnapshotUnstable(
+                    f"unreadable parity input: {directory}"
+                ) from exc
             for entry in children:
                 if entry.is_symlink():
                     raise _SnapshotUnstable(f"ambiguous parity input: {entry.path}")
@@ -2212,21 +2355,31 @@ def _parity_inventory(home: Path, deadline: Optional[float]) -> tuple[str, list[
                 if not entry.is_file(follow_symlinks=False):
                     raise _SnapshotUnstable(f"non-regular parity input: {entry.path}")
                 if deadline is not None and time.monotonic() >= deadline:
-                    raise _SnapshotTimeout("parity snapshot deadline exceeded during inventory")
+                    raise _SnapshotTimeout(
+                        "parity snapshot deadline exceeded during inventory"
+                    )
                 try:
                     with open(entry.path, "rb") as handle:
                         payload = handle.read()
                     relative = str(Path(entry.path).relative_to(root))
                 except OSError as exc:
-                    raise _SnapshotUnstable(f"unreadable parity input: {entry.path}") from exc
+                    raise _SnapshotUnstable(
+                        f"unreadable parity input: {entry.path}"
+                    ) from exc
                 if deadline is not None and time.monotonic() >= deadline:
-                    raise _SnapshotTimeout("parity snapshot deadline exceeded during inventory")
-                entries.append((relative, len(payload), hashlib.sha256(payload).hexdigest()))
+                    raise _SnapshotTimeout(
+                        "parity snapshot deadline exceeded during inventory"
+                    )
+                entries.append(
+                    (relative, len(payload), hashlib.sha256(payload).hexdigest())
+                )
     if deadline is not None and time.monotonic() >= deadline:
         raise _SnapshotTimeout("parity snapshot deadline exceeded after inventory")
     entries.sort()
     digest = hashlib.sha256(
-        "".join(f"{path}\0{size}\0{content}\n" for path, size, content in entries).encode()
+        "".join(
+            f"{path}\0{size}\0{content}\n" for path, size, content in entries
+        ).encode()
     ).hexdigest()
     return digest, entries
 
@@ -2255,7 +2408,10 @@ def _parity_snapshot(
                 target.write_bytes(payload)
             except OSError as exc:
                 raise _SnapshotUnstable(f"unreadable parity input: {relative}") from exc
-            if len(payload) != expected_size or hashlib.sha256(payload).hexdigest() != expected_content:
+            if (
+                len(payload) != expected_size
+                or hashlib.sha256(payload).hexdigest() != expected_content
+            ):
                 raise _SnapshotUnstable(f"parity input changed during copy: {relative}")
             if deadline is not None and time.monotonic() >= deadline:
                 raise _SnapshotTimeout("parity snapshot deadline exceeded during copy")
@@ -2359,32 +2515,47 @@ def parity_check(
             failure = _SnapshotUnstable(str(exc) or exc.__class__.__name__)
     if snapshot_root is None or snapshot_meta is None:
         reason = str(failure or "parity snapshot could not be established")
-        outcome = "snapshot_timeout" if isinstance(failure, _SnapshotTimeout) else "snapshot_unstable"
+        outcome = (
+            "snapshot_timeout"
+            if isinstance(failure, _SnapshotTimeout)
+            else "snapshot_unstable"
+        )
         return _parity_failure(outcome, timeout, reason, open_drift_threshold)
 
     store = CardStore(snapshot_root)
     # Every projection consumes the same frozen directory. No comparison or
     # mutation happens until both sides have been read from this snapshot.
     try:
-        with _forced_legacy_read():
-            legacy = {
-                c.id: c for c in KanbanBoard(snapshot_root).cards(include_archived=True)
-            }
-            legacy_read_ns = time.monotonic_ns()
+        with _parity_deadline_alarm(deadline):
+            with _forced_legacy_read():
+                legacy = {
+                    c.id: c
+                    for c in KanbanBoard(snapshot_root).cards(include_archived=True)
+                }
+                legacy_read_ns = time.monotonic_ns()
+                if deadline is not None and time.monotonic() >= deadline:
+                    return _parity_failure(
+                        "snapshot_timeout",
+                        timeout,
+                        "deadline exceeded during legacy projection",
+                        open_drift_threshold,
+                    )
+                legacy_status_ids = _legacy_status_ids(snapshot_root, deadline=deadline)
             if deadline is not None and time.monotonic() >= deadline:
                 return _parity_failure(
-                    "snapshot_timeout", timeout, "deadline exceeded during legacy projection", open_drift_threshold
+                    "snapshot_timeout",
+                    timeout,
+                    "deadline exceeded during legacy status read",
+                    open_drift_threshold,
                 )
-            legacy_status_ids = _legacy_status_ids(snapshot_root, deadline=deadline)
+            stored = {c.id: c for c in store.list_cards(include_archived=True)}
+            store_read_ns = time.monotonic_ns()
         if deadline is not None and time.monotonic() >= deadline:
             return _parity_failure(
-                "snapshot_timeout", timeout, "deadline exceeded during legacy status read", open_drift_threshold
-            )
-        stored = {c.id: c for c in store.list_cards(include_archived=True)}
-        store_read_ns = time.monotonic_ns()
-        if deadline is not None and time.monotonic() >= deadline:
-            return _parity_failure(
-                "snapshot_timeout", timeout, "deadline exceeded during CardStore read", open_drift_threshold
+                "snapshot_timeout",
+                timeout,
+                "deadline exceeded during CardStore read",
+                open_drift_threshold,
             )
     except ParityTimeout as exc:
         return _parity_failure(
@@ -2426,7 +2597,9 @@ def parity_check(
         diff = {}
         # Legacy task JSON is a birth record. A projected status default for
         # a record without that field is unknown and cannot disagree.
-        if cid in legacy_status_ids and _bucket(lc.status.value) != _bucket(sc.status.value):
+        if cid in legacy_status_ids and _bucket(lc.status.value) != _bucket(
+            sc.status.value
+        ):
             diff["status"] = [lc.status.value, sc.status.value]
         if (lc.owner or None) != (sc.owner or None):
             diff["owner"] = [lc.owner, sc.owner]
