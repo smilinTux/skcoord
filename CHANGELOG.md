@@ -43,6 +43,12 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
 
 ### Fixed
 
+- Repeating `claim_task` for an already-current same-owner claim now preserves
+  its exact claim revision and appends no duplicate claim event, so worker
+  startup verification cannot invalidate the running wrapper generation. A
+  demoted ready claim still receives a new generation when resumed. Card
+  22da3167.
+
 - Timed-out parity snapshots now hand partial-directory removal to a detached
   cleanup process, so CLI timeout reporting never waits on an unbounded tree
   deletion. Card d488a14e.

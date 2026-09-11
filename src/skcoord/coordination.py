@@ -1923,7 +1923,12 @@ class Board:
         return removed
 
     def _claim_task(
-        self, agent_name: str, task_id: str, force: bool = False
+        self,
+        agent_name: str,
+        task_id: str,
+        force: bool = False,
+        *,
+        drop_bumped_claim: bool = False,
     ) -> tuple[AgentFile, str | None]:
         """Have an agent claim a task.
 
@@ -2002,6 +2007,8 @@ class Board:
         # is no longer in_progress, so legacy derives it as CLAIMED (ready). The
         # store must demote it too, else the cutover read shows it as doing.
         bumped = agent.current_task if agent.current_task not in (None, task_id) else None
+        if drop_bumped_claim and bumped is not None:
+            agent.claimed_tasks = [claimed for claimed in agent.claimed_tasks if claimed != bumped]
         if task_id not in agent.claimed_tasks:
             agent.claimed_tasks.append(task_id)
         agent.current_task = task_id
@@ -2037,6 +2044,67 @@ class Board:
                 target_snapshot = (
                     CardStore(self.home).fold(task_id) if card_store_write_enabled() else None
                 )
+                existing_revision = (
+                    target_snapshot.meta.get("_claim_revision")
+                    if target_snapshot is not None
+                    and target_snapshot.owner == canonical
+                    and target_snapshot.status.value in {"doing", "review"}
+                    else None
+                )
+                if isinstance(existing_revision, str) and existing_revision:
+                    if current is not None and current.current_task == task_id:
+                        return current
+                    projected_bumped = current.current_task if current is not None else None
+                    bumped_snapshot = (
+                        CardStore(self.home).fold(projected_bumped)
+                        if projected_bumped is not None
+                        else None
+                    )
+                    bumped_requires_demote = (
+                        bumped_snapshot is not None
+                        and bumped_snapshot.owner == canonical
+                        and bumped_snapshot.status.value in {"doing", "review"}
+                    )
+                    bumped_is_owned_claim = (
+                        bumped_snapshot is not None
+                        and bumped_snapshot.owner == canonical
+                        and bumped_snapshot.status.value in {"ready", "doing", "review"}
+                    )
+                    _, original = self._snapshot_agent_projection(canonical)
+                    agent, bumped = self._claim_task(
+                        canonical,
+                        task_id,
+                        force,
+                        drop_bumped_claim=not bumped_is_owned_claim,
+                    )
+                    if bumped is None:
+                        return agent
+                    if not bumped_requires_demote:
+                        return agent
+                    transition = (bumped, uuid.uuid4().hex)
+                    try:
+                        self._mirror_card_store(
+                            "demote",
+                            task_id=bumped,
+                            agent=canonical,
+                            transition_id=transition[1],
+                        )
+                    except Exception as exc:
+                        if self._store_transitions_are_applied(
+                            [transition], [(bumped, canonical, "ready")]
+                        ):
+                            return agent
+                        self._recover_store_failure(
+                            operation="claim",
+                            task_id=task_id,
+                            owner=canonical,
+                            actor=canonical,
+                            original=original,
+                            error=exc,
+                            transition_ids=[transition],
+                        )
+                        raise
+                    return agent
                 agent, bumped = self._claim_task(canonical, task_id, force)
                 transitions = [(task_id, uuid.uuid4().hex)]
                 target_claim_revision = uuid.uuid4().hex
