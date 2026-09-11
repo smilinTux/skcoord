@@ -23,8 +23,11 @@ import logging
 import os
 import re
 import secrets
+import shutil
+import signal
 import socket
 import stat
+import tempfile
 import time
 import uuid
 from contextlib import contextmanager
@@ -2097,6 +2100,66 @@ def mirror_coord_archive(home: Path, task_id: str, agent: str) -> None:
 # store 427).
 OPEN_DRIFT_THRESHOLD = 5
 
+# A parity read is a bounded, immutable comparison, not a live filesystem
+# walk. The retry count is deliberately fixed so a busy shared home cannot
+# turn parity into an unbounded retry loop.
+PARITY_SNAPSHOT_TIMEOUT = 60.0
+PARITY_SNAPSHOT_RETRIES = 2
+_PARITY_SNAPSHOT_PATHS = (
+    "coordination/tasks",
+    "coordination/agents",
+    "coordination/archive",
+    "coordination/card_events",
+    "coordination/itil",
+    "cards",
+)
+
+
+class ParityTimeout(TimeoutError):
+    """Compatibility exception for code that imported the old probe error."""
+
+
+class _SnapshotTimeout(ParityTimeout):
+    pass
+
+
+class _SnapshotUnstable(ValueError):
+    pass
+
+
+@contextmanager
+def _parity_deadline_alarm(deadline: Optional[float]):
+    """Interrupt synchronous projection work when its parity deadline expires."""
+    if deadline is None:
+        yield
+        return
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise _SnapshotTimeout("parity snapshot deadline exceeded before projection")
+
+    def _expired(_signum, _frame):
+        raise _SnapshotTimeout("parity snapshot deadline exceeded during projection")
+
+    try:
+        previous_handler = signal.signal(signal.SIGALRM, _expired)
+        previous_timer = signal.setitimer(signal.ITIMER_REAL, remaining)
+    except (AttributeError, ValueError):
+        yield
+        return
+    started = time.monotonic()
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        if previous_timer[0] > 0:
+            elapsed = time.monotonic() - started
+            signal.setitimer(
+                signal.ITIMER_REAL,
+                max(1e-6, previous_timer[0] - elapsed),
+                previous_timer[1],
+            )
+
 
 def _open_count(cards: dict, known_status_ids: Optional[set[str]] = None) -> int:
     """Count comparable coord-board OPEN cards.
@@ -2119,19 +2182,29 @@ def _open_count(cards: dict, known_status_ids: Optional[set[str]] = None) -> int
     )
 
 
-def _legacy_status_ids(home: Path) -> set[str]:
+def _legacy_status_ids(home: Path, deadline: Optional[float] = None) -> set[str]:
     """Return task ids with status physically present in the legacy record.
 
     Args:
         home: Shared SKCapstone root.
+        deadline: Optional absolute ``time.monotonic()`` deadline; checked
+            once per file so the walk stays inside the bounded snapshot.
 
     Returns:
         Task ids whose immutable birth record explicitly carries ``status``.
+
+    Raises:
+        ParityTimeout: When ``deadline`` passes mid-walk.
     """
     from .coordination import Board
 
     card_ids: set[str] = set()
     for path in sorted(Board(home).tasks_dir.glob("*.json")):
+        if deadline is not None and time.monotonic() >= deadline:
+            raise ParityTimeout(
+                "parity_check snapshot deadline exceeded during legacy "
+                "status-id walk"
+            )
         try:
             record = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeError, json.JSONDecodeError):
@@ -2142,29 +2215,229 @@ def _legacy_status_ids(home: Path) -> set[str]:
     return card_ids
 
 
-def parity_check(home: Path, open_drift_threshold: int = OPEN_DRIFT_THRESHOLD) -> dict:
-    """Diff the legacy board against the CardStore fold.
+def _parity_inventory(home: Path, deadline: Optional[float]) -> tuple[str, list[tuple[str, int, str]]]:
+    """Hash all parity inputs, rejecting links and non-regular records."""
+    entries: list[tuple[str, int, str]] = []
+    root = Path(home).expanduser()
+    if deadline is not None and time.monotonic() >= deadline:
+        raise _SnapshotTimeout("parity snapshot deadline exceeded before inventory")
+    for relative_root in _PARITY_SNAPSHOT_PATHS:
+        current = root / relative_root
+        try:
+            current_stat = current.lstat()
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(current_stat.st_mode) or not stat.S_ISDIR(current_stat.st_mode):
+            raise _SnapshotUnstable(f"ambiguous parity input root: {relative_root}")
+        pending = [current]
+        while pending:
+            if deadline is not None and time.monotonic() >= deadline:
+                raise _SnapshotTimeout("parity snapshot deadline exceeded during inventory")
+            directory = pending.pop()
+            try:
+                children = sorted(os.scandir(directory), key=lambda entry: entry.name)
+            except OSError as exc:
+                raise _SnapshotUnstable(f"unreadable parity input: {directory}") from exc
+            for entry in children:
+                if entry.is_symlink():
+                    raise _SnapshotUnstable(f"ambiguous parity input: {entry.path}")
+                if entry.is_dir(follow_symlinks=False):
+                    pending.append(Path(entry.path))
+                    continue
+                if not entry.is_file(follow_symlinks=False):
+                    raise _SnapshotUnstable(f"non-regular parity input: {entry.path}")
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise _SnapshotTimeout("parity snapshot deadline exceeded during inventory")
+                try:
+                    with open(entry.path, "rb") as handle:
+                        payload = handle.read()
+                    relative = str(Path(entry.path).relative_to(root))
+                except OSError as exc:
+                    raise _SnapshotUnstable(f"unreadable parity input: {entry.path}") from exc
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise _SnapshotTimeout("parity snapshot deadline exceeded during inventory")
+                entries.append((relative, len(payload), hashlib.sha256(payload).hexdigest()))
+    if deadline is not None and time.monotonic() >= deadline:
+        raise _SnapshotTimeout("parity snapshot deadline exceeded after inventory")
+    entries.sort()
+    digest = hashlib.sha256(
+        "".join(f"{path}\0{size}\0{content}\n" for path, size, content in entries).encode()
+    ).hexdigest()
+    return digest, entries
 
+
+def _parity_snapshot(
+    home: Path, deadline: Optional[float]
+) -> tuple[Path, dict[str, Any]]:
+    """Copy one content-addressed, read-only parity snapshot."""
+    root = Path(home).expanduser()
+    before, entries = _parity_inventory(root, deadline)
+    snapshot_id = hashlib.sha256(
+        json.dumps(entries, separators=(",", ":")).encode()
+    ).hexdigest()
+    snapshot = Path(
+        tempfile.mkdtemp(prefix=f".skcoord-parity-{snapshot_id[:16]}-", dir=root.parent)
+    )
+    try:
+        for relative, expected_size, expected_content in entries:
+            if deadline is not None and time.monotonic() >= deadline:
+                raise _SnapshotTimeout("parity snapshot deadline exceeded during copy")
+            source = root / relative
+            target = snapshot / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                payload = source.read_bytes()
+                target.write_bytes(payload)
+            except OSError as exc:
+                raise _SnapshotUnstable(f"unreadable parity input: {relative}") from exc
+            if len(payload) != expected_size or hashlib.sha256(payload).hexdigest() != expected_content:
+                raise _SnapshotUnstable(f"parity input changed during copy: {relative}")
+            if deadline is not None and time.monotonic() >= deadline:
+                raise _SnapshotTimeout("parity snapshot deadline exceeded during copy")
+        after, _ = _parity_inventory(root, deadline)
+        if before != after:
+            raise _SnapshotUnstable("parity inputs changed during snapshot")
+        copied, _ = _parity_inventory(snapshot, deadline)
+        if copied != before:
+            raise _SnapshotUnstable("parity snapshot hash mismatch")
+        manifest = {
+            "schema": "skcoord.parity-snapshot/v1",
+            "input_hash": before,
+            "pre_inventory_hash": before,
+            "post_inventory_hash": after,
+            "snapshot_inventory_hash": copied,
+            "snapshot_id": snapshot_id,
+            "files": len(entries),
+        }
+        return snapshot, manifest
+    except Exception:
+        shutil.rmtree(snapshot, ignore_errors=True)
+        raise
+
+
+def _parity_failure(
+    outcome: str,
+    timeout: Optional[float],
+    reason: str,
+    open_drift_threshold: int = OPEN_DRIFT_THRESHOLD,
+) -> dict[str, Any]:
+    """Return an explicitly non-actionable parity result."""
+    return {
+        "outcome": outcome,
+        "actionable": False,
+        "checked": 0,
+        "matched": 0,
+        "mismatches": [],
+        "informational": [],
+        "missing": [],
+        "open_legacy": None,
+        "open_store": None,
+        "open_drift": None,
+        "open_drift_threshold": open_drift_threshold,
+        "open_alert": False,
+        "snapshot": {"timeout_seconds": timeout, "reason": reason},
+    }
+
+
+def parity_check(
+    home: Path,
+    open_drift_threshold: int = OPEN_DRIFT_THRESHOLD,
+    timeout: Optional[float] = PARITY_SNAPSHOT_TIMEOUT,
+) -> dict:
+    """Diff the legacy board against the CardStore fold.
     Compares only fields physically maintained by each legacy record. A
     projected default for an absent legacy field is unknown, not disagreement.
     The open-count alert likewise compares only records with explicit legacy
     lifecycle state.
 
+    The comparison uses one bounded snapshot: the legacy projection, the
+    legacy status-id walk, and the store fold are read back-to-back inside a
+    single window, and all comparison work happens after the store read. This
+    keeps writers from faking drift across reads taken at arbitrarily distant
+    times. ``timeout`` bounds the snapshot in seconds (``None`` disables);
+    expiry raises :class:`ParityTimeout` so callers fail closed instead of
+    hanging. Note the deadline is enforced at phase boundaries and per file
+    inside the status-id walk; a single uninterruptible filesystem syscall
+    cannot be bounded from Python userspace.
+
+    Args:
+        home: Shared SKCapstone root.
+        open_drift_threshold: Open-count drift beyond this alerts.
+        timeout: Snapshot deadline in seconds; ``None`` disables the bound.
+
+    Raises:
+        ParityTimeout: When the snapshot exceeds ``timeout``.
+
     Returns:
         dict: ``{"checked", "matched", "mismatches", "missing",
         "open_legacy", "open_store", "open_drift", "open_drift_threshold",
-        "open_alert"}``.
+        "open_alert", "snapshot"}`` where ``snapshot`` carries
+        ``{"timeout_seconds", "legacy_read_ns", "store_read_ns", "span_ns"}``
+        monotonic read timestamps for drift diagnosis.
     """
     from .card import KanbanBoard
 
-    store = CardStore(home)
-    # Force the LEGACY projection for the comparison side (otherwise KanbanBoard
-    # would return the store and we would be comparing the store to itself). This
-    # keeps parity a real drift detector for legacy hot-backup vs the store.
-    with _forced_legacy_read():
-        legacy = {c.id: c for c in KanbanBoard(home).cards(include_archived=True)}
-    stored = {c.id: c for c in store.list_cards(include_archived=True)}
-    legacy_status_ids = _legacy_status_ids(home)
+    deadline = None if timeout is None else time.monotonic() + timeout
+    snapshot_root: Path | None = None
+    snapshot_meta: dict[str, Any] | None = None
+    failure: Exception | None = None
+    for _attempt in range(PARITY_SNAPSHOT_RETRIES):
+        try:
+            snapshot_root, snapshot_meta = _parity_snapshot(home, deadline)
+            break
+        except _SnapshotTimeout as exc:
+            failure = exc
+            break
+        except _SnapshotUnstable as exc:
+            failure = exc
+        except Exception as exc:  # noqa: BLE001 - parity is fail closed
+            failure = _SnapshotUnstable(str(exc) or exc.__class__.__name__)
+    if snapshot_root is None or snapshot_meta is None:
+        reason = str(failure or "parity snapshot could not be established")
+        outcome = "snapshot_timeout" if isinstance(failure, _SnapshotTimeout) else "snapshot_unstable"
+        return _parity_failure(outcome, timeout, reason, open_drift_threshold)
+
+    store = CardStore(snapshot_root)
+    # Every projection consumes the same frozen directory. No comparison or
+    # mutation happens until both sides have been read from this snapshot.
+    try:
+        with _parity_deadline_alarm(deadline):
+            with _forced_legacy_read():
+                legacy = {
+                    c.id: c for c in KanbanBoard(snapshot_root).cards(include_archived=True)
+                }
+                legacy_read_ns = time.monotonic_ns()
+                if deadline is not None and time.monotonic() >= deadline:
+                    return _parity_failure(
+                        "snapshot_timeout",
+                        timeout,
+                        "deadline exceeded during legacy projection",
+                        open_drift_threshold,
+                    )
+                legacy_status_ids = _legacy_status_ids(snapshot_root, deadline=deadline)
+            if deadline is not None and time.monotonic() >= deadline:
+                return _parity_failure(
+                    "snapshot_timeout",
+                    timeout,
+                    "deadline exceeded during legacy status read",
+                    open_drift_threshold,
+                )
+            stored = {c.id: c for c in store.list_cards(include_archived=True)}
+            store_read_ns = time.monotonic_ns()
+        if deadline is not None and time.monotonic() >= deadline:
+            return _parity_failure(
+                "snapshot_timeout", timeout, "deadline exceeded during CardStore read", open_drift_threshold
+            )
+    except ParityTimeout as exc:
+        return _parity_failure(
+            "snapshot_timeout", timeout, str(exc), open_drift_threshold
+        )
+    except Exception as exc:  # noqa: BLE001 - parity is fail closed
+        return _parity_failure(
+            "snapshot_unstable", timeout, str(exc), open_drift_threshold
+        )
+    finally:
+        shutil.rmtree(snapshot_root, ignore_errors=True)
 
     # Coarse lifecycle bucket: legacy coord can only derive todo/active/done from
     # its claim files, so kanban-native column moves (ready<->doing<->review) made
@@ -2238,6 +2511,8 @@ def parity_check(home: Path, open_drift_threshold: int = OPEN_DRIFT_THRESHOLD) -
     open_store = _open_count(stored, legacy_status_ids)
     open_drift = abs(open_legacy - open_store)
     return {
+        "outcome": "healthy" if not mismatches and not missing else "drift",
+        "actionable": True,
         "checked": len(legacy),
         "matched": matched,
         "mismatches": mismatches,
@@ -2248,6 +2523,13 @@ def parity_check(home: Path, open_drift_threshold: int = OPEN_DRIFT_THRESHOLD) -
         "open_drift": open_drift,
         "open_drift_threshold": open_drift_threshold,
         "open_alert": open_drift > open_drift_threshold,
+        "snapshot": {
+            **snapshot_meta,
+            "timeout_seconds": timeout,
+            "legacy_read_ns": legacy_read_ns,
+            "store_read_ns": store_read_ns,
+            "span_ns": store_read_ns - legacy_read_ns,
+        },
     }
 
 
@@ -2299,6 +2581,16 @@ def reconcile_from_legacy(
         ``{"skipped_uncomplete": [ids]}``.
     """
     par = parity_check(home)
+    if par.get("outcome") in {"snapshot_timeout", "snapshot_unstable"}:
+        # An unsafe snapshot is explicitly non-actionable. In particular, a
+        # timeout must never be interpreted as an empty mismatch set.
+        return {
+            "fixed": 0,
+            "would_fix": 0,
+            "skipped_uncomplete": [],
+            "outcome": par["outcome"],
+            "actionable": False,
+        }
     store = CardStore(home)
     count = 0
     skipped: list[str] = []
