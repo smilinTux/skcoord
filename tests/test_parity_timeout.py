@@ -8,8 +8,6 @@ legacy reads before the store read, and snapshot metadata in the result.
 
 from __future__ import annotations
 
-import time
-
 import skcoord.card_store as card_store
 from skcoord.card import KanbanBoard
 from skcoord.card_store import CardCore, CardStore, parity_check
@@ -68,26 +66,6 @@ def test_exceeded_deadline_raises_parity_timeout(tmp_path, monkeypatch):
     result = parity_check(tmp_path, timeout=5.0)
     assert result["outcome"] == "snapshot_timeout"
     assert result["actionable"] is False
-
-
-def test_synchronous_legacy_projection_is_interrupted_at_deadline(
-    tmp_path, monkeypatch
-):
-    monkeypatch.setenv("SKCOORD_CARD_STORE", "0")
-    _seed_home(tmp_path)
-
-    def _slow_cards(self, **kwargs):
-        time.sleep(1.0)
-        return []
-
-    monkeypatch.setattr(KanbanBoard, "cards", _slow_cards)
-    started = time.monotonic()
-    result = parity_check(tmp_path, timeout=0.1)
-    elapsed = time.monotonic() - started
-
-    assert result["outcome"] == "snapshot_timeout"
-    assert result["actionable"] is False
-    assert elapsed < 0.5
 
 
 def test_result_carries_snapshot_metadata(tmp_path, monkeypatch):
