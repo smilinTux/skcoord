@@ -24,6 +24,7 @@ import os
 import re
 import secrets
 import shutil
+import signal
 import socket
 import stat
 import tempfile
@@ -2126,6 +2127,40 @@ class _SnapshotUnstable(ValueError):
     pass
 
 
+@contextmanager
+def _parity_deadline_alarm(deadline: Optional[float]):
+    """Interrupt synchronous projection work when its parity deadline expires."""
+    if deadline is None:
+        yield
+        return
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise _SnapshotTimeout("parity snapshot deadline exceeded before projection")
+
+    def _expired(_signum, _frame):
+        raise _SnapshotTimeout("parity snapshot deadline exceeded during projection")
+
+    try:
+        previous_handler = signal.signal(signal.SIGALRM, _expired)
+        previous_timer = signal.setitimer(signal.ITIMER_REAL, remaining)
+    except (AttributeError, ValueError):
+        yield
+        return
+    started = time.monotonic()
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        if previous_timer[0] > 0:
+            elapsed = time.monotonic() - started
+            signal.setitimer(
+                signal.ITIMER_REAL,
+                max(1e-6, previous_timer[0] - elapsed),
+                previous_timer[1],
+            )
+
+
 def _open_count(cards: dict, known_status_ids: Optional[set[str]] = None) -> int:
     """Count comparable coord-board OPEN cards.
 
@@ -2366,22 +2401,29 @@ def parity_check(
     # Every projection consumes the same frozen directory. No comparison or
     # mutation happens until both sides have been read from this snapshot.
     try:
-        with _forced_legacy_read():
-            legacy = {
-                c.id: c for c in KanbanBoard(snapshot_root).cards(include_archived=True)
-            }
-            legacy_read_ns = time.monotonic_ns()
+        with _parity_deadline_alarm(deadline):
+            with _forced_legacy_read():
+                legacy = {
+                    c.id: c for c in KanbanBoard(snapshot_root).cards(include_archived=True)
+                }
+                legacy_read_ns = time.monotonic_ns()
+                if deadline is not None and time.monotonic() >= deadline:
+                    return _parity_failure(
+                        "snapshot_timeout",
+                        timeout,
+                        "deadline exceeded during legacy projection",
+                        open_drift_threshold,
+                    )
+                legacy_status_ids = _legacy_status_ids(snapshot_root, deadline=deadline)
             if deadline is not None and time.monotonic() >= deadline:
                 return _parity_failure(
-                    "snapshot_timeout", timeout, "deadline exceeded during legacy projection", open_drift_threshold
+                    "snapshot_timeout",
+                    timeout,
+                    "deadline exceeded during legacy status read",
+                    open_drift_threshold,
                 )
-            legacy_status_ids = _legacy_status_ids(snapshot_root, deadline=deadline)
-        if deadline is not None and time.monotonic() >= deadline:
-            return _parity_failure(
-                "snapshot_timeout", timeout, "deadline exceeded during legacy status read", open_drift_threshold
-            )
-        stored = {c.id: c for c in store.list_cards(include_archived=True)}
-        store_read_ns = time.monotonic_ns()
+            stored = {c.id: c for c in store.list_cards(include_archived=True)}
+            store_read_ns = time.monotonic_ns()
         if deadline is not None and time.monotonic() >= deadline:
             return _parity_failure(
                 "snapshot_timeout", timeout, "deadline exceeded during CardStore read", open_drift_threshold
