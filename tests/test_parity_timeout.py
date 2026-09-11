@@ -70,7 +70,9 @@ def test_exceeded_deadline_raises_parity_timeout(tmp_path, monkeypatch):
     assert result["actionable"] is False
 
 
-def test_synchronous_legacy_projection_is_interrupted_at_deadline(tmp_path, monkeypatch):
+def test_synchronous_legacy_projection_is_interrupted_at_deadline(
+    tmp_path, monkeypatch
+):
     monkeypatch.setenv("SKCOORD_CARD_STORE", "0")
     _seed_home(tmp_path)
 
@@ -91,6 +93,7 @@ def test_synchronous_legacy_projection_is_interrupted_at_deadline(tmp_path, monk
 def test_synchronous_snapshot_copy_is_interrupted_at_deadline(tmp_path, monkeypatch):
     monkeypatch.setenv("SKCOORD_CARD_STORE", "0")
     _seed_home(tmp_path)
+    inventory = card_store._parity_inventory(tmp_path, None)
     original_read_bytes = card_store.Path.read_bytes
 
     def _slow_read_bytes(path):
@@ -98,6 +101,7 @@ def test_synchronous_snapshot_copy_is_interrupted_at_deadline(tmp_path, monkeypa
         return original_read_bytes(path)
 
     monkeypatch.setattr(card_store.Path, "read_bytes", _slow_read_bytes)
+    monkeypatch.setattr(card_store, "_parity_inventory", lambda *_args: inventory)
     started = time.monotonic()
     result = parity_check(tmp_path, timeout=0.1)
     elapsed = time.monotonic() - started
@@ -105,6 +109,31 @@ def test_synchronous_snapshot_copy_is_interrupted_at_deadline(tmp_path, monkeypa
     assert result["outcome"] == "snapshot_timeout"
     assert result["actionable"] is False
     assert elapsed < 0.5
+
+
+def test_timeout_does_not_wait_for_partial_snapshot_cleanup(tmp_path, monkeypatch):
+    monkeypatch.setenv("SKCOORD_CARD_STORE", "0")
+    _seed_home(tmp_path)
+    cleanup = []
+    inventories = iter((("a", []), ("b", [])))
+    monkeypatch.setattr(
+        card_store,
+        "_parity_inventory",
+        lambda *_args: next(inventories),
+    )
+    monkeypatch.setattr(
+        card_store,
+        "_defer_snapshot_cleanup",
+        lambda snapshot: cleanup.append(snapshot),
+    )
+    monkeypatch.setattr(card_store.shutil, "rmtree", lambda *_args: time.sleep(1.0))
+    started = time.monotonic()
+    result = parity_check(tmp_path, timeout=0.1)
+
+    assert result["outcome"] == "snapshot_timeout"
+    assert time.monotonic() - started < 0.5
+    assert len(cleanup) == 1
+    assert cleanup[0].name.startswith(".skcoord-parity-")
 
 
 def test_result_carries_snapshot_metadata(tmp_path, monkeypatch):
@@ -240,3 +269,4 @@ def test_timeout_none_disables_deadline(tmp_path, monkeypatch):
 
 def test_parity_timeout_is_timeout_error():
     assert issubclass(card_store.ParityTimeout, TimeoutError)
+    assert not issubclass(card_store._SnapshotTimeout, Exception)
