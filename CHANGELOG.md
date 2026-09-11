@@ -43,6 +43,10 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
 
 ### Fixed
 
+- CardStore parity checks now capture consistent legacy and card snapshots,
+  reject concurrent mutation, and fail closed within a bounded timeout instead
+  of hanging on a large shared estate. Card 150d28ab.
+
 - Atomic create-and-claim retries now require exact equality across every
   immutable card field before accepting an existing ID, including concurrent
   same-owner requests with different payloads. An exact replay also fails
