@@ -2381,17 +2381,21 @@ def parity_check(
     snapshot_root: Path | None = None
     snapshot_meta: dict[str, Any] | None = None
     failure: Exception | None = None
-    for _attempt in range(PARITY_SNAPSHOT_RETRIES):
-        try:
-            snapshot_root, snapshot_meta = _parity_snapshot(home, deadline)
-            break
-        except _SnapshotTimeout as exc:
-            failure = exc
-            break
-        except _SnapshotUnstable as exc:
-            failure = exc
-        except Exception as exc:  # noqa: BLE001 - parity is fail closed
-            failure = _SnapshotUnstable(str(exc) or exc.__class__.__name__)
+    try:
+        with _parity_deadline_alarm(deadline):
+            for _attempt in range(PARITY_SNAPSHOT_RETRIES):
+                try:
+                    snapshot_root, snapshot_meta = _parity_snapshot(home, deadline)
+                    break
+                except _SnapshotTimeout as exc:
+                    failure = exc
+                    break
+                except _SnapshotUnstable as exc:
+                    failure = exc
+                except Exception as exc:  # noqa: BLE001 - parity is fail closed
+                    failure = _SnapshotUnstable(str(exc) or exc.__class__.__name__)
+    except _SnapshotTimeout as exc:
+        failure = exc
     if snapshot_root is None or snapshot_meta is None:
         reason = str(failure or "parity snapshot could not be established")
         outcome = "snapshot_timeout" if isinstance(failure, _SnapshotTimeout) else "snapshot_unstable"

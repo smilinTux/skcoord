@@ -88,6 +88,25 @@ def test_synchronous_legacy_projection_is_interrupted_at_deadline(tmp_path, monk
     assert elapsed < 0.5
 
 
+def test_synchronous_snapshot_copy_is_interrupted_at_deadline(tmp_path, monkeypatch):
+    monkeypatch.setenv("SKCOORD_CARD_STORE", "0")
+    _seed_home(tmp_path)
+    original_read_bytes = card_store.Path.read_bytes
+
+    def _slow_read_bytes(path):
+        time.sleep(1.0)
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(card_store.Path, "read_bytes", _slow_read_bytes)
+    started = time.monotonic()
+    result = parity_check(tmp_path, timeout=0.1)
+    elapsed = time.monotonic() - started
+
+    assert result["outcome"] == "snapshot_timeout"
+    assert result["actionable"] is False
+    assert elapsed < 0.5
+
+
 def test_result_carries_snapshot_metadata(tmp_path, monkeypatch):
     monkeypatch.setenv("SKCOORD_CARD_STORE", "0")
     _seed_home(tmp_path)
