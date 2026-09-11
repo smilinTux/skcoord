@@ -43,10 +43,6 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
 
 ### Fixed
 
-- Timed-out parity snapshots now hand partial-directory removal to a detached
-  cleanup process, so CLI timeout reporting never waits on an unbounded tree
-  deletion. Card d488a14e.
-
 - Parity snapshot inventory and copy now run under the same wall-clock alarm
   as projection, so blocking snapshot construction fails closed at the
   configured deadline. Card 3cbe5bbd.
