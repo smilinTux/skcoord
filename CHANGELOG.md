@@ -1,6 +1,6 @@
 # Changelog
 
-- **Card ff79c130: make terminal preconditions atomic with graph mutations.**
+- **Card 73516c8e: make terminal preconditions atomic with graph mutations.**
   Terminal completion and move operations can now run a precondition while the
   shared board and card locks are held. Card creation and label updates use the
   same board lock, closing the child-lifecycle race.
