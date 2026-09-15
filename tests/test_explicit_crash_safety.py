@@ -14,7 +14,6 @@ PR122 review REQUEST_CHANGES on 5c5f2251:
 import json
 import os
 import shutil
-import stat as stat_mod
 from pathlib import Path
 from unittest import mock
 
@@ -80,7 +79,6 @@ def test_write_failure_leaves_no_partial_core(tmp_path: Path) -> None:
     digest = "9" * 64
 
     real_open = os.open
-    real_fsync = os.fsync
     opened: list[int] = []
     core_fd: list[int] = []
 
@@ -150,7 +148,6 @@ def test_board_replay_existing_legacy_rejects_unsafe_file(tmp_path: Path) -> Non
     board = Board(tmp_path)
     task = _task("legacy02", "Legacy")
     path = board.create_explicit_task(task, _digest(task), "maker")
-    target = tmp_path / "coordination" / "tasks" / path.name
     outside = tmp_path / "outside.json"
     outside.write_text('{"id": "legacy02", "title": "Impostor"}\n')
     path.unlink()
