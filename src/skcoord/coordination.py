@@ -29,7 +29,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Callable, Optional, Sequence
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from .atomic_io import atomic_write_text
 
@@ -874,7 +874,41 @@ class Board:
             atomic_write_text(path, json.dumps(task.model_dump(), indent=2) + "\n")
             return path
 
-    def create_claimed_task(self, task: Task, agent_name: str) -> tuple[Path, str]:
+    def create_explicit_task(self, task: Task, digest: str, actor: str) -> Path:
+        """Create or exactly replay one caller-supplied task ID."""
+        from .card_store import mirror_coord_create_explicit
+
+        self.ensure_dirs()
+        with _board_mutation_lock(self.home):
+            path = self.tasks_dir / f"{task.id}-{_slugify_filename(task.title)[:40]}.json"
+            created = mirror_coord_create_explicit(self.home, task, digest, actor)
+            if created:
+                atomic_write_text(path, json.dumps(task.model_dump(), indent=2) + "\n")
+                return path
+            if path.exists() or path.is_symlink():
+                try:
+                    payload = self._read_regular_file_bytes(path)
+                except ValueError as exc:
+                    try:
+                        path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                    raise ValueError("legacy projection is unsafe") from exc
+                try:
+                    stored = Task.model_validate(json.loads(payload.decode("utf-8")))
+                except (UnicodeDecodeError, json.JSONDecodeError, ValidationError) as exc:
+                    raise ValueError(
+                        f"Task {task.id} has an explicit creation conflict"
+                    ) from exc
+                if stored != task:
+                    raise ValueError(f"Task {task.id} has an explicit creation conflict")
+                return path
+            atomic_write_text(path, json.dumps(task.model_dump(), indent=2) + "\n")
+            return path
+
+    def create_claimed_task(
+        self, task: Task, agent_name: str, request_digest: str = "", actor: str = ""
+    ) -> tuple[Path, str]:
         """Create a task whose authoritative first fold is owned by ``agent_name``."""
         from .card_store import (
             CardStore,
@@ -886,6 +920,47 @@ class Board:
         if not card_store_write_enabled():
             raise ValueError("atomic create-and-claim requires the CardStore")
         with _board_mutation_lock(self.home):
+            store = CardStore(self.home)
+            existing_core = store._load_core(task.id)
+            if request_digest and existing_core is not None:
+                # Reason: exact claimed replay must win before mutable dependency checks.
+                revision = mirror_coord_create_claimed(
+                    self.home,
+                    task,
+                    canonical,
+                    request_digest=request_digest,
+                    actor=actor,
+                )
+                self.ensure_dirs()
+                slug = _slugify_filename(task.title)[:40]
+                path = self.tasks_dir / f"{task.id}-{slug}.json"
+                if path.exists() or path.is_symlink():
+                    try:
+                        payload = self._read_regular_file_bytes(path)
+                    except ValueError as exc:
+                        raise ValueError("legacy projection is unsafe") from exc
+                    try:
+                        stored = Task.model_validate(json.loads(payload.decode("utf-8")))
+                    except (UnicodeDecodeError, json.JSONDecodeError, ValidationError) as exc:
+                        raise ValueError(
+                            f"Task {task.id} has an explicit creation conflict"
+                        ) from exc
+                    if stored != task:
+                        raise ValueError(
+                            f"Task {task.id} has an explicit creation conflict"
+                        )
+                else:
+                    atomic_write_text(path, json.dumps(task.model_dump(), indent=2) + "\n")
+                card = store.fold(task.id)
+                if (
+                    card is None
+                    or card.owner != canonical
+                    or card.status.value != "doing"
+                    or card.meta.get("_claim_revision") != revision
+                ):
+                    raise RuntimeError("atomic create-and-claim readback failed")
+                return path, revision
+
             if task.dependencies:
                 views = {
                     view.task.id: view for view in self.get_task_views(include_archived=True)
@@ -897,14 +972,21 @@ class Board:
                     or views[dependency].status != TaskStatus.DONE
                 ]
                 if incomplete:
-                    raise ValueError(
-                        f"Task {task.id} has incomplete dependencies: {', '.join(incomplete)}"
-                    )
-            revision = mirror_coord_create_claimed(self.home, task, canonical)
+                    message = f"Task {task.id} has incomplete dependencies: {', '.join(incomplete)}"
+                    if request_digest:
+                        store.reserve_explicit_rejection(
+                            task.id, request_digest, actor, message
+                        )
+                    raise ValueError(message)
+            revision = mirror_coord_create_claimed(
+                self.home, task, canonical,
+                request_digest=request_digest, actor=actor,
+            )
             self.ensure_dirs()
             slug = _slugify_filename(task.title)[:40]
             path = self.tasks_dir / f"{task.id}-{slug}.json"
-            atomic_write_text(path, json.dumps(task.model_dump(), indent=2) + "\n")
+            if not request_digest or not path.exists():
+                atomic_write_text(path, json.dumps(task.model_dump(), indent=2) + "\n")
             agent, bumped = self._claim_task(canonical, task.id)
             if bumped is not None:
                 self._mirror_card_store(
@@ -913,7 +995,7 @@ class Board:
                     agent=canonical,
                     transition_id=uuid.uuid4().hex,
                 )
-            card = CardStore(self.home).fold(task.id)
+            card = store.fold(task.id)
             if (
                 card is None
                 or card.owner != agent.agent
@@ -922,6 +1004,12 @@ class Board:
             ):
                 raise RuntimeError("atomic create-and-claim readback failed")
             return path, revision
+
+    def create_claimed_explicit_task(
+        self, task: Task, agent_name: str, digest: str, actor: str
+    ) -> tuple[Path, str]:
+        """Create and claim a caller-supplied ID with durable rejection memory."""
+        return self.create_claimed_task(task, agent_name, digest, actor)
 
     def _mirror_card_store(self, op: str, **kw) -> None:
         """Flag-gated dual-write into the event-sourced CardStore (Phase 4).

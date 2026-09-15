@@ -59,6 +59,34 @@ _HELD_CARD_LOCKS: ContextVar[frozenset[tuple[str, str]]] = ContextVar(
 _GOVERNED_CARD_CLASS = re.compile(r"\[(REVIEW|REREVIEW|REPAIR)\]", re.IGNORECASE)
 _CARD_PARENT_LABEL_PREFIX = "parent-"
 HUMAN_CARD_CREATION_OVERRIDE_LABEL = "human-override"
+_CREATION_ATTEMPT_PREFIX = "card-creation-attempts@"
+_CREATION_PENDING_PREFIX = "card-creation-pending@"
+
+
+def explicit_creation_request_digest(request: dict[str, Any]) -> str:
+    """Return the canonical SHA-256 for caller-supplied creation semantics."""
+    payload = json.dumps(request, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _explicit_semantic_digest(semantic_core: dict[str, Any]) -> str:
+    """Return the internal digest bound to creation semantics."""
+    payload = json.dumps(
+        semantic_core, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _is_crash_reject_reason(reason: str) -> bool:
+    """Return whether a rejected attempt is an I/O abort rather than policy."""
+    return bool(
+        re.search(
+            r"OSError|ENOSPC|disk full|cannot be written|cannot be cleared|"
+            r"No space|ENOSPC|temporary destination is unsafe",
+            reason,
+            re.IGNORECASE,
+        )
+    )
 
 
 def _card_lock_key(home: Path, card_id: str) -> tuple[str, str]:
@@ -709,6 +737,434 @@ class CardStore:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
         self._ensure_card_lock_anchor(core.id)
         return core.id
+
+    @staticmethod
+    def _semantic_core(core: CardCore) -> dict[str, Any]:
+        """Return creation semantics without the generated timestamp."""
+        value = core.model_dump(mode="json")
+        value.pop("created_at", None)
+        return value
+
+    def _semantic_digest_for(self, core: CardCore) -> str:
+        """Return the internal semantic digest for one core."""
+        return _explicit_semantic_digest(self._semantic_core(core))
+
+    def _pending_intent_name(self, card_id: str) -> str:
+        """Return the recovery filename for one pending explicit intent."""
+        return f"{_CREATION_PENDING_PREFIX}{card_id}.json"
+
+    def _read_pending_intent(self, card_id: str) -> dict[str, Any] | None:
+        """Read one pending intent, failing closed on unsafe or corrupt files."""
+        directory = _open_coordination_child_directory(self.home, "recovery")
+        fd = -1
+        try:
+            try:
+                fd = os.open(
+                    self._pending_intent_name(card_id),
+                    os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=directory,
+                )
+            except FileNotFoundError:
+                return None
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                raise ValueError("creation-pending intent is unsafe")
+            chunks: list[bytes] = []
+            while chunk := os.read(fd, 65536):
+                chunks.append(chunk)
+            try:
+                record = json.loads(b"".join(chunks))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise ValueError("creation-pending intent is corrupt") from exc
+            if (
+                not isinstance(record, dict)
+                or record.get("card_id") != card_id
+                or not re.fullmatch(r"[0-9a-f]{64}", str(record.get("request_digest", "")))
+                or not re.fullmatch(r"[0-9a-f]{64}", str(record.get("semantic_digest", "")))
+                or not isinstance(record.get("actor"), str)
+                or not isinstance(record.get("ts"), str)
+            ):
+                raise ValueError("creation-pending intent is corrupt")
+            return record
+        except ValueError:
+            raise
+        except OSError as exc:
+            raise ValueError("creation-pending intent is unsafe") from exc
+        finally:
+            if fd >= 0:
+                os.close(fd)
+            os.close(directory)
+
+    def _write_pending_intent(
+        self, card_id: str, digest: str, semantic_digest: str, actor: str
+    ) -> None:
+        """Durably record pending intent before publishing core bytes."""
+        directory = _open_coordination_child_directory(self.home, "recovery")
+        temp_name = f".{self._pending_intent_name(card_id)}.{uuid.uuid4().hex}.tmp"
+        final_name = self._pending_intent_name(card_id)
+        fd = -1
+        try:
+            fd = os.open(
+                temp_name,
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+                dir_fd=directory,
+            )
+            record = {
+                "actor": actor,
+                "card_id": card_id,
+                "request_digest": digest,
+                "semantic_digest": semantic_digest,
+                "ts": _now_iso(),
+            }
+            payload = (json.dumps(record, sort_keys=True) + "\n").encode()
+            offset = 0
+            while offset < len(payload):
+                offset += os.write(fd, payload[offset:])
+            os.fsync(fd)
+            os.replace(temp_name, final_name, src_dir_fd=directory, dst_dir_fd=directory)
+            os.fsync(directory)
+        except ValueError:
+            raise
+        except OSError as exc:
+            raise ValueError("creation-pending intent cannot be written") from exc
+        finally:
+            if fd >= 0:
+                os.close(fd)
+            try:
+                os.unlink(temp_name, dir_fd=directory)
+            except FileNotFoundError:
+                pass
+            os.close(directory)
+
+    def _clear_pending_intent(self, card_id: str) -> None:
+        """Remove a pending intent after terminal accept or reject."""
+        directory = _open_coordination_child_directory(self.home, "recovery")
+        try:
+            try:
+                os.unlink(self._pending_intent_name(card_id), dir_fd=directory)
+            except FileNotFoundError:
+                return
+            os.fsync(directory)
+        except OSError as exc:
+            raise ValueError("creation-pending intent cannot be cleared") from exc
+        finally:
+            os.close(directory)
+
+    def _read_creation_attempts(self) -> list[dict[str, Any]]:
+        """Read safe attempt logs, tolerating only one incomplete final line."""
+        directory = _open_coordination_child_directory(self.home, "recovery")
+        records: list[dict[str, Any]] = []
+        try:
+            try:
+                names = os.listdir(directory)
+            except OSError as exc:
+                raise ValueError("creation-attempt log cannot be read") from exc
+            for name in sorted(names):
+                if not (name.startswith(_CREATION_ATTEMPT_PREFIX) and name.endswith(".jsonl")):
+                    continue
+                fd = -1
+                try:
+                    fd = os.open(name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=directory)
+                    info = os.fstat(fd)
+                    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                        raise ValueError("creation-attempt log is unsafe")
+                    chunks: list[bytes] = []
+                    while chunk := os.read(fd, 65536):
+                        chunks.append(chunk)
+                except ValueError:
+                    raise
+                except OSError as exc:
+                    raise ValueError("creation-attempt log is unsafe") from exc
+                finally:
+                    if fd >= 0:
+                        os.close(fd)
+                data = b"".join(chunks)
+                if data and not data.endswith(b"\n"):
+                    data = data.rsplit(b"\n", 1)[0] + b"\n"
+                for line in data.splitlines():
+                    try:
+                        record = json.loads(line)
+                    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                        raise ValueError("creation-attempt log is corrupt") from exc
+                    semantic = record.get("semantic_digest", "")
+                    if (
+                        not isinstance(record, dict)
+                        or not isinstance(record.get("card_id"), str)
+                        or not re.fullmatch(r"[0-9a-f]{64}", str(record.get("request_digest", "")))
+                        or (
+                            semantic
+                            and not re.fullmatch(r"[0-9a-f]{64}", str(semantic))
+                        )
+                        or not isinstance(record.get("actor"), str)
+                        or not isinstance(record.get("ts"), str)
+                        or record.get("outcome") not in {"accepted", "rejected"}
+                    ):
+                        raise ValueError("creation-attempt log is corrupt")
+                    records.append(record)
+        finally:
+            os.close(directory)
+        return records
+
+    def _append_creation_attempt(
+        self,
+        card_id: str,
+        digest: str,
+        actor: str,
+        outcome: str,
+        reason: str = "",
+        semantic_digest: str = "",
+    ) -> None:
+        """Append and fsync one attempt while the governor is held."""
+        directory = _open_coordination_child_directory(self.home, "recovery")
+        fd = -1
+        try:
+            fd = os.open(
+                f"{_CREATION_ATTEMPT_PREFIX}{_HOSTNAME}.jsonl",
+                os.O_CREAT | os.O_APPEND | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+                dir_fd=directory,
+            )
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                raise ValueError("creation-attempt log is unsafe")
+            record = {
+                "card_id": card_id, "request_digest": digest, "actor": actor,
+                "ts": _now_iso(), "outcome": outcome,
+            }
+            if semantic_digest:
+                record["semantic_digest"] = semantic_digest
+            if reason:
+                record["reason"] = reason
+            payload = (json.dumps(record, sort_keys=True) + "\n").encode()
+            offset = 0
+            while offset < len(payload):
+                offset += os.write(fd, payload[offset:])
+            os.fsync(fd)
+            os.fsync(directory)
+        except ValueError:
+            raise
+        except OSError as exc:
+            raise ValueError("creation-attempt log cannot be written") from exc
+        finally:
+            if fd >= 0:
+                os.close(fd)
+            os.close(directory)
+
+    def _attempt_for(self, card_id: str) -> dict[str, Any] | None:
+        """Return the sole durable attempt for an ID.
+
+        Crash/I/O rejects remain in the ledger for audit but do not reserve the
+        ID; only policy rejects and accepted records bind creation.
+        """
+        matches = [r for r in self._read_creation_attempts() if r.get("card_id") == card_id]
+        while matches and matches[0].get("outcome") == "rejected" and _is_crash_reject_reason(
+            str(matches[0].get("reason", ""))
+        ):
+            matches = matches[1:]
+        if not matches:
+            return None
+        first = matches[0]
+        if any(
+            (
+                r.get("request_digest"),
+                r.get("semantic_digest", ""),
+                r.get("outcome"),
+            )
+            != (
+                first.get("request_digest"),
+                first.get("semantic_digest", ""),
+                first.get("outcome"),
+            )
+            for r in matches[1:]
+        ):
+            raise ValueError(f"Card ID {card_id} has conflicting creation attempts")
+        return first
+
+    def _reject_explicit(
+        self, card_id: str, digest: str, actor: str, reason: str, semantic_digest: str = ""
+    ) -> None:
+        """Record a rejected attempt and clear any pending intent."""
+        try:
+            self._clear_pending_intent(card_id)
+        except Exception:
+            pass
+        self._append_creation_attempt(
+            card_id, digest, actor, "rejected", reason, semantic_digest=semantic_digest
+        )
+
+    def reserve_explicit_rejection(
+        self, card_id: str, digest: str, actor: str, reason: str
+    ) -> None:
+        """Reserve a caller-supplied ID after a rejected create."""
+        validate_card_lock_identifier(card_id)
+        with _open_lockfile(self.home, "card-creation-governor.lock", "card creation") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                attempt = self._attempt_for(card_id)
+                if self._load_core(card_id) is not None or (attempt and attempt["outcome"] == "accepted"):
+                    return
+                if attempt is None:
+                    self._reject_explicit(card_id, digest, actor, reason)
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+    def create_explicit(self, core: CardCore, digest: str, actor: str) -> bool:
+        """Create an explicit ID, returning false only for exact replay."""
+        validate_card_lock_identifier(core.id)
+        if not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise ValueError("explicit creation digest must be a sha256 hex digest")
+        semantic_digest = self._semantic_digest_for(core)
+        with _open_lockfile(self.home, "card-creation-governor.lock", "card creation") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                attempt = self._attempt_for(core.id)
+                existing = self._load_core(core.id)
+                pending = self._read_pending_intent(core.id)
+                if attempt and attempt["outcome"] == "rejected":
+                    raise ValueError(
+                        f"Card ID {core.id} is reserved by a rejected creation attempt"
+                    )
+                if attempt and attempt["outcome"] == "accepted":
+                    if existing is None:
+                        raise ValueError(
+                            f"Card ID {core.id} has an explicit creation conflict"
+                        )
+                    # Reason: recover from the stored core, never trust caller digest alone.
+                    stored = CardCore.model_validate(existing)
+                    stored_semantic = self._semantic_digest_for(stored)
+                    ledger_semantic = str(attempt.get("semantic_digest") or "")
+                    if ledger_semantic and stored_semantic != ledger_semantic:
+                        raise ValueError(
+                            f"Card ID {core.id} has an explicit creation conflict"
+                        )
+                    if attempt["request_digest"] != digest:
+                        raise ValueError(
+                            f"Card ID {core.id} has an explicit creation conflict"
+                        )
+                    if self._semantic_core(stored) != self._semantic_core(core):
+                        raise ValueError(
+                            f"Card ID {core.id} has an explicit creation conflict"
+                        )
+                    return False
+                if pending is not None:
+                    if (
+                        pending["request_digest"] != digest
+                        or pending["semantic_digest"] != semantic_digest
+                    ):
+                        raise ValueError(
+                            f"Card ID {core.id} has an explicit creation conflict"
+                        )
+                    if existing is not None:
+                        stored = CardCore.model_validate(existing)
+                        if self._semantic_digest_for(stored) != semantic_digest:
+                            raise ValueError(
+                                f"Card ID {core.id} has an explicit creation conflict"
+                            )
+                        self._append_creation_attempt(
+                            core.id,
+                            digest,
+                            actor,
+                            "accepted",
+                            semantic_digest=semantic_digest,
+                        )
+                        self._clear_pending_intent(core.id)
+                        return False
+                elif existing is not None:
+                    raise ValueError(
+                        f"Card ID {core.id} has an explicit creation conflict"
+                    )
+                if attempt is None and pending is None:
+                    try:
+                        self._govern_create(core)
+                    except ValueError as exc:
+                        self._reject_explicit(
+                            core.id, digest, actor, str(exc), semantic_digest
+                        )
+                        raise
+                try:
+                    if pending is None:
+                        self._write_pending_intent(
+                            core.id, digest, semantic_digest, actor
+                        )
+                    self._publish_explicit_core(core)
+                    self._append_creation_attempt(
+                        core.id,
+                        digest,
+                        actor,
+                        "accepted",
+                        semantic_digest=semantic_digest,
+                    )
+                    self._clear_pending_intent(core.id)
+                except Exception as exc:
+                    reason = str(exc) or exc.__class__.__name__
+                    try:
+                        self._reject_explicit(
+                            core.id, digest, actor, reason, semantic_digest
+                        )
+                    except Exception:
+                        self._clear_pending_intent(core.id)
+                    raise
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        self._ensure_card_lock_anchor(core.id)
+        return True
+
+    def _publish_explicit_core(self, core: CardCore) -> None:
+        """Atomically publish core.json while the governor is held."""
+        directory = self._open_card_directory(core.id)
+        temp_name = f".core.json.{uuid.uuid4().hex}.tmp"
+        fd = -1
+        try:
+            try:
+                existing = os.stat("core.json", dir_fd=directory, follow_symlinks=False)
+            except FileNotFoundError:
+                existing = None
+            if existing is not None:
+                if (
+                    stat.S_ISLNK(existing.st_mode)
+                    or not stat.S_ISREG(existing.st_mode)
+                    or existing.st_nlink != 1
+                ):
+                    raise ValueError("CardStore core destination is unsafe")
+                return
+            fd = os.open(
+                temp_name,
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0),
+                0o644,
+                dir_fd=directory,
+            )
+            payload = (core.model_dump_json(indent=2) + "\n").encode()
+            offset = 0
+            while offset < len(payload):
+                offset += os.write(fd, payload[offset:])
+            os.fsync(fd)
+            temporary = os.stat(temp_name, dir_fd=directory, follow_symlinks=False)
+            opened = os.fstat(fd)
+            if (
+                stat.S_ISLNK(temporary.st_mode)
+                or not stat.S_ISREG(temporary.st_mode)
+                or temporary.st_nlink != 1
+                or (temporary.st_dev, temporary.st_ino) != (opened.st_dev, opened.st_ino)
+            ):
+                raise ValueError("CardStore core temporary destination is unsafe")
+            os.replace(
+                temp_name, "core.json", src_dir_fd=directory, dst_dir_fd=directory
+            )
+            os.fsync(directory)
+        except BaseException:
+            if fd >= 0:
+                os.close(fd)
+                fd = -1
+            try:
+                os.unlink(temp_name, dir_fd=directory)
+            except FileNotFoundError:
+                pass
+            raise
+        finally:
+            if fd >= 0:
+                os.close(fd)
+            os.close(directory)
 
     def append_event(self, card_id: str, action: str, agent: str, **payload: Any) -> dict:
         """Append one event line under the common same-card lock protocol.
@@ -1906,11 +2362,38 @@ def mirror_coord_create(home: Path, task) -> None:
     )
 
 
+def mirror_coord_create_explicit(home: Path, task, digest: str, actor: str) -> bool:
+    """Create an explicit coordination core or recognize its exact replay."""
+    from .card import _swimlane_for_tags
+
+    tags = {value.lower() for value in task.tags}
+    return CardStore(home).create_explicit(
+        CardCore(
+            id=task.id,
+            kind="epic" if "epic" in tags else "task",
+            title=task.title,
+            description=task.description,
+            created_by=task.created_by,
+            created_at=task.created_at,
+            acceptance_criteria=list(getattr(task, "acceptance_criteria", []) or []),
+            dependencies=list(task.dependencies),
+            initial_priority=task.priority.value,
+            initial_swimlane=_swimlane_for_tags(task.tags),
+            initial_labels=list(task.tags),
+            meta=dict(task.meta),
+        ),
+        digest,
+        actor,
+    )
+
+
 def mirror_coord_create_claimed(
     home: Path,
     task,
     owner: str,
     claim_revision: str = "",
+    request_digest: str = "",
+    actor: str = "",
 ) -> str:
     """Create a card whose first observable fold is already claimed."""
     from .card import _swimlane_for_tags
@@ -1943,7 +2426,9 @@ def mirror_coord_create_claimed(
         meta=dict(task.meta),
     )
     if existing is not None:
-        if CardCore.model_validate(existing).model_dump() != expected.model_dump():
+        if request_digest:
+            store.create_explicit(expected, request_digest, actor)
+        elif CardCore.model_validate(existing).model_dump() != expected.model_dump():
             raise ValueError(f"CardStore create-and-claim conflict for {task.id}")
         current = store.fold(task.id)
         if (
@@ -1957,7 +2442,10 @@ def mirror_coord_create_claimed(
             )
         return revision
 
-    store.create(expected)
+    if request_digest:
+        store.create_explicit(expected, request_digest, actor)
+    else:
+        store.create(expected)
     created = store._load_core(task.id)
     if created is None or CardCore.model_validate(created).model_dump() != expected.model_dump():
         raise ValueError(f"CardStore create-and-claim conflict for {task.id}")
