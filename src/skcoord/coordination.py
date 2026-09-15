@@ -29,7 +29,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Callable, Optional, Sequence
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from .atomic_io import atomic_write_text
 
@@ -882,8 +882,28 @@ class Board:
         with _board_mutation_lock(self.home):
             path = self.tasks_dir / f"{task.id}-{_slugify_filename(task.title)[:40]}.json"
             created = mirror_coord_create_explicit(self.home, task, digest, actor)
-            if created or not path.exists():
+            if created:
                 atomic_write_text(path, json.dumps(task.model_dump(), indent=2) + "\n")
+                return path
+            if path.exists() or path.is_symlink():
+                try:
+                    payload = self._read_regular_file_bytes(path)
+                except ValueError as exc:
+                    try:
+                        path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                    raise ValueError("legacy projection is unsafe") from exc
+                try:
+                    stored = Task.model_validate(json.loads(payload.decode("utf-8")))
+                except (UnicodeDecodeError, json.JSONDecodeError, ValidationError) as exc:
+                    raise ValueError(
+                        f"Task {task.id} has an explicit creation conflict"
+                    ) from exc
+                if stored != task:
+                    raise ValueError(f"Task {task.id} has an explicit creation conflict")
+                return path
+            atomic_write_text(path, json.dumps(task.model_dump(), indent=2) + "\n")
             return path
 
     def create_claimed_task(
@@ -900,6 +920,47 @@ class Board:
         if not card_store_write_enabled():
             raise ValueError("atomic create-and-claim requires the CardStore")
         with _board_mutation_lock(self.home):
+            store = CardStore(self.home)
+            existing_core = store._load_core(task.id)
+            if request_digest and existing_core is not None:
+                # Reason: exact claimed replay must win before mutable dependency checks.
+                revision = mirror_coord_create_claimed(
+                    self.home,
+                    task,
+                    canonical,
+                    request_digest=request_digest,
+                    actor=actor,
+                )
+                self.ensure_dirs()
+                slug = _slugify_filename(task.title)[:40]
+                path = self.tasks_dir / f"{task.id}-{slug}.json"
+                if path.exists() or path.is_symlink():
+                    try:
+                        payload = self._read_regular_file_bytes(path)
+                    except ValueError as exc:
+                        raise ValueError("legacy projection is unsafe") from exc
+                    try:
+                        stored = Task.model_validate(json.loads(payload.decode("utf-8")))
+                    except (UnicodeDecodeError, json.JSONDecodeError, ValidationError) as exc:
+                        raise ValueError(
+                            f"Task {task.id} has an explicit creation conflict"
+                        ) from exc
+                    if stored != task:
+                        raise ValueError(
+                            f"Task {task.id} has an explicit creation conflict"
+                        )
+                else:
+                    atomic_write_text(path, json.dumps(task.model_dump(), indent=2) + "\n")
+                card = store.fold(task.id)
+                if (
+                    card is None
+                    or card.owner != canonical
+                    or card.status.value != "doing"
+                    or card.meta.get("_claim_revision") != revision
+                ):
+                    raise RuntimeError("atomic create-and-claim readback failed")
+                return path, revision
+
             if task.dependencies:
                 views = {
                     view.task.id: view for view in self.get_task_views(include_archived=True)
@@ -913,7 +974,7 @@ class Board:
                 if incomplete:
                     message = f"Task {task.id} has incomplete dependencies: {', '.join(incomplete)}"
                     if request_digest:
-                        CardStore(self.home).reserve_explicit_rejection(
+                        store.reserve_explicit_rejection(
                             task.id, request_digest, actor, message
                         )
                     raise ValueError(message)
@@ -934,7 +995,7 @@ class Board:
                     agent=canonical,
                     transition_id=uuid.uuid4().hex,
                 )
-            card = CardStore(self.home).fold(task.id)
+            card = store.fold(task.id)
             if (
                 card is None
                 or card.owner != agent.agent
