@@ -874,7 +874,21 @@ class Board:
             atomic_write_text(path, json.dumps(task.model_dump(), indent=2) + "\n")
             return path
 
-    def create_claimed_task(self, task: Task, agent_name: str) -> tuple[Path, str]:
+    def create_explicit_task(self, task: Task, digest: str, actor: str) -> Path:
+        """Create or exactly replay one caller-supplied task ID."""
+        from .card_store import mirror_coord_create_explicit
+
+        self.ensure_dirs()
+        with _board_mutation_lock(self.home):
+            path = self.tasks_dir / f"{task.id}-{_slugify_filename(task.title)[:40]}.json"
+            created = mirror_coord_create_explicit(self.home, task, digest, actor)
+            if created or not path.exists():
+                atomic_write_text(path, json.dumps(task.model_dump(), indent=2) + "\n")
+            return path
+
+    def create_claimed_task(
+        self, task: Task, agent_name: str, request_digest: str = "", actor: str = ""
+    ) -> tuple[Path, str]:
         """Create a task whose authoritative first fold is owned by ``agent_name``."""
         from .card_store import (
             CardStore,
@@ -897,14 +911,21 @@ class Board:
                     or views[dependency].status != TaskStatus.DONE
                 ]
                 if incomplete:
-                    raise ValueError(
-                        f"Task {task.id} has incomplete dependencies: {', '.join(incomplete)}"
-                    )
-            revision = mirror_coord_create_claimed(self.home, task, canonical)
+                    message = f"Task {task.id} has incomplete dependencies: {', '.join(incomplete)}"
+                    if request_digest:
+                        CardStore(self.home).reserve_explicit_rejection(
+                            task.id, request_digest, actor, message
+                        )
+                    raise ValueError(message)
+            revision = mirror_coord_create_claimed(
+                self.home, task, canonical,
+                request_digest=request_digest, actor=actor,
+            )
             self.ensure_dirs()
             slug = _slugify_filename(task.title)[:40]
             path = self.tasks_dir / f"{task.id}-{slug}.json"
-            atomic_write_text(path, json.dumps(task.model_dump(), indent=2) + "\n")
+            if not request_digest or not path.exists():
+                atomic_write_text(path, json.dumps(task.model_dump(), indent=2) + "\n")
             agent, bumped = self._claim_task(canonical, task.id)
             if bumped is not None:
                 self._mirror_card_store(
@@ -922,6 +943,12 @@ class Board:
             ):
                 raise RuntimeError("atomic create-and-claim readback failed")
             return path, revision
+
+    def create_claimed_explicit_task(
+        self, task: Task, agent_name: str, digest: str, actor: str
+    ) -> tuple[Path, str]:
+        """Create and claim a caller-supplied ID with durable rejection memory."""
+        return self.create_claimed_task(task, agent_name, digest, actor)
 
     def _mirror_card_store(self, op: str, **kw) -> None:
         """Flag-gated dual-write into the event-sourced CardStore (Phase 4).

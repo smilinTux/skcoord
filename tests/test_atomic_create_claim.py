@@ -34,7 +34,9 @@ def test_create_claimed_task_retry_returns_same_revision(tmp_path, monkeypatch):
     assert second[1] == first[1]
 
 
-def test_create_claimed_task_retry_after_new_current_task_is_read_only(tmp_path, monkeypatch):
+def test_create_claimed_task_retry_after_new_current_task_is_read_only(
+    tmp_path, monkeypatch
+):
     monkeypatch.setenv("SKCOORD_CARD_STORE", "1")
     board = Board(tmp_path)
     first = Task(id="a1b2c3e3", title="First", created_by="maker")
@@ -70,7 +72,10 @@ def test_create_claimed_task_retry_after_new_current_task_is_read_only(tmp_path,
         "maker",
         "ready",
     )
-    assert second_card is not None and (second_card.owner, second_card.status.value) == (
+    assert second_card is not None and (
+        second_card.owner,
+        second_card.status.value,
+    ) == (
         "maker",
         "doing",
     )
@@ -162,7 +167,10 @@ def test_create_claimed_task_concurrent_retry_converges(tmp_path, monkeypatch):
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         revisions = list(
-            pool.map(lambda _: Board(tmp_path).create_claimed_task(task, "maker")[1], range(2))
+            pool.map(
+                lambda _: Board(tmp_path).create_claimed_task(task, "maker")[1],
+                range(2),
+            )
         )
 
     assert revisions[0] == revisions[1]
@@ -239,7 +247,9 @@ def test_create_claimed_task_requires_cardstore(tmp_path, monkeypatch):
     assert not (tmp_path / "coordination" / "tasks").exists()
 
 
-def test_create_claimed_task_rejects_incomplete_dependency_before_write(tmp_path, monkeypatch):
+def test_create_claimed_task_rejects_incomplete_dependency_before_write(
+    tmp_path, monkeypatch
+):
     monkeypatch.setenv("SKCOORD_CARD_STORE", "1")
     task = Task(
         id="a1b2c3d9",
@@ -252,3 +262,24 @@ def test_create_claimed_task_rejects_incomplete_dependency_before_write(tmp_path
         Board(tmp_path).create_claimed_task(task, "maker")
 
     assert CardStore(tmp_path).fold(task.id) is None
+
+
+def test_explicit_claim_rejects_dependency_without_split_brain(tmp_path, monkeypatch):
+    monkeypatch.setenv("SKCOORD_CARD_STORE", "1")
+    board = Board(tmp_path)
+    task = Task(
+        id="a1b2c3fa",
+        title="Blocked explicit claim",
+        created_by="maker",
+        dependencies=["ffffffff"],
+    )
+
+    with pytest.raises(ValueError, match="incomplete dependencies"):
+        board.create_claimed_explicit_task(task, "maker", "4" * 64, "maker")
+
+    assert CardStore(tmp_path).fold(task.id) is None
+    assert not list(board.tasks_dir.glob(f"{task.id}-*.json"))
+    assert board.load_agent("maker") is None
+    corrected = task.model_copy(update={"dependencies": []})
+    with pytest.raises(ValueError, match="reserved by a rejected creation attempt"):
+        board.create_claimed_explicit_task(corrected, "maker", "5" * 64, "maker")

@@ -48,6 +48,11 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
 
 ### Fixed
 
+- Card `7bc6fd06`: explicit caller-supplied card IDs now use an append-only,
+  hardened creation-attempt ledger under the CardStore governor. Rejected IDs
+  stay reserved, accepted IDs replay only with identical semantics, and
+  claimed creates validate dependencies before materializing a core.
+
 - Repeating `claim_task` for an already-current same-owner claim now preserves
   its exact claim revision and appends no duplicate claim event, so worker
   startup verification cannot invalidate the running wrapper generation. A

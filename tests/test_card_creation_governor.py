@@ -1,5 +1,7 @@
 """Card creation governor regression coverage for review-chain inflation."""
 
+import json
+import os
 from pathlib import Path
 
 import pytest
@@ -12,18 +14,25 @@ def _core(card_id: str, title: str, *labels: str) -> CardCore:
     return CardCore(id=card_id, title=title, initial_labels=list(labels))
 
 
-def test_second_live_review_for_parent_is_refused_and_names_existing(tmp_path: Path) -> None:
+def test_second_live_review_for_parent_is_refused_and_names_existing(
+    tmp_path: Path,
+) -> None:
     store = CardStore(tmp_path)
     store.create(_core("parent01", "Implementation"))
 
-    assert store.create(_core("review01", "[REVIEW] First", "parent-parent01")) == "review01"
+    assert (
+        store.create(_core("review01", "[REVIEW] First", "parent-parent01"))
+        == "review01"
+    )
 
     with pytest.raises(ValueError, match=r"review01"):
         store.create(_core("review02", "[REVIEW] Duplicate", "parent-parent01"))
     assert store._load_core("review02") is None
 
 
-def test_terminal_review_allows_rereview_but_third_level_requires_human(tmp_path: Path) -> None:
+def test_terminal_review_allows_rereview_but_third_level_requires_human(
+    tmp_path: Path,
+) -> None:
     store = CardStore(tmp_path)
     store.create(_core("root0001", "Implementation"))
     store.create(_core("review01", "[REVIEW] First", "parent-root0001"))
@@ -51,7 +60,9 @@ def test_terminal_review_allows_rereview_but_third_level_requires_human(tmp_path
     )
 
 
-def test_human_override_is_exact_and_non_review_cards_are_unaffected(tmp_path: Path) -> None:
+def test_human_override_is_exact_and_non_review_cards_are_unaffected(
+    tmp_path: Path,
+) -> None:
     store = CardStore(tmp_path)
     store.create(_core("parent01", "Implementation"))
     store.create(_core("review01", "[REVIEW] First", "parent-parent01"))
@@ -100,7 +111,9 @@ def test_board_and_mcp_adapter_share_cardstore_refusal_without_legacy_orphans(
     first = Task(id="review01", title="[REVIEW] CLI", tags=["parent-parent01"])
     board.create_task(first)
 
-    duplicate = Task(id="review02", title="[REVIEW] Duplicate", tags=["parent-parent01"])
+    duplicate = Task(
+        id="review02", title="[REVIEW] Duplicate", tags=["parent-parent01"]
+    )
     with pytest.raises(ValueError, match=r"review01"):
         board.create_task(duplicate)
     assert not list(board.tasks_dir.glob("review02-*.json"))
@@ -118,9 +131,13 @@ def test_cli_and_mcp_paths_refuse_third_rereview_without_human_override(
     cli_home = tmp_path / "cli"
     board = Board(cli_home)
     board.create_task(Task(id="cliroot1", title="Implementation"))
-    board.create_task(Task(id="clirev01", title="[REVIEW] First", tags=["parent-cliroot1"]))
+    board.create_task(
+        Task(id="clirev01", title="[REVIEW] First", tags=["parent-cliroot1"])
+    )
     CardStore(cli_home).append_event("clirev01", "complete", "reviewer")
-    board.create_task(Task(id="clirev02", title="[REVIEW] Second", tags=["parent-clirev01"]))
+    board.create_task(
+        Task(id="clirev02", title="[REVIEW] Second", tags=["parent-clirev01"])
+    )
     CardStore(cli_home).append_event("clirev02", "complete", "reviewer")
 
     third_cli = Task(id="clirev03", title="[REREVIEW] Third", tags=["parent-clirev02"])
@@ -146,3 +163,116 @@ def test_cli_and_mcp_paths_refuse_third_rereview_without_human_override(
     third_mcp.tags.append("human-override")
     mirror_coord_create(mcp_home, third_mcp)
     assert store._load_core("mcprev03") is not None
+
+
+def test_explicit_creation_replay_requires_same_digest_and_core(tmp_path: Path) -> None:
+    board = Board(tmp_path)
+    original = Task(id="explicit1", title="Original", created_by="maker")
+    path = board.create_explicit_task(original, "a" * 64, "maker")
+    before = path.read_bytes()
+
+    assert board.create_explicit_task(original, "a" * 64, "maker") == path
+    assert path.read_bytes() == before
+
+    for changed, digest in (
+        (original.model_copy(update={"title": "Changed"}), "b" * 64),
+        (original.model_copy(update={"description": "Changed"}), "a" * 64),
+    ):
+        with pytest.raises(ValueError, match="explicit creation conflict"):
+            board.create_explicit_task(changed, digest, "maker")
+    assert path.read_bytes() == before
+    assert not list(board.tasks_dir.glob("explicit1-changed*.json"))
+
+
+def test_explicit_rejection_is_durable_without_a_foldable_card(tmp_path: Path) -> None:
+    store = CardStore(tmp_path)
+    store.reserve_explicit_rejection("reject01", "c" * 64, "maker", "invalid")
+
+    with pytest.raises(ValueError, match="reserved by a rejected creation attempt"):
+        store.create_explicit(_core("reject01", "corrected"), "d" * 64, "maker")
+    assert store.fold("reject01") is None
+
+
+def test_explicit_reservation_reader_rejects_symlink_and_hardlink(
+    tmp_path: Path,
+) -> None:
+    recovery = tmp_path / "coordination" / "recovery"
+    recovery.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.write_text("{}\n", encoding="utf-8")
+    unsafe = recovery / "card-creation-attempts@unsafe.jsonl"
+    unsafe.symlink_to(outside)
+
+    with pytest.raises(ValueError, match="creation-attempt log is unsafe"):
+        CardStore(tmp_path).create_explicit(
+            _core("safe0001", "safe"), "e" * 64, "maker"
+        )
+
+    unsafe.unlink()
+    unsafe.write_text("{}\n", encoding="utf-8")
+    os.link(unsafe, tmp_path / "hardlink")
+    with pytest.raises(ValueError, match="creation-attempt log is unsafe"):
+        CardStore(tmp_path).create_explicit(
+            _core("safe0001", "safe"), "e" * 64, "maker"
+        )
+
+
+def test_explicit_reservation_reader_fails_on_non_tail_corruption(
+    tmp_path: Path,
+) -> None:
+    store = CardStore(tmp_path)
+    store.reserve_explicit_rejection("reject02", "f" * 64, "maker", "invalid")
+    log = next(
+        (tmp_path / "coordination" / "recovery").glob("card-creation-attempts*.jsonl")
+    )
+    valid = log.read_text(encoding="utf-8")
+    log.write_text(valid + "not-json\n" + valid, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="creation-attempt log is corrupt"):
+        store.create_explicit(_core("safe0002", "safe"), "1" * 64, "maker")
+
+
+def test_explicit_reservation_reader_ignores_only_torn_tail(tmp_path: Path) -> None:
+    store = CardStore(tmp_path)
+    store.reserve_explicit_rejection("reject03", "2" * 64, "maker", "invalid")
+    log = next(
+        (tmp_path / "coordination" / "recovery").glob("card-creation-attempts*.jsonl")
+    )
+    with log.open("ab") as stream:
+        stream.write(b'{"card_id":"torn')
+
+    with pytest.raises(ValueError, match="reserved by a rejected creation attempt"):
+        store.create_explicit(_core("reject03", "safe"), "3" * 64, "maker")
+
+
+def test_explicit_reservation_reader_fails_closed_on_io(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store = CardStore(tmp_path)
+
+    def denied(_fd):
+        raise OSError("denied")
+
+    monkeypatch.setattr(os, "listdir", denied)
+    with pytest.raises(ValueError, match="creation-attempt log cannot be read"):
+        store.create_explicit(_core("safe0003", "safe"), "4" * 64, "maker")
+
+
+def test_explicit_attempt_append_retries_partial_writes(
+    tmp_path: Path, monkeypatch
+) -> None:
+    real_write = os.write
+
+    def partial(fd, payload):
+        return real_write(fd, payload[: max(1, len(payload) // 2)])
+
+    monkeypatch.setattr(os, "write", partial)
+    CardStore(tmp_path).reserve_explicit_rejection(
+        "reject04", "5" * 64, "maker", "invalid"
+    )
+
+    log = next(
+        (tmp_path / "coordination" / "recovery").glob("card-creation-attempts*.jsonl")
+    )
+    record = json.loads(log.read_text(encoding="utf-8"))
+    assert record["card_id"] == "reject04"
