@@ -40,6 +40,7 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
+from .abandon_reason import validate_abandon_reason
 from .card import Card, Column, Kind
 from .coordination import validate_shared_home
 
@@ -1177,6 +1178,16 @@ class CardStore:
         mutation protocol.
         """
         validate_card_lock_identifier(card_id)
+        if action == "release_claim":
+            # Every stop must be attributable. Without this the ledger records
+            # THAT a worker gave up and never WHY, which left 53 percent of the
+            # open residue unexplainable when measured on 2026-09-16.
+            #
+            # This NORMALISES, it does not reject. Several dispatcher call sites
+            # release claims today with no reason, and a reaper path that cannot
+            # release is worse than one that releases without saying why.
+            # Enforcement tightens only after Task 10 raises reason coverage.
+            payload["abandon_reason"] = validate_abandon_reason(payload.get("abandon_reason"))
         if _card_lock_key(self.home, card_id) not in _HELD_CARD_LOCKS.get():
             with card_mutation_lock(self.home, card_id):
                 return self.append_event(card_id, action, agent, **payload)
