@@ -11,6 +11,12 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
 
 ### Added
 
+- A read-only void-dependency reconciliation manifest generator that validates
+  the assessment hash, fresh-folds referenced cards, binds each proposed edge
+  action to the dependent and void-card revisions, and classifies edges for
+  removal, successor substitution, duplicate history, or human decision. It
+  rejects card drift; it does not change dependencies or void-gate eligibility.
+
 - Board scan-cost helpers: `Board.prune_stale_locks`, live-only defaults for
   `generate_board_md` / `get_briefing_*` (`include_done`), and CardStore folds
   that stash `_board_updated_at` for archive aging. Cards b0a0d002/b0a0d003/b0a0d005.
