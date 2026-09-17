@@ -43,6 +43,7 @@ from pydantic import BaseModel, Field, field_validator
 from .abandon_reason import validate_abandon_reason, validate_exit_gates
 from .card import Card, Column, Kind
 from .coordination import validate_shared_home
+from .dependency_graph import would_create_cycle
 
 logger = logging.getLogger(__name__)
 
@@ -2161,6 +2162,23 @@ def amend_dependency(
             action == "remove_dependency" and not present
         ):
             return False
+        if action == "add_dependency":
+            # Folded dependencies, not raw core.json: add_dependency and
+            # remove_dependency amend only the folded projection, so a card's
+            # birth-time core.json can be stale relative to its current
+            # effective edges. list_cards() folds every card the same way
+            # current_dependencies() folds one, so the graph checked here
+            # matches what claim validation actually sees.
+            edges = {
+                card.id: list(card.dependencies)
+                for card in CardStore(home).list_cards(
+                    include_archived=True, degrade_unreadable=True
+                )
+            }
+            if would_create_cycle(edges, card_id, dependency_id):
+                raise ValueError(
+                    f"dependency {card_id} -> {dependency_id} would create a cycle"
+                )
         CardStore(home).append_event(
             card_id,
             action,
