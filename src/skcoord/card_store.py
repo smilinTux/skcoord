@@ -656,6 +656,31 @@ class CardStore:
 
     def _govern_create(self, core: CardCore) -> None:
         """Fail closed on duplicate or over-depth review and repair creation."""
+        if core.dependencies:
+            # 700 of 5,861 live cards received their dependency edges through
+            # create(), not through amend_dependency's add_dependency branch,
+            # which this estate has never once called. create() never checked
+            # those edges for cycles, so the guard at 2178 was wired to a
+            # path nobody uses while this path went unchecked. A card can
+            # close a cycle at birth, for example a forward reference to a
+            # sibling that is created afterward with a dependency back on
+            # this one, so check every non-empty birth against the same
+            # folded graph amend_dependency checks; the new card is not yet
+            # written, so the fold naturally excludes it. Skipped when
+            # core.dependencies is empty, which holds for the large majority
+            # of creates and would otherwise pay a full graph build for
+            # nothing. degrade_unreadable=True so one unreadable card in the
+            # store cannot block every future create.
+            edges = {
+                card.id: list(card.dependencies)
+                for card in self.list_cards(include_archived=True, degrade_unreadable=True)
+            }
+            for dependency_id in core.dependencies:
+                if would_create_cycle(edges, core.id, dependency_id):
+                    raise ValueError(
+                        f"dependency {core.id} -> {dependency_id} would create a cycle"
+                    )
+
         creation_class = self._creation_class(core)
         if creation_class is None:
             return

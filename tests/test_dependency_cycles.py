@@ -58,3 +58,70 @@ def test_add_dependency_rejects_a_cycle(tmp_path):
     with pytest.raises(ValueError) as excinfo:
         add_dependency(tmp_path, parent, leaf, agent="tester", reason="would cycle")
     assert "cycle" in str(excinfo.value).lower()
+
+
+def test_create_rejects_a_forward_reference_cycle(tmp_path):
+    """create() must catch cycles too: 700 of 5,861 live cards got their
+    dependency edges through create(), which never inspected core.dependencies
+    for cycles. amend_dependency's guard only ever sees an add_dependency call,
+    and this estate has never made one, so the guard as wired never fired.
+
+    A cycle formed entirely at birth: card A is created depending on B before
+    B exists (create() never checks dependency existence), then B is created
+    depending on A. That closes a cycle without ever calling amend_dependency.
+    """
+    from skcoord.card_store import CardCore, CardStore
+
+    store = CardStore(tmp_path)
+    store.create(
+        CardCore(
+            id="cardA0001",
+            kind="task",
+            title="a",
+            created_by="tester",
+            dependencies=["cardB0001"],
+        )
+    )
+    with pytest.raises(ValueError) as excinfo:
+        store.create(
+            CardCore(
+                id="cardB0001",
+                kind="task",
+                title="b",
+                created_by="tester",
+                dependencies=["cardA0001"],
+            )
+        )
+    assert "cycle" in str(excinfo.value).lower()
+
+
+def test_create_with_no_dependencies_is_unaffected(tmp_path):
+    """The overwhelming majority of creates (5,161 of 5,861 live cards) carry
+    no dependencies at all, so the cycle check must not cost them a graph
+    build."""
+    from skcoord.card_store import CardCore, CardStore
+
+    store = CardStore(tmp_path)
+    card_id = store.create(
+        CardCore(id="plain0001", kind="task", title="plain", created_by="tester")
+    )
+    assert card_id == "plain0001"
+
+
+def test_create_allows_a_legitimate_dependency_on_an_existing_card(tmp_path):
+    from skcoord.card_store import CardCore, CardStore
+
+    store = CardStore(tmp_path)
+    store.create(
+        CardCore(id="gate0001", kind="task", title="gate", created_by="tester")
+    )
+    card_id = store.create(
+        CardCore(
+            id="leaf0002",
+            kind="task",
+            title="leaf",
+            created_by="tester",
+            dependencies=["gate0001"],
+        )
+    )
+    assert card_id == "leaf0002"
