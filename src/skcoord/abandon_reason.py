@@ -51,3 +51,27 @@ def validate_abandon_reason(value: str | None) -> str:
             + ", ".join(sorted(ABANDON_REASONS))
         )
     return normalised
+
+
+def validate_exit_gates(gates: object) -> list[dict]:
+    """Return the gate list, or raise ValueError.
+
+    Entries are objects, never prose. The dispatcher needs `owner` to route the
+    gate to a seat and `gate` to name it. A string such as "independent review
+    PASS before merge" cannot be checked mechanically, which is exactly the
+    defect that let card 06a95c23 accumulate 402 claims.
+    """
+    if gates is None:
+        return []
+    if not isinstance(gates, list):
+        raise ValueError("exit_gates must be a list of objects")
+    validated = []
+    for entry in gates:
+        if not isinstance(entry, dict):
+            raise ValueError(f"exit_gates entry must be an object, got {entry!r}")
+        if not str(entry.get("gate") or "").strip():
+            raise ValueError(f"exit_gates entry needs a 'gate' name: {entry!r}")
+        if not str(entry.get("owner") or "").strip():
+            raise ValueError(f"exit_gates entry needs an 'owner' seat: {entry!r}")
+        validated.append(dict(entry))
+    return validated

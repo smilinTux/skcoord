@@ -316,6 +316,14 @@ class CardCore(BaseModel):
     initial_owner: str | None = None
     initial_claim_revision: str | None = None
     meta: dict = Field(default_factory=dict)
+    # Optional v2 fields. Absent spec_version means v1 legacy behaviour, so
+    # adoption is per-card and reversible rather than a flag day across the
+    # existing production cards. exit_gates entries are objects (never prose)
+    # so a dispatcher can route them to the owning seat; see abandon_reason.py
+    # for validate_exit_gates, which callers may run before construction.
+    exit_gates: list[dict] = Field(default_factory=list)
+    non_goals: list[str] = Field(default_factory=list)
+    spec_version: int | None = None
 
 
 # Sanctioned legacy overlay actions (coordination/card_events/*.jsonl) mapped
