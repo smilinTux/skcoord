@@ -38,10 +38,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
+from .abandon_reason import validate_abandon_reason, validate_exit_gates
 from .card import Card, Column, Kind
 from .coordination import validate_shared_home
+from .dependency_graph import would_create_cycle
 
 logger = logging.getLogger(__name__)
 
@@ -315,6 +317,26 @@ class CardCore(BaseModel):
     initial_owner: str | None = None
     initial_claim_revision: str | None = None
     meta: dict = Field(default_factory=dict)
+    # Optional v2 fields. Absent spec_version means v1 legacy behaviour, so
+    # adoption is per-card and reversible rather than a flag day across the
+    # existing production cards. exit_gates entries are objects (never prose)
+    # so a dispatcher can route them to the owning seat; validate_exit_gates
+    # in abandon_reason.py is also exported for callers that want to check a
+    # gate list before construction.
+    exit_gates: list[dict] = Field(default_factory=list)
+    non_goals: list[str] = Field(default_factory=list)
+    spec_version: int | None = None
+
+    @field_validator("exit_gates")
+    @classmethod
+    def _validate_exit_gates(cls, value: list[dict]) -> list[dict]:
+        """Reject a gate missing owner or gate name at construction time.
+
+        A dict-shaped gate missing owner is exactly as unroutable to the
+        dispatcher as a prose string, it just fails later, at dispatch time,
+        instead of at write time. This closes that hole at the model boundary.
+        """
+        return validate_exit_gates(value)
 
 
 # Sanctioned legacy overlay actions (coordination/card_events/*.jsonl) mapped
@@ -634,6 +656,31 @@ class CardStore:
 
     def _govern_create(self, core: CardCore) -> None:
         """Fail closed on duplicate or over-depth review and repair creation."""
+        if core.dependencies:
+            # 700 of 5,861 live cards received their dependency edges through
+            # create(), not through amend_dependency's add_dependency branch,
+            # which this estate has never once called. create() never checked
+            # those edges for cycles, so the guard at 2178 was wired to a
+            # path nobody uses while this path went unchecked. A card can
+            # close a cycle at birth, for example a forward reference to a
+            # sibling that is created afterward with a dependency back on
+            # this one, so check every non-empty birth against the same
+            # folded graph amend_dependency checks; the new card is not yet
+            # written, so the fold naturally excludes it. Skipped when
+            # core.dependencies is empty, which holds for the large majority
+            # of creates and would otherwise pay a full graph build for
+            # nothing. degrade_unreadable=True so one unreadable card in the
+            # store cannot block every future create.
+            edges = {
+                card.id: list(card.dependencies)
+                for card in self.list_cards(include_archived=True, degrade_unreadable=True)
+            }
+            for dependency_id in core.dependencies:
+                if would_create_cycle(edges, core.id, dependency_id):
+                    raise ValueError(
+                        f"dependency {core.id} -> {dependency_id} would create a cycle"
+                    )
+
         creation_class = self._creation_class(core)
         if creation_class is None:
             return
@@ -1177,6 +1224,16 @@ class CardStore:
         mutation protocol.
         """
         validate_card_lock_identifier(card_id)
+        if action == "release_claim":
+            # Every stop must be attributable. Without this the ledger records
+            # THAT a worker gave up and never WHY, which left 53 percent of the
+            # open residue unexplainable when measured on 2026-09-16.
+            #
+            # This NORMALISES, it does not reject. Several dispatcher call sites
+            # release claims today with no reason, and a reaper path that cannot
+            # release is worse than one that releases without saying why.
+            # Enforcement tightens only after Task 10 raises reason coverage.
+            payload["abandon_reason"] = validate_abandon_reason(payload.get("abandon_reason"))
         if _card_lock_key(self.home, card_id) not in _HELD_CARD_LOCKS.get():
             with card_mutation_lock(self.home, card_id):
                 return self.append_event(card_id, action, agent, **payload)
@@ -2130,6 +2187,23 @@ def amend_dependency(
             action == "remove_dependency" and not present
         ):
             return False
+        if action == "add_dependency":
+            # Folded dependencies, not raw core.json: add_dependency and
+            # remove_dependency amend only the folded projection, so a card's
+            # birth-time core.json can be stale relative to its current
+            # effective edges. list_cards() folds every card the same way
+            # current_dependencies() folds one, so the graph checked here
+            # matches what claim validation actually sees.
+            edges = {
+                card.id: list(card.dependencies)
+                for card in CardStore(home).list_cards(
+                    include_archived=True, degrade_unreadable=True
+                )
+            }
+            if would_create_cycle(edges, card_id, dependency_id):
+                raise ValueError(
+                    f"dependency {card_id} -> {dependency_id} would create a cycle"
+                )
         CardStore(home).append_event(
             card_id,
             action,
@@ -2524,8 +2598,15 @@ def mirror_coord_release(
     actor: str,
     expected_claim_revision: str | None,
     transition_id: str = "",
+    abandon_reason: str | None = None,
 ) -> bool:
-    """Mirror a release only when its owner and revision still match."""
+    """Mirror a release only when its owner and revision still match.
+
+    ``abandon_reason`` is optional so existing callers keep recording
+    "unspecified" unchanged; a caller that knows why the claim is being
+    released (for example a dead terminal slot mapping to "error") should
+    pass it explicitly.
+    """
     if expected_claim_revision is None:
         return False
     CardStore(home).append_event(
@@ -2535,6 +2616,7 @@ def mirror_coord_release(
         released_owner=owner,
         expected_claim_revision=expected_claim_revision,
         transition_id=transition_id or uuid.uuid4().hex,
+        abandon_reason=abandon_reason,
     )
     return True
 

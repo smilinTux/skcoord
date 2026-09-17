@@ -1082,6 +1082,7 @@ class Board:
                     kw["actor"],
                     kw["expected_claim_revision"],
                     transition_id=kw.get("transition_id", ""),
+                    abandon_reason=kw.get("abandon_reason"),
                 )
         except Exception as exc:  # noqa: BLE001
             logger.warning("CardStore mirror (%s) failed: %s", op, exc)
@@ -2284,8 +2285,14 @@ class Board:
         task_id: str,
         actor: str = "",
         expected_claim_revision: str | None = None,
+        abandon_reason: str | None = None,
     ) -> bool:
-        """Release one exact active claim without completing the task."""
+        """Release one exact active claim without completing the task.
+
+        ``abandon_reason`` is optional so every existing caller keeps recording
+        "unspecified" unchanged; a caller that knows why the claim is ending
+        should pass one of the closed vocabulary members explicitly.
+        """
         from .card_store import card_mutation_lock, validate_card_lock_identifier
 
         canonical_owner = AgentFile.validate_agent_name(owner)
@@ -2297,6 +2304,7 @@ class Board:
                 task_id,
                 actor=audit_actor,
                 expected_claim_revision=expected_claim_revision,
+                abandon_reason=abandon_reason,
             )
 
     def _release_claim_locked(
@@ -2307,6 +2315,7 @@ class Board:
         actor: str,
         expected_claim_revision: str | None = None,
         allow_missing_card_store: bool = False,
+        abandon_reason: str | None = None,
     ) -> bool:
         """Release one exact claim while the board and card locks are held."""
         from .card_store import (
@@ -2365,6 +2374,7 @@ class Board:
                 actor=actor,
                 expected_claim_revision=current_claim_revision,
                 transition_id=transitions[0][1],
+                abandon_reason=abandon_reason,
             )
             if (
                 card_before is None
