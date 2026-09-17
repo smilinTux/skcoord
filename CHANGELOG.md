@@ -16,6 +16,28 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
 
 ### Added
 
+- `abandon_reason`, a closed vocabulary recording why a worker's claim ended.
+  Measured cause: 235 of 444 open cards were claimed and then abandoned with no
+  recorded reason, so the board knew that work stopped and never why. Six members
+  describe an abandonment (`criteria-unsatisfiable`, `dependency-unsatisfied`,
+  `capability-missing`, `error`, `superseded`, `unspecified`) and a seventh,
+  `not-abandoned`, marks a release that followed genuinely finished work.
+  Separating that seventh from `unspecified` is the point: without it the success
+  path lands in the same bucket as the unexplained abandonments and the coverage
+  metric measures nothing. Absent normalises to `unspecified` and never raises;
+  an unknown non-empty value raises.
+- `exit_gates`, `non_goals` and `spec_version` on `CardCore`. `exit_gates` entries
+  are objects carrying `gate` and `owner`, so a dispatcher can route a gate to the
+  seat that owns it instead of a worker looping on a criterion it can never
+  satisfy alone. A gate missing either field is rejected at construction.
+- Dependency-cycle rejection on edge creation, wired into both `amend_dependency`
+  and `create()`. The guard began on `amend_dependency` alone, a path with zero
+  recorded events in this estate's history, while 700 cards received their edges
+  through `create()`. The check short-circuits when a card declares no
+  dependencies, so only that minority pays for the graph walk.
+- `abandon_reason` threaded through `mirror_coord_release` and
+  `Board.release_claim`, both optional and defaulting to existing behaviour.
+
 - A constrained exact-head GitHub review broker now requires a terminal local
   CI-parity receipt before submitting a review. The broker verifies the exact
   canonical receipt bytes, atomically reserves each request across processes,
