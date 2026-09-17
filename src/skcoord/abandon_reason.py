@@ -7,6 +7,17 @@ unattributable. A factory cannot improve what it does not write down.
 
 The vocabulary is deliberately closed and deliberately small. An open text
 field would reproduce the current situation with extra steps.
+
+Two members answer different questions and must never be collapsed:
+
+- "unspecified" means the cause is NOT KNOWN. It is the honest default for a
+  release site that cannot say why a worker stopped.
+- "not-abandoned" means the cause IS known, and it is that the release was NOT
+  an abandonment at all: the work finished durably and a verdict was recorded
+  before the claim was released. A future reader who merges these two back
+  together reproduces the exact coverage blind spot this module exists to
+  fix, because a success release would again be indistinguishable from a
+  release nobody can explain.
 """
 
 from __future__ import annotations
@@ -29,6 +40,13 @@ ABANDON_REASONS = frozenset(
         # representable answer. Measuring the share of this value is how we know
         # the migration is working.
         "unspecified",
+        # The release is NOT an abandonment: the work finished durably and a
+        # verdict was recorded before the claim was released. This is the one
+        # member that means success, not cause-unknown. It exists so a release
+        # after a good finish never lands in "unspecified" next to the 235
+        # cards nobody can explain; folding the two together is exactly the
+        # collapse this field exists to prevent, so keep them distinct.
+        "not-abandoned",
     }
 )
 
@@ -41,6 +59,10 @@ def validate_abandon_reason(value: str | None) -> str:
     (reapers, stale-claim sweeps) must always succeed. Making those raise would
     strand the claims they exist to free, which is worse than the defect this
     module exists to fix.
+
+    A caller that knows the release followed a durable finish, not a stoppage,
+    should pass "not-abandoned" explicitly. It never comes back from an absent
+    value; only a caller that actually knows the release was a success gets it.
     """
     if value is None or not str(value).strip():
         return "unspecified"

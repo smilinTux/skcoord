@@ -2573,8 +2573,15 @@ def mirror_coord_release(
     actor: str,
     expected_claim_revision: str | None,
     transition_id: str = "",
+    abandon_reason: str | None = None,
 ) -> bool:
-    """Mirror a release only when its owner and revision still match."""
+    """Mirror a release only when its owner and revision still match.
+
+    ``abandon_reason`` is optional so existing callers keep recording
+    "unspecified" unchanged; a caller that knows why the claim is being
+    released (for example a dead terminal slot mapping to "error") should
+    pass it explicitly.
+    """
     if expected_claim_revision is None:
         return False
     CardStore(home).append_event(
@@ -2584,6 +2591,7 @@ def mirror_coord_release(
         released_owner=owner,
         expected_claim_revision=expected_claim_revision,
         transition_id=transition_id or uuid.uuid4().hex,
+        abandon_reason=abandon_reason,
     )
     return True
 

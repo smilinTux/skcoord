@@ -16,8 +16,19 @@ def test_vocabulary_is_exactly_the_specified_reasons():
             "error",
             "superseded",
             "unspecified",
+            "not-abandoned",
         }
     )
+
+
+def test_not_abandoned_is_distinct_from_unspecified():
+    """not-abandoned means a success release; unspecified means cause unknown.
+
+    They must validate to different strings so the coverage metric can tell
+    a durable-finish release apart from a release nobody explained.
+    """
+    assert validate_abandon_reason("not-abandoned") == "not-abandoned"
+    assert validate_abandon_reason("not-abandoned") != validate_abandon_reason(None)
 
 
 @pytest.mark.parametrize("reason", sorted(ABANDON_REASONS))
@@ -67,6 +78,30 @@ def test_release_claim_with_a_valid_reason_is_recorded(tmp_path):
         card_id, "release_claim", "worker-1", abandon_reason="  Dependency-Unsatisfied "
     )
     assert event["abandon_reason"] == "dependency-unsatisfied"
+
+
+def test_mirror_coord_release_accepts_an_optional_abandon_reason(tmp_path):
+    """terminal_capacity's retirement path needs to record a real reason.
+
+    mirror_coord_release is the one CardStore write shared by the dispatcher's
+    release-mirroring path and the terminal-capacity retirement path, so it
+    must accept the same abandon_reason a direct append_event call does.
+    """
+    from skcoord.card_store import CardCore, CardStore, mirror_coord_release
+
+    store = CardStore(tmp_path)
+    card_id = store.create(
+        CardCore(id="probe04", title="probe card", initial_owner="worker-1", initial_claim_revision="rev-1")
+    )
+
+    assert mirror_coord_release(
+        tmp_path, card_id, "worker-1", "worker-1", "rev-1", abandon_reason="error"
+    )
+    folded = store.fold(card_id)
+    assert folded.owner is None
+    events = store._read_events(card_id)
+    release_events = [e for e in events if e.get("action") == "release_claim"]
+    assert release_events[-1]["abandon_reason"] == "error"
 
 
 def test_other_actions_do_not_require_a_reason(tmp_path):
