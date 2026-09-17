@@ -38,9 +38,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
-from .abandon_reason import validate_abandon_reason
+from .abandon_reason import validate_abandon_reason, validate_exit_gates
 from .card import Card, Column, Kind
 from .coordination import validate_shared_home
 
@@ -319,11 +319,23 @@ class CardCore(BaseModel):
     # Optional v2 fields. Absent spec_version means v1 legacy behaviour, so
     # adoption is per-card and reversible rather than a flag day across the
     # existing production cards. exit_gates entries are objects (never prose)
-    # so a dispatcher can route them to the owning seat; see abandon_reason.py
-    # for validate_exit_gates, which callers may run before construction.
+    # so a dispatcher can route them to the owning seat; validate_exit_gates
+    # in abandon_reason.py is also exported for callers that want to check a
+    # gate list before construction.
     exit_gates: list[dict] = Field(default_factory=list)
     non_goals: list[str] = Field(default_factory=list)
     spec_version: int | None = None
+
+    @field_validator("exit_gates")
+    @classmethod
+    def _validate_exit_gates(cls, value: list[dict]) -> list[dict]:
+        """Reject a gate missing owner or gate name at construction time.
+
+        A dict-shaped gate missing owner is exactly as unroutable to the
+        dispatcher as a prose string, it just fails later, at dispatch time,
+        instead of at write time. This closes that hole at the model boundary.
+        """
+        return validate_exit_gates(value)
 
 
 # Sanctioned legacy overlay actions (coordination/card_events/*.jsonl) mapped
