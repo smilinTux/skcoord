@@ -113,3 +113,44 @@ def test_other_actions_do_not_require_a_reason(tmp_path):
 
     assert store.append_event(card_id, "claim", "worker-1")
     assert store.append_event(card_id, "complete", "worker-1")
+
+
+def test_board_release_claim_threads_abandon_reason_to_the_card_store(tmp_path):
+    """Board.release_claim must let a caller record why the claim ended.
+
+    Both fleet release sites forward through Board.release_claim, which in
+    turn forwards through the queued "release" op to mirror_coord_release.
+    Without a way to pass abandon_reason at this layer, every release from
+    the fleet is stuck recording "unspecified" even when the caller knows
+    exactly why the claim ended.
+    """
+    from skcoord.card_store import CardStore
+    from skcoord.coordination import Board, Task
+
+    board = Board(tmp_path)
+    board.create_task(Task(id="probe05", title="probe card"))
+    board.claim_task("worker-1", "probe05")
+
+    assert board.release_claim(
+        "worker-1", "probe05", actor="worker-1", abandon_reason="not-abandoned"
+    )
+
+    events = CardStore(tmp_path)._read_events("probe05")
+    release_events = [e for e in events if e.get("action") == "release_claim"]
+    assert release_events[-1]["abandon_reason"] == "not-abandoned"
+
+
+def test_board_release_claim_without_a_reason_still_records_unspecified(tmp_path):
+    """Default behaviour for every existing caller must be unchanged."""
+    from skcoord.card_store import CardStore
+    from skcoord.coordination import Board, Task
+
+    board = Board(tmp_path)
+    board.create_task(Task(id="probe06", title="probe card"))
+    board.claim_task("worker-1", "probe06")
+
+    assert board.release_claim("worker-1", "probe06", actor="worker-1")
+
+    events = CardStore(tmp_path)._read_events("probe06")
+    release_events = [e for e in events if e.get("action") == "release_claim"]
+    assert release_events[-1]["abandon_reason"] == "unspecified"
