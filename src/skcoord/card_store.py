@@ -1229,13 +1229,18 @@ class CardStore:
                 try:
                     fh.seek(0)
                     lines = list(fh)
+                    # Parse every existing line before appending.  CardStore is
+                    # append-only and malformed history must never be hidden by
+                    # a new write.
+                    parsed_lines = []
+                    for line in lines:
+                        try:
+                            parsed_lines.append(json.loads(line))
+                        except json.JSONDecodeError as exc:
+                            raise ValueError("CardStore event log contains malformed JSON") from exc
                     transition_id = payload.get("transition_id")
                     if isinstance(transition_id, str) and transition_id:
-                        for line in lines:
-                            try:
-                                existing_event = json.loads(line)
-                            except json.JSONDecodeError:
-                                continue
+                        for existing_event in parsed_lines:
                             if existing_event.get("transition_id") == transition_id:
                                 return existing_event
                     seq = len(lines)
@@ -1253,7 +1258,10 @@ class CardStore:
                     }
                     event.update(payload)
                     fh.seek(0, os.SEEK_END)
-                    fh.write(json.dumps(event, default=str) + "\n")
+                    serialized = json.dumps(event, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+                    # Serialize the complete record, never concatenate JSON fragments.
+                    json.loads(serialized)
+                    fh.write(serialized + "\n")
                     fh.flush()
                     os.fsync(fh.fileno())
                     return event
