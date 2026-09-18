@@ -2403,6 +2403,31 @@ class Board:
             raise
         return True
 
+    def _completion_successor(self, agent_name: str, candidates: list[str]) -> str | None:
+        """Choose the next claim only when its folded card authorizes the owner.
+
+        ``claimed_tasks`` is an agent-maintained hint, not lifecycle evidence.
+        In CardStore mode the folded structural status and owner are authoritative;
+        an ambiguous or unreadable card is deliberately skipped.
+        """
+        from .card_store import card_store_read_enabled, CardStore
+
+        if card_store_read_enabled():
+            store = CardStore(self.home)
+            for candidate in candidates:
+                try:
+                    card = store.fold(candidate)
+                except Exception:  # fail closed on malformed or conflicting state
+                    continue
+                if card is not None and card.status.value == "doing" and card.owner == agent_name:
+                    return candidate
+            return None
+        for candidate in candidates:
+            task = self.load_task(candidate)
+            if task is not None:
+                return candidate
+        return None
+
     def _complete_task(self, agent_name: str, task_id: str) -> AgentFile:
         """Mark a task as completed by an agent.
 
@@ -2419,7 +2444,9 @@ class Board:
         if task_id not in agent.completed_tasks:
             agent.completed_tasks.append(task_id)
         if agent.current_task == task_id:
-            agent.current_task = agent.claimed_tasks[0] if agent.claimed_tasks else None
+            agent.current_task = self._completion_successor(
+                agent_name, list(agent.claimed_tasks)
+            )
         if agent.current_task:
             agent.state = AgentState.ACTIVE
         elif agent.state == AgentState.ACTIVE:
