@@ -16,6 +16,43 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
 
 ### Fixed
 
+- **`CardStore.fold` now reports what it could not read, instead of returning a
+  confident answer computed from a damaged record.** PR #125 made
+  `CardEventLog.read_all` report the lines it refuses, but it reports them to a
+  *log*, and `load_legacy_mutations` then built a throwaway `CardEventLog`, took
+  the events and discarded `rejected`. The fold still had no way to tell a
+  caller whether a `Card` was folded over the whole record or over 55 events
+  less than it, and scraping log output is not an answer a consumer can act on.
+  `CardStore.dropped` is now rebuilt on every `fold()` and lists each
+  unadmitted event with its source, shard, line number, reason and an excerpt;
+  empty means complete. `load_legacy_mutations` takes an opt-in `dropped=` list,
+  so existing callers are untouched. Three paths that were still fully silent
+  now report, measured on the chi fleet 2026-09-19:
+  - `coordination/archive/*.jsonl` lines that do not parse. This was a bare
+    `except Exception: continue` with no log line, no counter and no trace; an
+    archival that never folds.
+  - overlay events whose `action` is outside `_OVERLAY_TO_STORE_ACTION`, the
+    known `verdict` invisibility. This deliberately does **not** change what
+    folds; it makes the discard observable rather than undetectable. It is by
+    far the larger leak: 715 such events on the chi estate against 55 unreadable
+    lines. 698 of them are `fleet-liveness-reaper` verdicts, each shadowed 1:1
+    by a `worker_died` link that does fold, so they cost nothing; the remaining
+    17 span 13 cards, and 4 of those (a26cb9f4, e8f3a5b7, 35d3e34e, 61f972ed)
+    sit in `backlog` with no verdict link at all, their only review outcome
+    being an event the fold discards.
+  - `cards/<id>/events/*.jsonl` rows that parse, so the fail-closed JSON guard
+    in `_read_events` never fires, but carry no `action` key and so match no
+    fold branch. Six live rows, every one a review verdict written in an
+    invented `type`/`event_type`/`event` schema. The row still enters the event
+    list, so no existing consumer changes behaviour.
+
+  Fail loud, not fatal: nothing added here raises. One bad line in a
+  Syncthing-replicated fleet ledger must not take every host's board down at
+  once. The per-fold condition is not logged, because `fold()` runs once per
+  card and a store-wide gap would emit one warning per card on a full board
+  read; the structured `dropped` list is the channel, and the per-line warnings
+  fire once at read time.
+
 - **An unclaimable card is now a typed refusal instead of a bare `ValueError`.**
   Observed live on the builder node ziowk01-wsl, 2026-09-18: card 59553966 was
   voided and replaced by 59550966 during a source-binding repair while a node

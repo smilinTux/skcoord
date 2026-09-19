@@ -353,6 +353,11 @@ _OVERLAY_TO_STORE_ACTION = {
     "describe": "describe",
 }
 
+# How much of a dropped line to carry in the drop record. Long enough to find
+# the line by eye, short enough that a badly damaged shard cannot balloon the
+# report it is reported through.
+_DROP_EXCERPT_CHARS = 200
+
 _OVERLAY_PAYLOAD_KEYS = (
     "column",
     "order",
@@ -367,8 +372,16 @@ _OVERLAY_PAYLOAD_KEYS = (
 )
 
 
-def load_legacy_mutations(home: Path) -> dict[str, list[dict]]:
+def load_legacy_mutations(
+    home: Path, *, dropped: Optional[list[dict]] = None
+) -> dict[str, list[dict]]:
     """Synthesize fold events from the sanctioned legacy append-only paths.
+
+    Pass ``dropped`` to learn what this could NOT turn into a fold event. Every
+    skipped line is appended to it as ``{source, file, line, reason, excerpt}``,
+    so the caller can tell a complete answer from one computed over a damaged
+    record. Omit it and the skips stay invisible, which is the behaviour this
+    parameter exists to end.
 
     Two legacy write paths remain live post-cutover (as the hot backup) and can
     carry mutations the store's own logs never saw (flag unset in that process,
@@ -388,6 +401,18 @@ def load_legacy_mutations(home: Path) -> dict[str, list[dict]]:
         dict: card_id -> list of synthetic event dicts (fold-shaped).
     """
     out: dict[str, list[dict]] = {}
+    drops = dropped if dropped is not None else []
+
+    def _drop(source: str, name: str, line_no: int, reason: str, excerpt: str) -> None:
+        drops.append(
+            {
+                "source": source,
+                "file": name,
+                "line": line_no,
+                "reason": reason,
+                "excerpt": excerpt[:_DROP_EXCERPT_CHARS],
+            }
+        )
 
     archive_dir = Path(home).expanduser() / "coordination" / "archive"
     if archive_dir.exists():
@@ -396,17 +421,37 @@ def load_legacy_mutations(home: Path) -> dict[str, list[dict]]:
                 lines = f.read_text(encoding="utf-8").splitlines()
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Skipping unreadable archive index %s: %s", f.name, exc)
+                _drop("archive", f.name, 0, f"unreadable file: {type(exc).__name__}", "")
                 continue
-            for line in lines:
+            for line_no, line in enumerate(lines, start=1):
                 line = line.strip()
                 if not line:
                     continue
                 try:
                     entry = json.loads(line)
-                except Exception:  # noqa: BLE001
+                except Exception as exc:  # noqa: BLE001
+                    # Was a bare `continue`. An archive index line that will not
+                    # parse is an archival that never folds, and it used to
+                    # vanish with no log line, no counter and no trace at all.
+                    logger.warning(
+                        "archive index %s line %d is not JSON, dropping it from the "
+                        "fold: %s | %r",
+                        f.name,
+                        line_no,
+                        type(exc).__name__,
+                        line[:_DROP_EXCERPT_CHARS],
+                    )
+                    _drop(
+                        "archive",
+                        f.name,
+                        line_no,
+                        f"unparseable: {type(exc).__name__}",
+                        line,
+                    )
                     continue
                 tid = entry.get("id")
                 if not tid:
+                    _drop("archive", f.name, line_no, "no card id", line)
                     continue
                 out.setdefault(tid, []).append(
                     {
@@ -420,9 +465,37 @@ def load_legacy_mutations(home: Path) -> dict[str, list[dict]]:
 
     from .card import CardEventLog
 
-    for e in CardEventLog(home).read_all():
+    overlay = CardEventLog(home)
+    events = overlay.read_all()
+    # read_all() already logged these; carry them out to the caller so the
+    # fold's own result can say the answer is short of this many events.
+    for rejected in overlay.rejected:
+        _drop(
+            "overlay",
+            rejected.get("file", "?"),
+            rejected.get("line", 0),
+            f"unreadable: {rejected.get('error', 'unknown')}",
+            rejected.get("excerpt", ""),
+        )
+    for e in events:
         action = _OVERLAY_TO_STORE_ACTION.get(e.action)
         if action is None:
+            # A well-formed event carrying an action the fold has no mapping
+            # for, `verdict` being the live example. Counting it here does not
+            # change what folds; it ends the part where nobody could tell the
+            # event had been discarded at all.
+            #
+            # `file` and `line` are blank on purpose: read_all() returns
+            # CardEvents, which do not carry the shard they were parsed from, so
+            # claiming a filename here would be inventing one. The writer and
+            # card id in the excerpt are what locate this event.
+            _drop(
+                "overlay",
+                "",
+                0,
+                f"unmapped action {e.action!r}",
+                f"writer={e.writer} card={e.card_id} ts={e.ts}",
+            )
             continue
         ev: dict = {
             "ts": e.ts,
@@ -453,6 +526,16 @@ class CardStore:
         # Instances are short-lived (one per CLI/MCP call), so a single load
         # keeps list_cards() O(files) instead of rescanning per card.
         self._legacy_cache: Optional[dict[str, list[dict]]] = None
+        # Events the legacy load could not admit. Store-wide and stable for the
+        # life of this instance, because the legacy cache is loaded once.
+        self.legacy_dropped: list[dict] = []
+        # Events the most recent _read_events() could not admit, for that card.
+        self._last_read_drops: list[dict] = []
+        # Events missing from the most recent fold(): the legacy drops plus that
+        # card's own store drops. Empty means the fold saw the whole record;
+        # non-empty means the Card it returned was computed over less than the
+        # record contains, and by exactly this much.
+        self.dropped: list[dict] = []
 
     def ensure_dirs(self) -> None:
         descriptor = self._open_cards_directory()
@@ -1364,6 +1447,7 @@ class CardStore:
 
     def _read_events(self, card_id: str) -> list[dict]:
         out: list[dict] = []
+        self._last_read_drops = []
         card_fd = self._open_existing_card_directory(card_id)
         if card_fd is None:
             return out
@@ -1394,7 +1478,7 @@ class CardStore:
                 except UnicodeError as exc:
                     raise ValueError(f"CardStore event source for {card_id} is malformed") from exc
                 prev_line_hash = ""
-                for line in lines:
+                for line_no, line in enumerate(lines, start=1):
                     line = line.strip()
                     if not line:
                         continue
@@ -1407,6 +1491,33 @@ class CardStore:
                     if not isinstance(event, dict):
                         raise ValueError(
                             f"CardStore event source for {card_id} must contain JSON objects"
+                        )
+                    if "action" not in event:
+                        # Parses, so the fail-closed JSON guard above never sees
+                        # it, and then folds to nothing because every fold branch
+                        # keys off `action`. Measured on the chi fleet
+                        # 2026-09-19: six such rows, every one a review verdict
+                        # written in an invented schema (`type`/`event_type`/
+                        # `event`). The row still goes into `out`, so no existing
+                        # consumer changes behaviour; it is only no longer
+                        # invisible.
+                        logger.warning(
+                            "CardStore event source %s/%s line %d has no 'action' key, "
+                            "dropping it from the fold: %r",
+                            card_id,
+                            name,
+                            line_no,
+                            line[:_DROP_EXCERPT_CHARS],
+                        )
+                        self._last_read_drops.append(
+                            {
+                                "source": "store",
+                                "file": name,
+                                "line": line_no,
+                                "reason": "no action key: keys="
+                                + ",".join(sorted(map(str, event))[:12]),
+                                "excerpt": line[:_DROP_EXCERPT_CHARS],
+                            }
                         )
                     # Hash-chain verification: each chained event must link
                     # to the hash of the preceding line in this writer file.
@@ -1430,11 +1541,27 @@ class CardStore:
     def _legacy_events(self, card_id: str) -> list[dict]:
         """Legacy mutations (archive index + overlay) for one card, cached."""
         if self._legacy_cache is None:
+            drops: list[dict] = []
             try:
-                self._legacy_cache = load_legacy_mutations(self.home)
+                self._legacy_cache = load_legacy_mutations(self.home, dropped=drops)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Legacy mutation load failed: %s", exc)
                 self._legacy_cache = {}
+                # A total failure here means EVERY legacy mutation is missing,
+                # which is the largest silent gap of all. Say so, once, through
+                # the same channel the per-line drops use.
+                drops.append(
+                    {
+                        "source": "legacy",
+                        "file": "*",
+                        "line": 0,
+                        "reason": (
+                            f"legacy mutation load failed: {type(exc).__name__}: {exc}"
+                        ),
+                        "excerpt": "",
+                    }
+                )
+            self.legacy_dropped = drops
         return self._legacy_cache.get(card_id, [])
 
     def fold(self, card_id: str) -> Optional[Card]:
@@ -1446,6 +1573,14 @@ class CardStore:
         ba4af853): a mutation that only reached a legacy file (mirror off or
         failed) still folds into the served state, so ``coord status`` cannot
         overcount open cards post-cutover.
+
+        Completeness is reported, not assumed. ``self.dropped`` is rebuilt on
+        every call and lists every event this fold could not admit, with the
+        shard and the line number. Empty means the returned ``Card`` is folded
+        over the whole record; non-empty means it is folded over less, and says
+        by how much and which lines. It is deliberately not an exception: one
+        bad line in a Syncthing-replicated fleet ledger must not take every
+        host's board down at once. Fail loud, not fatal.
         """
         core = self._load_core(card_id)
         if core is None:
@@ -1478,7 +1613,12 @@ class CardStore:
             card.status = _CLAIM_COLUMN
             card.meta["_claim_revision"] = initial_revision
         events = self._read_events(card_id)
+        store_drops = list(self._last_read_drops)
         legacy_events = self._legacy_events(card_id)
+        # Completeness report for THIS fold, rebuilt every call: what the
+        # returned Card was computed without. A caller that cares whether the
+        # answer is whole reads `self.dropped`; one that does not is unaffected.
+        self.dropped = self.legacy_dropped + store_drops
         if legacy_events:
             events = events + legacy_events
             events.sort(key=lambda e: (e.get("ts", ""), e.get("writer", ""), e.get("seq", 0)))
