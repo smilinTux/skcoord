@@ -61,13 +61,23 @@ def test_claiming_an_archived_card_refuses_with_the_archive_reason(tmp_path) -> 
     assert excinfo.value.terminal is True
 
 
-def test_claiming_a_genuinely_absent_card_keeps_the_not_found_wording(tmp_path) -> None:
+def test_claiming_a_genuinely_absent_card_keeps_its_existing_wording(tmp_path) -> None:
+    """Absent is refused BEFORE the claim projection, at the card lock.
+
+    A card with no directory cannot be locked, so card_mutation_lock refuses it
+    from inside claim_task's ExitStack with "has no foldable core" -- the same
+    daemon-killing bare-ValueError shape as the voided crash. It is now typed
+    too, but the message is deliberately unchanged: skcapstone's
+    tests/test_coordination.py::test_claim_nonexistent_task pins that exact
+    string with an anchored regex, and this change is about the type of the
+    refusal, not its wording.
+    """
     with pytest.raises(TaskUnclaimable) as excinfo:
         Board(tmp_path).claim_task("jarvis", "deadbeef")
 
     assert excinfo.value.reason == "absent"
     assert excinfo.value.terminal is True
-    assert "not found" in str(excinfo.value)
+    assert str(excinfo.value) == "CardStore card deadbeef has no foldable core"
 
 
 def test_refusal_stays_a_valueerror_for_every_pre_existing_caller(tmp_path) -> None:

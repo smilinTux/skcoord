@@ -2239,7 +2239,17 @@ class Board:
         # genuinely absent card; a malformed or unreadable core raises from
         # inside it and stays loud, which is correct.
         if card_store_write_enabled() and CardStore(self.home)._load_core(task_id) is None:
-            raise self._unclaimable_absent(task_id)
+            # The message is deliberately byte-identical to the one
+            # card_mutation_lock raises from _open_existing_card_lock. That
+            # exact string is pinned by an existing downstream fence
+            # (skcapstone tests/test_coordination.py::test_claim_nonexistent_task,
+            # anchored ^...$), and this change is about the TYPE of the
+            # refusal, not its wording: the caller now gets a skippable
+            # TaskUnclaimable where it used to get a bare ValueError, and
+            # every reader of the message sees what it always saw.
+            raise TaskUnclaimable(
+                task_id, "absent", f"CardStore card {task_id} has no foldable core"
+            )
         with _board_mutation_lock(self.home):
             current = self.load_agent(canonical)
             affected = {task_id}
