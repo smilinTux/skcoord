@@ -107,6 +107,35 @@ class CardEvent(BaseModel):
     description: str | None = None
 
 
+# The only actions the fold can apply. Kept here, next to the writer, so the
+# append point can reject anything the fold would silently drop; it is asserted
+# equal to card_store._OVERLAY_TO_STORE_ACTION by the test suite so the two
+# cannot drift apart. Measured 2026-09-19: an event with action "verdict" was
+# written to chiap02.jsonl, was perfectly well-formed, and folded to nothing at
+# all, because "verdict" is not in this set.
+OVERLAY_ACTIONS = frozenset(
+    {
+        "move",
+        "set_priority",
+        "set_swimlane",
+        "add_label",
+        "remove_label",
+        "link",
+        "assign",
+        "unassign",
+        "describe",
+    }
+)
+
+# How much of a rejected line to quote in the log. Long enough to identify the
+# line by eye, short enough that one huge bad line cannot flood a log file.
+_EXCERPT_CHARS = 200
+
+# Per-file cap on individual warnings, so a shard with thousands of bad lines
+# reports a handful plus a total rather than thousands of log records.
+_MAX_WARNINGS_PER_FILE = 5
+
+
 class CardEventLog:
     """Per-writer append-only overlay log for kanban operations.
 
@@ -116,6 +145,10 @@ class CardEventLog:
     """
 
     def __init__(self, home: Path) -> None:
+        # Lines the most recent read_all() refused, as dicts carrying file,
+        # line, excerpt and error. Exposed so a health check can assert on the
+        # damage rather than having to scrape log output for it.
+        self.rejected: list[dict] = []
         self.home = validate_shared_home(home)
         self.dir = self.home / "coordination" / "card_events"
 
@@ -260,20 +293,45 @@ class CardEventLog:
             os.close(descriptor)
 
     def append(self, event: CardEvent) -> None:
-        """Append one overlay event to this host's log."""
+        """Append one overlay event to this host's log.
+
+        Two shape guards run before anything else, both at this one shared
+        append point rather than at the eight-odd call sites:
+
+        * ``action`` must be one the fold can actually apply. It was a
+          free-form ``str``, so a caller could write a flawless ``verdict``
+          event that ``fold`` then discarded as an unknown action, with no
+          error at either end.
+        * the serialized event must be exactly one line. One event is one line
+          in a JSONL ledger; a newline anywhere in the payload would split the
+          record into an unparseable head and an unparseable tail.
+        """
         from .card_store import CardStore
 
+        if event.action not in OVERLAY_ACTIONS:
+            raise ValueError(
+                f"unsupported overlay action {event.action!r}; the fold can only apply "
+                f"{sorted(OVERLAY_ACTIONS)}. An event with any other action would be "
+                "written successfully and then silently dropped when the board is read."
+            )
+
         store = None
-        if event.action in {"describe", "link"} or (
-            self.home / "cards" / event.card_id / "core.json"
-        ).exists():
+        if (
+            event.action in {"describe", "link"}
+            or (self.home / "cards" / event.card_id / "core.json").exists()
+        ):
             store = CardStore(self.home)
         if event.action in {"describe", "link"} and (
             store is None or store.fold(event.card_id) is None
         ):
             raise ValueError(f"CardStore card {event.card_id} has no foldable core")
-        if store is not None and event.action in {"move", "assign", "unassign"} and any(
-            item.get("action") == "void" for item in store._read_events(event.card_id)
+        if (
+            store is not None
+            and event.action in {"move", "assign", "unassign"}
+            and any(
+                item.get("action") == "void"
+                for item in store._read_events(event.card_id)
+            )
         ):
             raise ValueError(
                 f"CardStore card {event.card_id} is voided; void is a terminal decision"
@@ -303,7 +361,13 @@ class CardEventLog:
                 descriptor = -1
                 fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
                 try:
-                    fh.write(event.model_dump_json() + "\n")
+                    payload = event.model_dump_json()
+                    if "\n" in payload or "\r" in payload:
+                        raise ValueError(
+                            "overlay event must serialize to a single line; "
+                            "a newline in the payload would split the ledger record"
+                        )
+                    fh.write(payload + "\n")
                     fh.flush()
                     os.fsync(fh.fileno())
                 finally:
@@ -315,8 +379,26 @@ class CardEventLog:
             os.close(directory_fd)
 
     def read_all(self) -> list[CardEvent]:
-        """Read every overlay event across all writers."""
+        """Read every overlay event across all writers.
+
+        A line this cannot admit is REPORTED, never dropped in silence. It is
+        recorded in ``self.rejected`` and logged at WARNING with the shard, the
+        physical line number and an excerpt, because this ledger is one of the
+        two stores card outcomes are read from and a skipped line is a lost
+        outcome.
+
+        This deliberately keeps going rather than raising. The overlay is
+        fleet-wide: every host appends to its own ``<host>.jsonl`` and Syncthing
+        replicates all of them into every other host, so one bad line written
+        anywhere would, if this raised, stop dispatch everywhere at once. The
+        per-card structure store (``CardStore._read_events``) is the one that
+        fails closed, and correctly so: there the blast radius of refusing is a
+        single card. Answering from the surviving record and shouting about the
+        gap beats refusing to answer at all; what is not acceptable, and what
+        this fixes, is answering from a damaged record and saying nothing.
+        """
         out: list[CardEvent] = []
+        self.rejected = []
         directory_fd = self._open_existing_event_directory()
         if directory_fd is None:
             return out
@@ -327,14 +409,43 @@ class CardEventLog:
                 raw = self._read_regular_file_bytes(directory_fd, name)
                 if raw is None:
                     continue
-                for line in raw.decode("utf-8").splitlines():
+                bad_in_file = 0
+                for number, line in enumerate(
+                    raw.decode("utf-8").splitlines(), start=1
+                ):
                     line = line.strip()
                     if not line:
                         continue
                     try:
                         out.append(CardEvent.model_validate_json(line))
-                    except Exception:  # noqa: BLE001
-                        continue
+                    except Exception as exc:  # noqa: BLE001
+                        bad_in_file += 1
+                        excerpt = line[:_EXCERPT_CHARS]
+                        self.rejected.append(
+                            {
+                                "file": name,
+                                "line": number,
+                                "excerpt": excerpt,
+                                "error": f"{type(exc).__name__}: {exc}",
+                            }
+                        )
+                        if bad_in_file <= _MAX_WARNINGS_PER_FILE:
+                            logger.warning(
+                                "card_events %s line %d is not a card event, dropping it "
+                                "from the fold: %s | %r",
+                                name,
+                                number,
+                                type(exc).__name__,
+                                excerpt,
+                            )
+                if bad_in_file > _MAX_WARNINGS_PER_FILE:
+                    logger.warning(
+                        "card_events %s: %d unreadable lines total (%d more beyond the "
+                        "ones logged above)",
+                        name,
+                        bad_in_file,
+                        bad_in_file - _MAX_WARNINGS_PER_FILE,
+                    )
         finally:
             os.close(directory_fd)
         return out
@@ -867,7 +978,9 @@ def _render_card(c: Card) -> str:
             f'<span class="ava">{initial}</span>{_clean(c.owner)}</span></div>'
         )
     elif c.labels:
-        foot = f'<div class="cfoot"><span class="tag">{_clean(c.labels[0])}</span></div>'
+        foot = (
+            f'<div class="cfoot"><span class="tag">{_clean(c.labels[0])}</span></div>'
+        )
     stripe_style = ""
     if c.kind == Kind.INCIDENT:
         stripe_style = ' style="--stripe:var(--incident)"'
