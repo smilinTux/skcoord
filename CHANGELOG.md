@@ -89,6 +89,32 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
 
 ### Fixed
 
+- `CardEventLog.read_all` no longer drops an unreadable overlay line in silence.
+  A line it cannot admit is logged at WARNING with the shard, the physical line
+  number and a 200-character excerpt, and is recorded in `CardEventLog.rejected`
+  so a health check can assert on the damage instead of scraping log text.
+  Measured on the chi fleet 2026-09-19: `card_events/chiap02.jsonl` held 54
+  unparseable lines (three pretty-printed JSON objects written into an
+  append-only JSONL log) and `chiap08.jsonl` held a prose line plus a line that
+  was valid JSON in an invented `card`/`agent`/`event` schema. All of them were
+  swallowed by a bare `except Exception: continue`, so every fold over the
+  affected cards answered from a damaged record and said nothing.
+
+  This logs and continues rather than failing closed, deliberately. The overlay
+  is fleet-wide (every host appends to its own `<host>.jsonl` and Syncthing
+  replicates all of them into every host), so raising here would let one bad
+  line written anywhere stop dispatch everywhere. The per-card structure store
+  `CardStore._read_events` keeps failing closed, where the blast radius of
+  refusing is a single card. Warnings are capped at 5 per shard plus a total,
+  so a badly damaged shard cannot flood the log.
+
+- `CardEventLog.append` now rejects an `action` outside the fold's vocabulary.
+  `action` was a free-form `str`, so a caller could write a flawless event with
+  `action: "verdict"` that `fold` then discarded as unknown, with no error at
+  either end. The new `OVERLAY_ACTIONS` constant is asserted equal to
+  `card_store._OVERLAY_TO_STORE_ACTION` by the suite so the guard and the fold
+  cannot drift apart.
+
 - Card `7bc6fd06`: explicit caller-supplied card IDs now use an append-only,
   hardened creation-attempt ledger under the CardStore governor. Rejected IDs
   stay reserved, accepted IDs replay only with identical semantics, and
