@@ -154,17 +154,63 @@ def test_reader_answers_from_the_surviving_record_rather_than_refusing(tmp_path)
 
 
 def test_append_rejects_an_action_outside_the_fold_vocabulary(tmp_path):
-    """``action`` was a free-form str, so ``verdict`` wrote fine and folded to
-    nothing. Reject it at the shared append point instead."""
+    """``action`` was a free-form str, so an event with an action nobody folds
+    would write fine and vanish. Reject it at the shared append point."""
     with pytest.raises(ValueError, match="action"):
         CardEventLog(tmp_path).append(
             CardEvent(
                 card_id="6097241e",
-                action="verdict",
+                action="not_a_real_action",
                 writer="pi-glm",
                 link_key="verdict",
             )
         )
+
+
+def test_verdict_action_is_accepted_and_folds_like_a_link(tmp_path):
+    """``verdict`` used to write fine and fold to nothing (this exact shape,
+    from card 6097241e/chiap02.jsonl). It is now mapped onto ``link`` in
+    ``_OVERLAY_TO_STORE_ACTION`` and ``OVERLAY_ACTIONS``, so a well-formed
+    ``verdict`` event (one that carries ``link_key``/``link_value``, the same
+    shape a real ``link`` event has) is both accepted at the write boundary
+    and visible in the folded card's links."""
+    from skcoord.card_store import CardCore, CardStore
+
+    store = CardStore(tmp_path)
+    store.create(CardCore(id="6097241e", title="Card 6097241e"))
+
+    CardEventLog(tmp_path).append(
+        CardEvent(
+            card_id="6097241e",
+            action="verdict",
+            writer="pi-glm",
+            link_key="verdict",
+            link_value="PASS",
+        )
+    )
+
+    card = store.fold("6097241e")
+    assert card.links["verdict"] == "PASS"
+
+
+def test_verdict_action_with_no_link_shape_folds_harmlessly(tmp_path):
+    """Most live ``verdict`` overlay events (measured 2026-09-19: 698 of 710,
+    all written by fleet-liveness-reaper) carry their payload in a bespoke
+    ``verdict`` field, not ``link_key``/``link_value`` — a shape CardEvent has
+    never had a field for, so that payload was already unrecoverable before
+    this fix and remains so after it. Mapping the action must not raise, and
+    must not fabricate a links entry out of a field the model does not have."""
+    from skcoord.card_store import CardCore, CardStore
+
+    store = CardStore(tmp_path)
+    store.create(CardCore(id="6097241e", title="Card 6097241e"))
+
+    CardEventLog(tmp_path).append(
+        CardEvent(card_id="6097241e", action="verdict", writer="fleet-liveness-reaper")
+    )
+
+    card = store.fold("6097241e")
+    assert card.links == {}
 
 
 def test_a_field_containing_a_newline_still_writes_exactly_one_line(tmp_path):

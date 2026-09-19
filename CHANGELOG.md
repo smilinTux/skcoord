@@ -16,6 +16,24 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
 
 ### Fixed
 
+- **Overlay `verdict` events now fold instead of silently vanishing.**
+  `_OVERLAY_TO_STORE_ACTION` (the map `load_legacy_mutations` uses to turn a
+  `coordination/card_events/*.jsonl` overlay event into a store action `fold`
+  understands) had no entry for `"verdict"`, so any overlay event with that
+  action was dropped with `if action is None: continue` and never reached
+  `CardStore.fold()`. `CardEventLog.append` already refused to write a
+  `verdict` action for the same reason (`OVERLAY_ACTIONS` and
+  `_OVERLAY_TO_STORE_ACTION` are asserted equal by
+  `test_overlay_vocabulary_cannot_drift_from_the_fold_map`), so the two are
+  updated together: `"verdict"` now maps to `"link"` in both. Measured live,
+  2026-09-19: 710 overlay events carried action `verdict`; re-folding the
+  whole board (7215 cards) with the fix applied changes exactly one card's
+  folded state (`e8f3a5b7` gains a genuine, previously-invisible `evidence`
+  link). 698 of the 710 are `fleet-liveness-reaper` events with no
+  `link_key`/`link_value` of their own — their real content lives in a
+  sibling `worker_died` link event at the identical timestamp, which already
+  folded — so they fold harmlessly and are not double-counted.
+
 - **An unclaimable card is now a typed refusal instead of a bare `ValueError`.**
   Observed live on the builder node ziowk01-wsl, 2026-09-18: card 59553966 was
   voided and replaced by 59550966 during a source-binding repair while a node

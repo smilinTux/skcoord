@@ -112,7 +112,8 @@ class CardEvent(BaseModel):
 # equal to card_store._OVERLAY_TO_STORE_ACTION by the test suite so the two
 # cannot drift apart. Measured 2026-09-19: an event with action "verdict" was
 # written to chiap02.jsonl, was perfectly well-formed, and folded to nothing at
-# all, because "verdict" is not in this set.
+# all, because "verdict" was not in this set. "verdict" is now mapped (to
+# "link" in card_store._OVERLAY_TO_STORE_ACTION), so it belongs here too.
 OVERLAY_ACTIONS = frozenset(
     {
         "move",
@@ -124,6 +125,7 @@ OVERLAY_ACTIONS = frozenset(
         "assign",
         "unassign",
         "describe",
+        "verdict",
     }
 )
 
