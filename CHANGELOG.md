@@ -14,6 +14,25 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
 
 ## [Unreleased]
 
+### Fixed
+
+- **An unclaimable card is now a typed refusal instead of a bare `ValueError`.**
+  Observed live on the builder node ziowk01-wsl, 2026-09-18: card 59553966 was
+  voided and replaced by 59550966 during a source-binding repair while a node
+  worker still held it queued. `Board.claim_task` raised
+  `ValueError: Task 59553966 not found`, which unwound the daemon's main loop
+  and exited the unit, discarding 18h of accumulated process state over one
+  unusable card. The message was also wrong: `void` sets `archived=True` in the
+  fold and `get_task_views` reads `list_cards(include_archived=False)`, so a
+  voided card simply drops out of the projection the claim path searches while
+  still existing on disk and folding perfectly well. `TaskUnclaimable`
+  (a `ValueError` subclass, so every existing `except ValueError` caller is
+  unchanged) now carries `task_id`, `reason`
+  (`absent`/`voided`/`archived`/`done`/`owned`/`dependencies`/`inconsistent`)
+  and `terminal`, letting a card-queue daemon skip exactly one card. A corrupt
+  or unreadable card core still raises and stays loud; it is never downgraded
+  to a refusal.
+
 ### Added
 
 - `abandon_reason`, a closed vocabulary recording why a worker's claim ended.
