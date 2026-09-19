@@ -341,6 +341,18 @@ class CardCore(BaseModel):
 
 # Sanctioned legacy overlay actions (coordination/card_events/*.jsonl) mapped
 # onto the store fold's action vocabulary. Anything unmapped is ignored.
+#
+# "verdict" maps to "link": a verdict overlay event is, by shape, a link
+# carrying whatever the writer put in ``link_key``/``link_value`` (typically
+# ``link_key="verdict"``). Measured on the live board 2026-09-19: 710 overlay
+# events with action "verdict" existed and folded to nothing because "verdict"
+# was missing from this map. Re-folding the whole board (7215 cards) with the
+# mapping added changes exactly one card's folded state (e8f3a5b7 gains a
+# genuine, previously-invisible ``evidence`` link); 698 of the 710 are
+# fleet-liveness-reaper events with no ``link_key``/``link_value`` of their
+# own (their real content lives in a sibling ``worker_died`` link event at the
+# identical timestamp, which already folds), so mapping "verdict" cannot
+# double-count them. Full blast-radius table in the PR that added this line.
 _OVERLAY_TO_STORE_ACTION = {
     "move": "move",
     "set_priority": "priority",
@@ -351,6 +363,7 @@ _OVERLAY_TO_STORE_ACTION = {
     "assign": "assign",
     "unassign": "unassign",
     "describe": "describe",
+    "verdict": "link",
 }
 
 _OVERLAY_PAYLOAD_KEYS = (
