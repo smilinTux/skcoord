@@ -35,6 +35,44 @@ from .atomic_io import atomic_write_text
 
 logger = logging.getLogger(__name__)
 
+#: Refusal reasons that can never resolve on their own. A caller that parks a
+#: card on a terminal refusal is correct; parking a transient one strands work.
+_TERMINAL_REFUSALS = frozenset({"absent", "voided", "archived", "done"})
+
+
+class TaskUnclaimable(ValueError):
+    """One specific task cannot be claimed. Every other card is unaffected.
+
+    This is the typed refusal the claim path owes its callers. A daemon holding
+    a queue of cards (sknoded's builder dispatch) must be able to skip exactly
+    this and keep running, without reaching for a blanket ``except Exception``
+    that would also swallow a corrupt store, a vanished coordination home, or a
+    permissions failure.
+
+    Subclasses ``ValueError`` deliberately: ``coord claim``, the MCP
+    ``coord_claim`` tool, ``auction`` and ``spawner`` all catch ValueError to
+    render a user-facing message, and the message text is unchanged for every
+    pre-existing reason. Narrowing the type is purely additive.
+
+    Attributes:
+        task_id: The card that was refused.
+        reason: One of ``absent``, ``voided``, ``archived``, ``done``,
+            ``owned``, ``dependencies``, ``inconsistent``.
+        terminal: True when the refusal can never resolve, so a scheduler may
+            stop re-offering the card. False for ``owned``/``dependencies``,
+            which are ordinary contention and clear on their own.
+    """
+
+    def __init__(self, task_id: str, reason: str, message: str) -> None:
+        self.task_id = task_id
+        self.reason = reason
+        super().__init__(message)
+
+    @property
+    def terminal(self) -> bool:
+        """Whether this refusal is permanent for the card's current identity."""
+        return self.reason in _TERMINAL_REFUSALS
+
 
 def validate_shared_home(home: Path) -> Path:
     """Return the SKCapstone root, rejecting its coordination child.
@@ -2035,6 +2073,47 @@ class Board:
                     removed.pop()
         return removed
 
+    def _unclaimable_absent(self, task_id: str) -> "TaskUnclaimable":
+        """Name the real reason a task is missing from the claim projection.
+
+        ``get_task_views`` reads ``list_cards(include_archived=False)`` and the
+        ``void`` fold sets ``archived=True`` (see the ``void`` branch in
+        ``card_store.fold``). A voided card therefore drops out of the
+        projection the claim path searches while still existing on disk and
+        folding perfectly well, so the old bare ``Task <id> not found`` sent
+        operators hunting for a card sitting right in front of them. Observed
+        live on ziowk01-wsl 2026-09-18: card 59553966 was voided and replaced
+        by 59550966 during a source-binding repair while sknoded still held it
+        queued, and the bare ValueError killed the whole node worker.
+
+        The fold here is a diagnosis, not a gate: if it raises, the store is
+        genuinely unreadable and that propagates untouched. An unreadable store
+        is infrastructure failure and must stay loud; only an individual card
+        being absent, voided or archived degrades to a skippable refusal.
+        """
+        from .card_store import CardStore
+
+        card = CardStore(self.home).fold(task_id)
+        if card is None:
+            return TaskUnclaimable(task_id, "absent", f"Task {task_id} not found")
+        if card.meta.get("voided"):
+            return TaskUnclaimable(
+                task_id,
+                "voided",
+                f"Task {task_id} was voided at {card.meta.get('voided_at') or 'unknown time'} "
+                f"by {card.meta.get('voided_by') or 'unknown writer'}",
+            )
+        if card.archived:
+            return TaskUnclaimable(task_id, "archived", f"Task {task_id} is archived")
+        # Foldable, live, yet absent from the projection: the board and the
+        # store disagree. That is a consistency fault rather than a card
+        # lifecycle outcome, so it is non-terminal and nothing parks on it.
+        return TaskUnclaimable(
+            task_id,
+            "inconsistent",
+            f"Task {task_id} folds but is missing from the claim projection",
+        )
+
     def _claim_task(
         self,
         agent_name: str,
@@ -2067,7 +2146,7 @@ class Board:
                 break
 
         if target is None:
-            raise ValueError(f"Task {task_id} not found")
+            raise self._unclaimable_absent(task_id)
         # Kanban moves to ready/doing/review carry no owner, yet the card
         # folds to CLAIMED/IN_PROGRESS/REVIEW with claimed_by None. The
         # lifecycle reconciler only projects claims for cards WITH an owner
@@ -2094,9 +2173,11 @@ class Board:
             and not ownerless_active
             and target.claimed_by != agent_name
         ):
-            raise ValueError(
+            raise TaskUnclaimable(
+                task_id,
+                "done" if target.status == TaskStatus.DONE else "owned",
                 f"Task {task_id} already {target.status.value} by "
-                f"{target.claimed_by or 'unknown owner'}"
+                f"{target.claimed_by or 'unknown owner'}",
             )
         if target.task.dependencies:
             # Dependency statuses are looked up across archived tasks too, so a
@@ -2111,8 +2192,10 @@ class Board:
                 if dep_id not in dep_views or dep_views[dep_id].status != TaskStatus.DONE
             ]
             if incomplete:
-                raise ValueError(
-                    f"Task {task_id} has incomplete dependencies: {', '.join(incomplete)}"
+                raise TaskUnclaimable(
+                    task_id,
+                    "dependencies",
+                    f"Task {task_id} has incomplete dependencies: {', '.join(incomplete)}",
                 )
 
         agent = self.load_agent(agent_name) or AgentFile(agent=agent_name)
@@ -2145,6 +2228,18 @@ class Board:
 
         canonical = AgentFile.validate_agent_name(agent_name)
         validate_card_lock_identifier(task_id)
+        # A card with no directory at all cannot be locked: card_mutation_lock
+        # raises a bare "has no foldable core" ValueError from inside the
+        # ExitStack, which is the same daemon-killing shape as the voided-card
+        # crash this refusal exists to stop. Diagnose it up front so absent and
+        # voided both arrive as TaskUnclaimable. Gated on the write flag for
+        # exactly the reason card_mutation_lock is: explicit legacy-only
+        # rollback mode has no card directory for a perfectly claimable task
+        # and falls back to the hashed lock. _load_core returns None only for a
+        # genuinely absent card; a malformed or unreadable core raises from
+        # inside it and stays loud, which is correct.
+        if card_store_write_enabled() and CardStore(self.home)._load_core(task_id) is None:
+            raise self._unclaimable_absent(task_id)
         with _board_mutation_lock(self.home):
             current = self.load_agent(canonical)
             affected = {task_id}
