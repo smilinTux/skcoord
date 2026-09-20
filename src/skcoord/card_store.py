@@ -314,6 +314,9 @@ class CardCore(BaseModel):
     initial_labels: list[str] = Field(default_factory=list)
     initial_owner: str | None = None
     initial_claim_revision: str | None = None
+    exit_gates: list[str] = Field(default_factory=list)
+    non_goals: list[str] = Field(default_factory=list)
+    spec_version: int | None = None
     meta: dict = Field(default_factory=dict)
 
 
@@ -2357,6 +2360,9 @@ def mirror_coord_create(home: Path, task) -> None:
             initial_priority=task.priority.value,
             initial_swimlane=_swimlane_for_tags(task.tags),
             initial_labels=list(task.tags),
+            exit_gates=list(getattr(task, "exit_gates", []) or []),
+            non_goals=list(getattr(task, "non_goals", []) or []),
+            spec_version=getattr(task, "spec_version", None),
             meta=dict(task.meta),
         )
     )
@@ -2380,6 +2386,9 @@ def mirror_coord_create_explicit(home: Path, task, digest: str, actor: str) -> b
             initial_priority=task.priority.value,
             initial_swimlane=_swimlane_for_tags(task.tags),
             initial_labels=list(task.tags),
+            exit_gates=list(getattr(task, "exit_gates", []) or []),
+            non_goals=list(getattr(task, "non_goals", []) or []),
+            spec_version=getattr(task, "spec_version", None),
             meta=dict(task.meta),
         ),
         digest,
@@ -2423,6 +2432,9 @@ def mirror_coord_create_claimed(
         initial_labels=list(task.tags),
         initial_owner=owner,
         initial_claim_revision=revision,
+        exit_gates=list(getattr(task, "exit_gates", []) or []),
+        non_goals=list(getattr(task, "non_goals", []) or []),
+        spec_version=getattr(task, "spec_version", None),
         meta=dict(task.meta),
     )
     if existing is not None:

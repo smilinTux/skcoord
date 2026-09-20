@@ -173,6 +173,9 @@ class Task(BaseModel):
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     acceptance_criteria: list[str] = Field(default_factory=list)
     dependencies: list[str] = Field(default_factory=list)
+    exit_gates: list[str] = Field(default_factory=list)
+    non_goals: list[str] = Field(default_factory=list)
+    spec_version: int | None = None
     notes: list[str] = Field(default_factory=list)
     meta: dict = Field(default_factory=dict)
 
