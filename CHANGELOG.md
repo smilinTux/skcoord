@@ -1,5 +1,18 @@
 # Changelog
 
+- **Warn once per distinct unreadable overlay line, not once per fold.**
+  `_MAX_WARNINGS_PER_FILE` caps warnings per `fold()` CALL, and `fold()` runs
+  once per card, so one malformed overlay line produced the same warning
+  thousands of times in a single process. Measured on the chi estate: a single
+  bad line flooded every fleet worker log and every CLI invocation, and pushed a
+  seat dispatcher JSON receipt past journald's 48KB message cap, so the receipt
+  arrived truncated and unparseable and operators could not see why dispatch
+  failed. Every occurrence is still recorded in `rejected`, so repetition is
+  suppressed and information is not. A `tests/conftest.py` autouse fixture
+  clears the per-process cache between tests, because two tests using the same
+  fixture file name and line number would otherwise depend on execution order.
+
+
 - **Card 73516c8e: make terminal preconditions atomic with graph mutations.**
   Terminal completion and move operations can now run a precondition while the
   shared board and card locks are held. Card creation and label updates use the
