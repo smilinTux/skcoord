@@ -137,6 +137,24 @@ _EXCERPT_CHARS = 200
 # reports a handful plus a total rather than thousands of log records.
 _MAX_WARNINGS_PER_FILE = 5
 
+#: Lines already warned about in THIS process, as (file name, line number).
+#:
+#: `_MAX_WARNINGS_PER_FILE` caps warnings per fold() CALL, and fold() is called
+#: once per card. A selector cycle folds thousands of cards, so ONE malformed
+#: overlay line produces the same warning thousands of times in a single run.
+#:
+#: Measured 2026-09-19 on the chi estate: a single bad line in chiap08.jsonl
+#: flooded every fleet worker log and every CLI invocation, and pushed the seat
+#: dispatcher's JSON receipt past journald's 48KB message cap, so the receipt
+#: arrived truncated mid-string and was unparseable. Operators could not see why
+#: dispatch failed, and the seat looked silent while burning two minutes of CPU
+#: per cycle. One unreadable line cost the observability of the whole fleet.
+#:
+#: Warn once per distinct line. Every occurrence is still recorded in
+#: `rejected`, which is where callers that want the full picture already look,
+#: so this suppresses repetition and not information.
+_WARNED_LINES: set[tuple[str, int]] = set()
+
 
 class CardEventLog:
     """Per-writer append-only overlay log for kanban operations.
@@ -431,7 +449,9 @@ class CardEventLog:
                                 "error": f"{type(exc).__name__}: {exc}",
                             }
                         )
-                        if bad_in_file <= _MAX_WARNINGS_PER_FILE:
+                        already_warned = (name, number) in _WARNED_LINES
+                        if bad_in_file <= _MAX_WARNINGS_PER_FILE and not already_warned:
+                            _WARNED_LINES.add((name, number))
                             logger.warning(
                                 "card_events %s line %d is not a card event, dropping it "
                                 "from the fold: %s | %r",
