@@ -8,6 +8,7 @@ import os
 import re
 import stat
 import uuid
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -16,9 +17,12 @@ from .card import CardEvent, CardEventLog, validate_overlay_event
 from .card_store import CardStore
 
 PLAN_SCHEMA = "skcoord.overlay-recovery-plan.v1"
+PLAN_SCHEMA_V2 = "skcoord.overlay-recovery-plan.v2"
 RECEIPT_SCHEMA = "skcoord.overlay-recovery-receipt.v1"
+RECEIPT_SCHEMA_V2 = "skcoord.overlay-recovery-receipt.v2"
 ROLLBACK_SCHEMA = "skcoord.overlay-recovery-rollback.v1"
 TOOL_REVISION = "f0d0ba98-overlay-recovery-1"
+TOOL_REVISION_V2 = "a62b5f8d-overlay-recovery-2"
 _SHA_RE = re.compile(r"[0-9a-f]{64}\Z")
 _ACTOR_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._@:-]{0,127}\Z")
 _PLAN_FIELDS = {
@@ -34,6 +38,21 @@ _PLAN_FIELDS = {
     "evidence",
     "actor",
     "diagnostic",
+    "requires_writer_quiescence",
+    "planned_at",
+    "plan_sha256",
+}
+_PLAN_FIELDS_V2 = {
+    "schema",
+    "tool_revision",
+    "writer",
+    "source",
+    "targets",
+    "source_sha256",
+    "repaired_sha256",
+    "recovery_card_id",
+    "evidence",
+    "actor",
     "requires_writer_quiescence",
     "planned_at",
     "plan_sha256",
@@ -58,6 +77,27 @@ _RECEIPT_FIELDS = {
     "verified_at",
     "receipt_sha256",
 }
+_RECEIPT_FIELDS_V2 = {
+    "schema",
+    "disposition",
+    "plan_sha256",
+    "writer",
+    "source",
+    "targets",
+    "source_sha256",
+    "repaired_sha256",
+    "recovery_card_id",
+    "actor",
+    "evidence",
+    "plan_artifact",
+    "original_artifact",
+    "rejected_artifacts",
+    "intent_artifact",
+    "receipt_artifact",
+    "verified_at",
+    "receipt_sha256",
+}
+_TARGET_FIELDS = {"line_number", "line_sha256", "diagnostic"}
 
 
 def _sha(raw: bytes) -> str:
@@ -86,14 +126,45 @@ def _verify_seal(payload: dict[str, Any], field: str) -> None:
         raise ValueError(f"{field} mismatch")
 
 
+def _validate_targets(targets: Any) -> None:
+    """Validate an ordered nonempty list of independently pinned rows."""
+    if not isinstance(targets, list) or not targets:
+        raise ValueError("recovery targets must be a nonempty list")
+    previous = 0
+    for target in targets:
+        if not isinstance(target, dict) or set(target) != _TARGET_FIELDS:
+            raise ValueError("recovery target fields mismatch")
+        line_number = target["line_number"]
+        if (
+            not isinstance(line_number, int)
+            or isinstance(line_number, bool)
+            or line_number <= previous
+        ):
+            raise ValueError("recovery target lines must be strictly increasing")
+        if not isinstance(target["line_sha256"], str) or not _SHA_RE.fullmatch(
+            target["line_sha256"]
+        ):
+            raise ValueError("recovery target SHA256 is invalid")
+        diagnostic = target["diagnostic"]
+        if (
+            not isinstance(diagnostic, dict)
+            or diagnostic.get("line") != line_number
+            or diagnostic.get("line_sha256") != target["line_sha256"]
+        ):
+            raise ValueError("recovery target diagnostic is invalid")
+        previous = line_number
+
+
 def _validate_plan(plan: dict[str, Any]) -> None:
-    """Reject recovery plans that drift from the sealed v1 schema."""
-    if set(plan) != _PLAN_FIELDS:
+    """Reject recovery plans that drift from a sealed supported schema."""
+    schema = plan.get("schema")
+    expected_fields = _PLAN_FIELDS_V2 if schema == PLAN_SCHEMA_V2 else _PLAN_FIELDS
+    if set(plan) != expected_fields:
         raise ValueError("recovery plan fields mismatch")
     _verify_seal(plan, "plan_sha256")
-    if (
-        plan["schema"] != PLAN_SCHEMA
-        or plan["tool_revision"] != TOOL_REVISION
+    expected_revision = TOOL_REVISION_V2 if schema == PLAN_SCHEMA_V2 else TOOL_REVISION
+    if schema not in {PLAN_SCHEMA, PLAN_SCHEMA_V2} or (
+        plan["tool_revision"] != expected_revision
         or plan["requires_writer_quiescence"] is not True
     ):
         raise ValueError("recovery plan schema mismatch")
@@ -101,17 +172,16 @@ def _validate_plan(plan: dict[str, Any]) -> None:
         raise ValueError("recovery plan identity fields are invalid")
     _validate_writer(plan["writer"])
     _validate_actor(plan["actor"])
+    sha_fields = ["source_sha256", "repaired_sha256", "plan_sha256"]
+    if schema == PLAN_SCHEMA:
+        sha_fields.append("line_sha256")
     if any(
-        not isinstance(plan[key], str) or not _SHA_RE.fullmatch(plan[key])
-        for key in (
-            "source_sha256",
-            "line_sha256",
-            "repaired_sha256",
-            "plan_sha256",
-        )
+        not isinstance(plan[key], str) or not _SHA_RE.fullmatch(plan[key]) for key in sha_fields
     ):
         raise ValueError("recovery plan SHA256 fields are invalid")
-    if (
+    if schema == PLAN_SCHEMA_V2:
+        _validate_targets(plan["targets"])
+    elif (
         not isinstance(plan["line_number"], int)
         or isinstance(plan["line_number"], bool)
         or plan["line_number"] < 1
@@ -121,15 +191,37 @@ def _validate_plan(plan: dict[str, Any]) -> None:
 
 
 def _validate_receipt(receipt: Any) -> None:
-    """Reject recovery receipts that drift from the sealed v1 schema."""
-    if not isinstance(receipt, dict) or set(receipt) != _RECEIPT_FIELDS:
+    """Reject recovery receipts that drift from a sealed supported schema."""
+    if not isinstance(receipt, dict):
+        raise ValueError("recovery receipt fields mismatch")
+    schema = receipt.get("schema")
+    expected_fields = _RECEIPT_FIELDS_V2 if schema == RECEIPT_SCHEMA_V2 else _RECEIPT_FIELDS
+    if set(receipt) != expected_fields:
         raise ValueError("recovery receipt fields mismatch")
     _verify_seal(receipt, "receipt_sha256")
-    if (receipt["schema"], receipt["disposition"]) != (
-        RECEIPT_SCHEMA,
-        "applied_and_schema_verified",
+    if (
+        schema not in {RECEIPT_SCHEMA, RECEIPT_SCHEMA_V2}
+        or receipt["disposition"] != "applied_and_schema_verified"
     ):
         raise ValueError("recovery receipt schema mismatch")
+    if schema == RECEIPT_SCHEMA_V2:
+        _validate_targets(receipt["targets"])
+        artifacts = receipt["rejected_artifacts"]
+        if (
+            not isinstance(artifacts, list)
+            or len(artifacts) != len(receipt["targets"])
+            or any(
+                not isinstance(name, str)
+                or not name
+                or "/" in name
+                or "\\" in name
+                or ".." in name
+                for name in artifacts
+            )
+        ):
+            raise ValueError("recovery rejected artifacts are invalid")
+        if len(set(artifacts)) != len(artifacts):
+            raise ValueError("recovery rejected artifacts are invalid")
 
 
 def _open_directory(path: Path) -> int:
@@ -352,25 +444,88 @@ def _evidence_directory(home: Path, evidence: Path) -> int:
     return _open_directory(evidence)
 
 
+def _requested_targets(
+    line_number: int | Sequence[int], line_sha256: str | Sequence[str]
+) -> list[tuple[int, str]]:
+    """Normalize one or more CLI/API line and digest pairs."""
+    numbers = (line_number,) if isinstance(line_number, int) else tuple(line_number)
+    hashes = (line_sha256,) if isinstance(line_sha256, str) else tuple(line_sha256)
+    if not numbers or len(numbers) != len(hashes):
+        raise ValueError("recovery line and SHA256 counts must match and be nonempty")
+    if any(
+        not isinstance(number, int) or isinstance(number, bool) or number < 1 for number in numbers
+    ):
+        raise ValueError("line number must be positive")
+    if tuple(sorted(set(numbers))) != numbers:
+        raise ValueError("recovery line numbers must be unique and strictly increasing")
+    if any(not isinstance(value, str) or not _SHA_RE.fullmatch(value) for value in hashes):
+        raise ValueError("source and line SHA256 values must be lowercase hex")
+    return list(zip(numbers, hashes, strict=True))
+
+
+def _repair_targets(
+    lines: list[bytes], writer: str, requested: Sequence[tuple[int, str]]
+) -> tuple[list[dict[str, Any]], list[bytes], bytes]:
+    """Revalidate targets against one source image and build one repaired image."""
+    targets: list[dict[str, Any]] = []
+    rejected_rows: list[bytes] = []
+    target_numbers: set[int] = set()
+    for line_number, line_sha256 in requested:
+        if line_number > len(lines):
+            raise ValueError("overlay line number is out of range")
+        rejected = lines[line_number - 1]
+        if _sha(rejected) != line_sha256:
+            raise ValueError("overlay line SHA256 mismatch")
+        diagnostic = diagnose_overlay_line(rejected, file=writer, line=line_number)
+        if diagnostic is None:
+            raise ValueError("selected overlay row is schema-valid")
+        targets.append(
+            {
+                "line_number": line_number,
+                "line_sha256": line_sha256,
+                "diagnostic": diagnostic,
+            }
+        )
+        rejected_rows.append(rejected)
+        target_numbers.add(line_number)
+    repaired = b"".join(
+        line for number, line in enumerate(lines, start=1) if number not in target_numbers
+    )
+    _validate_clean_shard(repaired, writer)
+    return targets, rejected_rows, repaired
+
+
+def _targets_from_plan(plan: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return the common target representation for v1 and v2 plans."""
+    if plan["schema"] == PLAN_SCHEMA_V2:
+        return list(plan["targets"])
+    return [
+        {
+            "line_number": plan["line_number"],
+            "line_sha256": plan["line_sha256"],
+            "diagnostic": plan["diagnostic"],
+        }
+    ]
+
+
 def plan_overlay_recovery(
     *,
     home: Path,
     writer: str,
-    line_number: int,
+    line_number: int | Sequence[int],
     source_sha256: str,
-    line_sha256: str,
+    line_sha256: str | Sequence[str],
     recovery_card_id: str,
     evidence: Path,
     actor: str,
 ) -> dict[str, Any]:
-    """Build a hash-bound plan for exactly one rejected overlay row."""
+    """Build a hash-bound plan for one or more rejected overlay rows."""
     home = Path(home).expanduser()
     _validate_writer(writer)
     _validate_actor(actor)
-    if not _SHA_RE.fullmatch(source_sha256) or not _SHA_RE.fullmatch(line_sha256):
+    if not _SHA_RE.fullmatch(source_sha256):
         raise ValueError("source and line SHA256 values must be lowercase hex")
-    if line_number < 1:
-        raise ValueError("line number must be positive")
+    requested = _requested_targets(line_number, line_sha256)
     evidence_fd = _evidence_directory(home, Path(evidence))
     os.close(evidence_fd)
 
@@ -387,33 +542,36 @@ def plan_overlay_recovery(
     if _sha(raw) != source_sha256:
         raise ValueError("overlay source SHA256 mismatch")
     lines = _lines(raw)
-    if line_number > len(lines):
-        raise ValueError("overlay line number is out of range")
-    rejected = lines[line_number - 1]
-    if _sha(rejected) != line_sha256:
-        raise ValueError("overlay line SHA256 mismatch")
-    diagnostic = diagnose_overlay_line(rejected, file=writer, line=line_number)
-    if diagnostic is None:
-        raise ValueError("selected overlay row is schema-valid")
-    repaired = b"".join(lines[: line_number - 1] + lines[line_number:])
-    _validate_clean_shard(repaired, writer)
+    targets, _, repaired = _repair_targets(lines, writer, requested)
     source = (home / "coordination" / "card_events" / writer).resolve(strict=True)
-    plan = {
-        "schema": PLAN_SCHEMA,
-        "tool_revision": TOOL_REVISION,
+    common = {
         "writer": writer,
         "source": str(source),
-        "line_number": line_number,
         "source_sha256": source_sha256,
-        "line_sha256": line_sha256,
         "repaired_sha256": _sha(repaired),
         "recovery_card_id": recovery_card_id,
         "evidence": str(Path(evidence)),
         "actor": actor,
-        "diagnostic": diagnostic,
         "requires_writer_quiescence": True,
         "planned_at": _now(),
     }
+    if len(targets) == 1:
+        target = targets[0]
+        plan = {
+            "schema": PLAN_SCHEMA,
+            "tool_revision": TOOL_REVISION,
+            **common,
+            "line_number": target["line_number"],
+            "line_sha256": target["line_sha256"],
+            "diagnostic": target["diagnostic"],
+        }
+    else:
+        plan = {
+            "schema": PLAN_SCHEMA_V2,
+            "tool_revision": TOOL_REVISION_V2,
+            **common,
+            "targets": targets,
+        }
     return _seal(plan, "plan_sha256")
 
 
@@ -460,7 +618,7 @@ def apply_overlay_recovery(
     """Apply one exact recovery plan and return its durable receipt."""
     plan = _load_artifact(Path(plan_path))
     _validate_plan(plan)
-    if plan.get("schema") != PLAN_SCHEMA or plan.get("actor") != actor:
+    if plan.get("schema") not in {PLAN_SCHEMA, PLAN_SCHEMA_V2} or plan.get("actor") != actor:
         raise ValueError("recovery plan identity mismatch")
     if not writer_quiesced:
         raise ValueError("overlay writers must be upgraded or quiesced before apply")
@@ -474,7 +632,14 @@ def apply_overlay_recovery(
     evidence_fd = _evidence_directory(home, evidence)
     stem = f"overlay-{plan['plan_sha256']}"
     original_name = f"{stem}.original.jsonl"
-    rejected_name = f"{stem}.rejected.bin"
+    targets = _targets_from_plan(plan)
+    requested = [(int(target["line_number"]), str(target["line_sha256"])) for target in targets]
+    multi = plan["schema"] == PLAN_SCHEMA_V2
+    rejected_names = (
+        [f"{stem}.rejected-line-{target['line_number']}.bin" for target in targets]
+        if multi
+        else [f"{stem}.rejected.bin"]
+    )
     intent_name = f"{stem}.intent.json"
     receipt_name = f"{stem}.receipt.json"
     log = CardEventLog(home)
@@ -488,6 +653,12 @@ def apply_overlay_recovery(
             if receipt_raw is not None:
                 receipt = json.loads(receipt_raw)
                 _validate_receipt(receipt)
+                expected_receipt_schema = RECEIPT_SCHEMA_V2 if multi else RECEIPT_SCHEMA
+                if (
+                    receipt["schema"] != expected_receipt_schema
+                    or receipt["plan_sha256"] != plan["plan_sha256"]
+                ):
+                    raise ValueError("completed recovery receipt does not match plan")
                 if current_sha != plan["repaired_sha256"]:
                     raise ValueError("completed recovery conflicts with current writer")
                 return receipt
@@ -496,36 +667,30 @@ def apply_overlay_recovery(
 
             lines = _lines(raw)
             if current_sha == plan["source_sha256"]:
-                line_number = int(plan["line_number"])
-                if line_number > len(lines):
-                    raise ValueError("overlay line changed before apply")
-                rejected = lines[line_number - 1]
-                if _sha(rejected) != plan["line_sha256"]:
-                    raise ValueError("overlay line SHA256 changed before apply")
-                diagnostic = diagnose_overlay_line(
-                    rejected, file=str(plan["writer"]), line=line_number
+                checked_targets, rejected_rows, repaired = _repair_targets(
+                    lines, str(plan["writer"]), requested
                 )
-                if diagnostic != plan["diagnostic"]:
+                if checked_targets != targets:
                     raise ValueError("overlay schema diagnostic changed before apply")
-                repaired = b"".join(lines[: line_number - 1] + lines[line_number:])
                 if _sha(repaired) != plan["repaired_sha256"]:
                     raise ValueError("overlay repaired SHA256 mismatch")
-                _validate_clean_shard(repaired, str(plan["writer"]))
                 _publish(evidence_fd, original_name, raw)
-                _publish(evidence_fd, rejected_name, rejected)
-                intent = _seal(
-                    {
-                        "schema": RECEIPT_SCHEMA,
-                        "phase": "intent",
-                        "plan_sha256": plan["plan_sha256"],
-                        "source_sha256": plan["source_sha256"],
-                        "line_sha256": plan["line_sha256"],
-                        "repaired_sha256": plan["repaired_sha256"],
-                        "actor": actor,
-                        "created_at": plan["planned_at"],
-                    },
-                    "intent_sha256",
-                )
+                for name, rejected in zip(rejected_names, rejected_rows, strict=True):
+                    _publish(evidence_fd, name, rejected)
+                intent_body: dict[str, Any] = {
+                    "schema": RECEIPT_SCHEMA_V2 if multi else RECEIPT_SCHEMA,
+                    "phase": "intent",
+                    "plan_sha256": plan["plan_sha256"],
+                    "source_sha256": plan["source_sha256"],
+                    "repaired_sha256": plan["repaired_sha256"],
+                    "actor": actor,
+                    "created_at": plan["planned_at"],
+                }
+                if multi:
+                    intent_body["targets"] = targets
+                else:
+                    intent_body["line_sha256"] = targets[0]["line_sha256"]
+                intent = _seal(intent_body, "intent_sha256")
                 _publish(evidence_fd, intent_name, _json_bytes(intent))
                 _replace(
                     directory_fd,
@@ -547,38 +712,43 @@ def apply_overlay_recovery(
                     intent.get("plan_sha256") != plan["plan_sha256"]
                     or intent.get("source_sha256") != plan["source_sha256"]
                     or intent.get("repaired_sha256") != plan["repaired_sha256"]
+                    or (multi and intent.get("targets") != targets)
+                    or (not multi and intent.get("line_sha256") != targets[0]["line_sha256"])
                 ):
                     raise ValueError("recovery intent does not match plan")
                 original = _read(evidence_fd, original_name)
-                rejected = _read(evidence_fd, rejected_name)
                 if original is None or _sha(original) != plan["source_sha256"]:
                     raise ValueError("recovery original evidence mismatch")
-                if rejected is None or _sha(rejected) != plan["line_sha256"]:
-                    raise ValueError("recovery rejected-line evidence mismatch")
+                for name, target in zip(rejected_names, targets, strict=True):
+                    rejected = _read(evidence_fd, name)
+                    if rejected is None or _sha(rejected) != target["line_sha256"]:
+                        raise ValueError("recovery rejected-line evidence mismatch")
 
             _validate_clean_shard(raw, str(plan["writer"]))
-            receipt = _seal(
-                {
-                    "schema": RECEIPT_SCHEMA,
-                    "disposition": "applied_and_schema_verified",
-                    "plan_sha256": plan["plan_sha256"],
-                    "writer": plan["writer"],
-                    "source": plan["source"],
-                    "source_sha256": plan["source_sha256"],
-                    "line_sha256": plan["line_sha256"],
-                    "repaired_sha256": plan["repaired_sha256"],
-                    "recovery_card_id": plan["recovery_card_id"],
-                    "actor": actor,
-                    "evidence": str(evidence),
-                    "plan_artifact": Path(plan_path).name,
-                    "original_artifact": original_name,
-                    "rejected_artifact": rejected_name,
-                    "intent_artifact": intent_name,
-                    "receipt_artifact": receipt_name,
-                    "verified_at": _now(),
-                },
-                "receipt_sha256",
-            )
+            receipt_body: dict[str, Any] = {
+                "schema": RECEIPT_SCHEMA_V2 if multi else RECEIPT_SCHEMA,
+                "disposition": "applied_and_schema_verified",
+                "plan_sha256": plan["plan_sha256"],
+                "writer": plan["writer"],
+                "source": plan["source"],
+                "source_sha256": plan["source_sha256"],
+                "repaired_sha256": plan["repaired_sha256"],
+                "recovery_card_id": plan["recovery_card_id"],
+                "actor": actor,
+                "evidence": str(evidence),
+                "plan_artifact": Path(plan_path).name,
+                "original_artifact": original_name,
+                "intent_artifact": intent_name,
+                "receipt_artifact": receipt_name,
+                "verified_at": _now(),
+            }
+            if multi:
+                receipt_body["targets"] = targets
+                receipt_body["rejected_artifacts"] = rejected_names
+            else:
+                receipt_body["line_sha256"] = targets[0]["line_sha256"]
+                receipt_body["rejected_artifact"] = rejected_names[0]
+            receipt = _seal(receipt_body, "receipt_sha256")
             _publish(evidence_fd, receipt_name, _json_bytes(receipt))
             return receipt
     finally:

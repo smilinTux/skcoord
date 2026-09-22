@@ -130,6 +130,147 @@ def test_plan_is_read_only_and_binds_schema_diagnostic(
     assert plan["source"] == str(Path(malformed_overlay["shard"]).resolve())
 
 
+def test_multi_row_plan_preserves_each_rejected_row_and_rolls_back(
+    malformed_overlay: dict[str, object],
+) -> None:
+    original = malformed_overlay["original"]
+    first_rejected = malformed_overlay["rejected"]
+    shard = malformed_overlay["shard"]
+    assert isinstance(original, bytes)
+    assert isinstance(first_rejected, bytes)
+    assert isinstance(shard, Path)
+    second_rejected = (
+        json.dumps(
+            {
+                "card_id": "second01",
+                "action": "verdict",
+                "writer": "legacy",
+                "verdict": "BLOCKED",
+            }
+        ).encode()
+        + b"\n"
+    )
+    third_rejected = (
+        json.dumps(
+            {
+                "card_id": "third001",
+                "action": "verdict",
+                "writer": "legacy",
+                "verdict": "PASS",
+                "unexpected": "field",
+            }
+        ).encode()
+        + b"\n"
+    )
+    multi_original = original + second_rejected + third_rejected
+    shard.write_bytes(multi_original)
+
+    plan = plan_overlay_recovery(
+        home=malformed_overlay["home"],
+        writer="chiap08.jsonl",
+        line_number=(2, 4, 5),
+        source_sha256=_sha(multi_original),
+        line_sha256=(_sha(first_rejected), _sha(second_rejected), _sha(third_rejected)),
+        recovery_card_id="f0d0ba98",
+        evidence=malformed_overlay["evidence"],
+        actor="operator",
+    )
+    assert [target["line_number"] for target in plan["targets"]] == [2, 4, 5]
+    assert plan["repaired_sha256"] == _sha(malformed_overlay["repaired"])
+
+    plan_path = save_recovery_plan(plan)
+    receipt = apply_overlay_recovery(
+        home=malformed_overlay["home"],
+        plan_path=plan_path,
+        actor="operator",
+        writer_quiesced=True,
+    )
+    evidence = Path(malformed_overlay["evidence"])
+    assert shard.read_bytes() == malformed_overlay["repaired"]
+    assert [(evidence / name).read_bytes() for name in receipt["rejected_artifacts"]] == [
+        first_rejected,
+        second_rejected,
+        third_rejected,
+    ]
+    assert (
+        apply_overlay_recovery(
+            home=malformed_overlay["home"],
+            plan_path=plan_path,
+            actor="operator",
+            writer_quiesced=True,
+        )
+        == receipt
+    )
+
+    receipt_path = evidence / receipt["receipt_artifact"]
+    rollback_overlay_recovery(
+        home=malformed_overlay["home"],
+        receipt_path=receipt_path,
+        actor="operator",
+        writer_quiesced=True,
+    )
+    assert shard.read_bytes() == multi_original
+
+
+@pytest.mark.parametrize(
+    ("line_numbers", "line_hashes", "message"),
+    [
+        ((2, 2), ("first", "second"), "unique and strictly increasing"),
+        ((3, 2), ("first", "second"), "unique and strictly increasing"),
+        ((2, 3), ("first",), "counts must match"),
+    ],
+)
+def test_multi_row_plan_rejects_unordered_duplicate_or_unpaired_targets(
+    malformed_overlay: dict[str, object],
+    line_numbers: tuple[int, ...],
+    line_hashes: tuple[str, ...],
+    message: str,
+) -> None:
+    original = malformed_overlay["original"]
+    rejected = malformed_overlay["rejected"]
+    assert isinstance(original, bytes)
+    assert isinstance(rejected, bytes)
+    hashes = tuple(_sha(rejected) if value == "first" else _sha(original) for value in line_hashes)
+    with pytest.raises(ValueError, match=message):
+        plan_overlay_recovery(
+            home=malformed_overlay["home"],
+            writer="chiap08.jsonl",
+            line_number=line_numbers,
+            source_sha256=_sha(original),
+            line_sha256=hashes,
+            recovery_card_id="f0d0ba98",
+            evidence=malformed_overlay["evidence"],
+            actor="operator",
+        )
+
+
+def test_multi_row_plan_rejects_an_unlisted_rejected_row(
+    malformed_overlay: dict[str, object],
+) -> None:
+    original = malformed_overlay["original"]
+    first_rejected = malformed_overlay["rejected"]
+    shard = malformed_overlay["shard"]
+    assert isinstance(original, bytes)
+    assert isinstance(first_rejected, bytes)
+    assert isinstance(shard, Path)
+    second_rejected = b'{"card_id":"second","action":"verdict","writer":"legacy"}\n'
+    third_rejected = b'{"card_id":"third","action":"verdict","writer":"legacy"}\n'
+    changed = original + second_rejected + third_rejected
+    shard.write_bytes(changed)
+
+    with pytest.raises(ValueError, match="remains invalid at line 3"):
+        plan_overlay_recovery(
+            home=malformed_overlay["home"],
+            writer="chiap08.jsonl",
+            line_number=(2, 4),
+            source_sha256=_sha(changed),
+            line_sha256=(_sha(first_rejected), _sha(second_rejected)),
+            recovery_card_id="f0d0ba98",
+            evidence=malformed_overlay["evidence"],
+            actor="operator",
+        )
+
+
 def test_apply_requires_explicit_writer_quiescence(
     malformed_overlay: dict[str, object],
 ) -> None:
