@@ -12,13 +12,16 @@ import fcntl
 import html
 import logging
 import os
+import re
 import socket
 import stat
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
+from typing import Iterator
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from .coordination import Board, TaskStatus, TaskView, validate_shared_home
 
@@ -87,6 +90,8 @@ class CardEvent(BaseModel):
     column, order it, tag it) without touching coord's claim-based write path.
     """
 
+    model_config = ConfigDict(extra="forbid")
+
     card_id: str
     action: str
     # Optional cross-store identity. Records written before graph-truth
@@ -128,6 +133,72 @@ OVERLAY_ACTIONS = frozenset(
         "verdict",
     }
 )
+
+_OVERLAY_PAYLOAD_FIELDS = frozenset(
+    {
+        "column",
+        "order",
+        "priority",
+        "swimlane",
+        "label",
+        "link_key",
+        "link_value",
+        "owner",
+        "title",
+        "description",
+    }
+)
+_ACTION_FIELDS = {
+    "move": frozenset({"column", "order"}),
+    "set_priority": frozenset({"priority"}),
+    "set_swimlane": frozenset({"swimlane"}),
+    "add_label": frozenset({"label"}),
+    "remove_label": frozenset({"label"}),
+    "link": frozenset({"link_key", "link_value"}),
+    "verdict": frozenset({"link_key", "link_value"}),
+    "assign": frozenset({"owner"}),
+    "unassign": frozenset(),
+    "describe": frozenset({"title", "description"}),
+}
+_WRITER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._@:-]{0,127}\Z")
+
+
+def validate_overlay_event(event: CardEvent, *, require_writer: bool = True) -> None:
+    """Validate one overlay event at the shared read and write boundary."""
+    if event.action not in OVERLAY_ACTIONS:
+        raise ValueError(
+            f"unsupported overlay action {event.action!r}; expected one of "
+            f"{sorted(OVERLAY_ACTIONS)}"
+        )
+    if require_writer and not _WRITER_RE.fullmatch(event.writer):
+        raise ValueError("overlay writer must be a nonempty bounded identity")
+
+    allowed = _ACTION_FIELDS[event.action]
+    populated = {name for name in _OVERLAY_PAYLOAD_FIELDS if getattr(event, name) is not None}
+    reserved = populated - allowed
+    if reserved:
+        raise ValueError(
+            f"overlay action {event.action!r} carries reserved field(s): "
+            f"{', '.join(sorted(reserved))}"
+        )
+
+    if event.action == "move" and not populated:
+        raise ValueError("overlay action 'move' requires column or order")
+    if event.action in {"set_priority", "set_swimlane", "add_label", "remove_label"}:
+        field = next(iter(allowed))
+        if not str(getattr(event, field) or "").strip():
+            raise ValueError(f"overlay action {event.action!r} requires {field}")
+    if event.action in {"link", "verdict"} and (
+        not str(event.link_key or "").strip() or event.link_value is None
+    ):
+        raise ValueError(f"overlay action {event.action!r} requires link_key and link_value")
+    if event.action == "verdict" and event.link_key != "verdict":
+        raise ValueError("overlay action 'verdict' requires link_key='verdict'")
+    if event.action == "assign" and not str(event.owner or "").strip():
+        raise ValueError("overlay action 'assign' requires owner")
+    if event.action == "describe" and event.title is None and event.description is None:
+        raise ValueError("overlay action 'describe' requires title or description")
+
 
 # How much of a rejected line to quote in the log. Long enough to identify the
 # line by eye, short enough that one huge bad line cannot flood a log file.
@@ -277,6 +348,50 @@ class CardEventLog:
         finally:
             os.close(home_fd)
 
+    @contextmanager
+    def writer_lock(self, filename: str) -> Iterator[int]:
+        """Hold the shared overlay writer lock and yield the pinned directory."""
+        if (
+            not filename.endswith(".jsonl")
+            or not filename
+            or "/" in filename
+            or "\\" in filename
+            or ".." in filename
+        ):
+            raise ValueError("card event writer filename is unsafe")
+        directory_fd = self._open_event_directory()
+        lock_name = f".{filename}.lock"
+        descriptor = -1
+        try:
+            try:
+                existing = os.stat(lock_name, dir_fd=directory_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                existing = None
+            if existing is not None and (
+                stat.S_ISLNK(existing.st_mode)
+                or not stat.S_ISREG(existing.st_mode)
+                or existing.st_nlink != 1
+            ):
+                raise ValueError("card event writer lock is unsafe")
+            descriptor = os.open(
+                lock_name,
+                os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+                dir_fd=directory_fd,
+            )
+            opened = os.fstat(descriptor)
+            if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
+                raise ValueError("card event writer lock is unsafe")
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            try:
+                yield directory_fd
+            finally:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+            os.close(directory_fd)
+
     @staticmethod
     def _read_regular_file_bytes(directory_fd: int, name: str) -> bytes | None:
         """Read one regular single-link event file through its parent fd."""
@@ -329,11 +444,9 @@ class CardEventLog:
         from .card_store import CardStore
 
         if event.action not in OVERLAY_ACTIONS:
-            raise ValueError(
-                f"unsupported overlay action {event.action!r}; the fold can only apply "
-                f"{sorted(OVERLAY_ACTIONS)}. An event with any other action would be "
-                "written successfully and then silently dropped when the board is read."
-            )
+            validate_overlay_event(event, require_writer=False)
+        if not event.writer:
+            event.writer = socket.gethostname()
 
         store = None
         if (
@@ -348,21 +461,16 @@ class CardEventLog:
         if (
             store is not None
             and event.action in {"move", "assign", "unassign"}
-            and any(
-                item.get("action") == "void"
-                for item in store._read_events(event.card_id)
-            )
+            and any(item.get("action") == "void" for item in store._read_events(event.card_id))
         ):
             raise ValueError(
                 f"CardStore card {event.card_id} is voided; void is a terminal decision"
             )
-        if not event.writer:
-            event.writer = socket.gethostname()
         filename = f"{socket.gethostname()}.jsonl"
         flags = os.O_APPEND | os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
-        directory_fd = self._open_event_directory()
         descriptor = -1
-        try:
+        with self.writer_lock(filename) as directory_fd:
+            validate_overlay_event(event)
             try:
                 existing = os.stat(filename, dir_fd=directory_fd, follow_symlinks=False)
             except FileNotFoundError:
@@ -376,27 +484,40 @@ class CardEventLog:
             descriptor = os.open(filename, flags, 0o600, dir_fd=directory_fd)
             event_stat = os.fstat(descriptor)
             if not stat.S_ISREG(event_stat.st_mode) or event_stat.st_nlink != 1:
+                os.close(descriptor)
+                descriptor = -1
                 raise ValueError("card event destination is unsafe")
-            with os.fdopen(descriptor, "a", encoding="utf-8") as fh:
+            with os.fdopen(descriptor, "a+", encoding="utf-8") as fh:
                 descriptor = -1
                 fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
                 try:
+                    fh.seek(0)
+                    for number, line in enumerate(fh, start=1):
+                        if not line.strip():
+                            continue
+                        try:
+                            existing_event = CardEvent.model_validate_json(line)
+                            validate_overlay_event(existing_event)
+                        except Exception as exc:  # noqa: BLE001
+                            raise ValueError(
+                                f"existing overlay shard {filename} line {number} "
+                                f"is invalid: {type(exc).__name__}: {exc}"
+                            ) from exc
                     payload = event.model_dump_json()
                     if "\n" in payload or "\r" in payload:
                         raise ValueError(
                             "overlay event must serialize to a single line; "
                             "a newline in the payload would split the ledger record"
                         )
+                    fh.seek(0, os.SEEK_END)
                     fh.write(payload + "\n")
                     fh.flush()
                     os.fsync(fh.fileno())
                 finally:
                     fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
             os.fsync(directory_fd)
-        finally:
-            if descriptor >= 0:
-                os.close(descriptor)
-            os.close(directory_fd)
+        if descriptor >= 0:
+            os.close(descriptor)
 
     def read_all(self) -> list[CardEvent]:
         """Read every overlay event across all writers.
@@ -430,17 +551,17 @@ class CardEventLog:
                 if raw is None:
                     continue
                 bad_in_file = 0
-                for number, line in enumerate(
-                    raw.decode("utf-8").splitlines(), start=1
-                ):
+                for number, line in enumerate(raw.splitlines(), start=1):
                     line = line.strip()
                     if not line:
                         continue
                     try:
-                        out.append(CardEvent.model_validate_json(line))
+                        event = CardEvent.model_validate_json(line)
+                        validate_overlay_event(event)
+                        out.append(event)
                     except Exception as exc:  # noqa: BLE001
                         bad_in_file += 1
-                        excerpt = line[:_EXCERPT_CHARS]
+                        excerpt = line[:_EXCERPT_CHARS].decode("utf-8", errors="replace")
                         self.rejected.append(
                             {
                                 "file": name,
@@ -1000,9 +1121,7 @@ def _render_card(c: Card) -> str:
             f'<span class="ava">{initial}</span>{_clean(c.owner)}</span></div>'
         )
     elif c.labels:
-        foot = (
-            f'<div class="cfoot"><span class="tag">{_clean(c.labels[0])}</span></div>'
-        )
+        foot = f'<div class="cfoot"><span class="tag">{_clean(c.labels[0])}</span></div>'
     stripe_style = ""
     if c.kind == Kind.INCIDENT:
         stripe_style = ' style="--stripe:var(--incident)"'

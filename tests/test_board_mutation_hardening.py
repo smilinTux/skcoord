@@ -154,9 +154,7 @@ def test_board_lock_times_out_when_another_process_holds_it(tmp_path) -> None:
 
 
 @pytest.mark.parametrize("operation", ["create", "relabel"])
-def test_terminal_precondition_excludes_child_graph_mutations(
-    tmp_path, operation
-) -> None:
+def test_terminal_precondition_excludes_child_graph_mutations(tmp_path, operation) -> None:
     """Creation and relabeling wait until a terminal transition is appended."""
     board = Board(tmp_path)
     parent = _create_claimed(board)
@@ -185,9 +183,7 @@ def test_terminal_precondition_excludes_child_graph_mutations(
                     Task(id="hard0002", title="child", tags=[f"parent-{parent.id}"])
                 )
             else:
-                Board(tmp_path).update_task(
-                    "hard0002", add_tags=[f"parent-{parent.id}"]
-                )
+                Board(tmp_path).update_task("hard0002", add_tags=[f"parent-{parent.id}"])
         except BaseException as exc:
             errors.append(exc)
         finally:
@@ -547,7 +543,7 @@ def test_card_event_log_symlink_is_rejected_at_open_time(tmp_path) -> None:
     card_events.symlink_to(outside, target_is_directory=True)
 
     with pytest.raises(ValueError, match="card event directory"):
-        CardEventLog(tmp_path).append(CardEvent(card_id="hard0001", action="move"))
+        CardEventLog(tmp_path).append(CardEvent(card_id="hard0001", action="move", column="doing"))
     assert list(outside.iterdir()) == []
 
 
@@ -781,7 +777,7 @@ def test_cardstore_listing_and_card_event_reads_reject_symlinked_content(tmp_pat
         store.list_card_ids()
 
     events = CardEventLog(tmp_path)
-    events.append(CardEvent(card_id="hard0002", action="move"))
+    events.append(CardEvent(card_id="hard0002", action="move", column="doing"))
     event_file = next((tmp_path / "coordination" / "card_events").glob("*.jsonl"))
     external_event = outside / "card-events.jsonl"
     external_event.write_text('{"card_id":"external","action":"move"}\n', encoding="utf-8")

@@ -27,7 +27,7 @@ def test_coordination_home_guard_is_sensitive(tmp_path, monkeypatch) -> None:
     wrong_home.mkdir()
     monkeypatch.setattr(card_module, "validate_shared_home", lambda home: home)
 
-    CardEventLog(wrong_home).append(CardEvent(card_id="home0001", action="move"))
+    CardEventLog(wrong_home).append(CardEvent(card_id="home0001", action="move", column="doing"))
 
     assert (wrong_home / "coordination" / "card_events").is_dir()
 
@@ -38,8 +38,13 @@ def test_overlay_event_requires_foldable_core_in_every_mode(
     tmp_path, monkeypatch, action, mode
 ) -> None:
     monkeypatch.setenv("SKCOORD_CARD_STORE", mode)
+    payload = (
+        {"title": "valid title"}
+        if action == "describe"
+        else {"link_key": "evidence", "link_value": "valid"}
+    )
     with pytest.raises(ValueError, match="no foldable core"):
-        CardEventLog(tmp_path).append(CardEvent(card_id="orphan0001", action=action))
+        CardEventLog(tmp_path).append(CardEvent(card_id="orphan0001", action=action, **payload))
 
     assert not (tmp_path / "coordination" / "card_events").exists()
 
