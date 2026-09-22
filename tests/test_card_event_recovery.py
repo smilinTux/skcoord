@@ -707,7 +707,12 @@ def test_scanner_reports_wrong_schema_with_card_hint(malformed_overlay: dict[str
     assert problems[0]["action_hint"] == "verdict"
 
 
-def test_append_revalidates_existing_shard_under_the_writer_lock(tmp_path: Path) -> None:
+def test_append_revalidates_existing_shard_under_the_writer_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from skcoord import card as card_module
+
+    monkeypatch.setattr(card_module.socket, "gethostname", lambda: "chiap08")
     shard = tmp_path / "coordination" / "card_events" / "chiap08.jsonl"
     shard.parent.mkdir(parents=True)
     shard.write_text('{"wrong":"schema"}\n', encoding="utf-8")

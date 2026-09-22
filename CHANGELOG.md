@@ -1,5 +1,10 @@
 # Changelog
 
+- **Card f0d0ba98: qualify PR130 recovery publication — pin writer identity in the existing-shard revalidation test.**
+  `test_append_revalidates_existing_shard_under_the_writer_lock` now monkeypatches
+  `card_module.socket.gethostname` to `chiap08` before `append`, so the test no
+  longer depends on the runner's real hostname. No production source changed.
+
 - **Warn once per distinct unreadable overlay line, not once per fold.**
   `_MAX_WARNINGS_PER_FILE` caps warnings per `fold()` CALL, and `fold()` runs
   once per card, so one malformed overlay line produced the same warning
