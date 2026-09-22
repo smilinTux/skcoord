@@ -296,9 +296,12 @@ def test_append_rejects_unsafe_writer_identity(tmp_path, writer):
         )
 
 
-def test_empty_writer_is_normalized_to_the_local_host_for_legacy_callers(tmp_path):
-    CardEventLog(tmp_path).append(CardEvent(card_id="aaaaaaa1", action="add_label", label="ok"))
-    assert CardEventLog(tmp_path).read_all()[0].writer
+def test_append_rejects_empty_writer_instead_of_fabricating_host_identity(tmp_path):
+    with pytest.raises(ValueError, match="writer"):
+        CardEventLog(tmp_path).append(
+            CardEvent(card_id="aaaaaaa1", action="add_label", label="ok")
+        )
+    assert not (tmp_path / "coordination").exists()
 
 
 @pytest.mark.parametrize(

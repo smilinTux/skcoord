@@ -543,7 +543,9 @@ def test_card_event_log_symlink_is_rejected_at_open_time(tmp_path) -> None:
     card_events.symlink_to(outside, target_is_directory=True)
 
     with pytest.raises(ValueError, match="card event directory"):
-        CardEventLog(tmp_path).append(CardEvent(card_id="hard0001", action="move", column="doing"))
+        CardEventLog(tmp_path).append(
+            CardEvent(card_id="hard0001", action="move", writer="operator", column="doing")
+        )
     assert list(outside.iterdir()) == []
 
 
@@ -777,7 +779,7 @@ def test_cardstore_listing_and_card_event_reads_reject_symlinked_content(tmp_pat
         store.list_card_ids()
 
     events = CardEventLog(tmp_path)
-    events.append(CardEvent(card_id="hard0002", action="move", column="doing"))
+    events.append(CardEvent(card_id="hard0002", action="move", writer="operator", column="doing"))
     event_file = next((tmp_path / "coordination" / "card_events").glob("*.jsonl"))
     external_event = outside / "card-events.jsonl"
     external_event.write_text('{"card_id":"external","action":"move"}\n', encoding="utf-8")

@@ -453,10 +453,10 @@ class CardEventLog:
         """
         from .card_store import CardStore
 
+        if not _WRITER_RE.fullmatch(event.writer):
+            raise ValueError("overlay writer must be a nonempty bounded identity")
         if event.action not in OVERLAY_ACTIONS:
             validate_overlay_event(event, require_writer=False)
-        if not event.writer:
-            event.writer = socket.gethostname()
 
         store = None
         if (
