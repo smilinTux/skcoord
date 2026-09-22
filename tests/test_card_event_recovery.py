@@ -208,6 +208,33 @@ def test_apply_preserves_exact_bytes_is_retryable_and_keeps_blocked_fold(
     assert card.links["verdict"] == "BLOCKED"
 
 
+def test_apply_retry_rejects_resealed_known_receipt_field_tampering(
+    malformed_overlay: dict[str, object],
+) -> None:
+    from skcoord import card_event_recovery as recovery
+
+    plan_path = save_recovery_plan(_plan(malformed_overlay))
+    receipt = apply_overlay_recovery(
+        home=malformed_overlay["home"],
+        plan_path=plan_path,
+        actor="operator",
+        writer_quiesced=True,
+    )
+    receipt_path = Path(malformed_overlay["evidence"]) / receipt["receipt_artifact"]
+    receipt.pop("receipt_sha256")
+    receipt["actor"] = "intruder"
+    receipt["repaired_sha256"] = "f" * 64
+    receipt_path.write_bytes(recovery._json_bytes(recovery._seal(receipt, "receipt_sha256")))
+
+    with pytest.raises(ValueError, match="does not match plan"):
+        apply_overlay_recovery(
+            home=malformed_overlay["home"],
+            plan_path=plan_path,
+            actor="operator",
+            writer_quiesced=True,
+        )
+
+
 def test_interrupted_evidence_publication_retries_without_rewriting_source(
     malformed_overlay: dict[str, object], monkeypatch: pytest.MonkeyPatch
 ) -> None:

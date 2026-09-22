@@ -477,6 +477,24 @@ def apply_overlay_recovery(
     rejected_name = f"{stem}.rejected.bin"
     intent_name = f"{stem}.intent.json"
     receipt_name = f"{stem}.receipt.json"
+    receipt_fields = {
+        "schema": RECEIPT_SCHEMA,
+        "disposition": "applied_and_schema_verified",
+        "plan_sha256": plan["plan_sha256"],
+        "writer": plan["writer"],
+        "source": plan["source"],
+        "source_sha256": plan["source_sha256"],
+        "line_sha256": plan["line_sha256"],
+        "repaired_sha256": plan["repaired_sha256"],
+        "recovery_card_id": plan["recovery_card_id"],
+        "actor": actor,
+        "evidence": str(evidence),
+        "plan_artifact": Path(plan_path).name,
+        "original_artifact": original_name,
+        "rejected_artifact": rejected_name,
+        "intent_artifact": intent_name,
+        "receipt_artifact": receipt_name,
+    }
     log = CardEventLog(home)
     try:
         with log.writer_lock(str(plan["writer"])) as directory_fd:
@@ -488,6 +506,8 @@ def apply_overlay_recovery(
             if receipt_raw is not None:
                 receipt = json.loads(receipt_raw)
                 _validate_receipt(receipt)
+                if any(receipt.get(key) != value for key, value in receipt_fields.items()):
+                    raise ValueError("completed recovery receipt does not match plan")
                 if current_sha != plan["repaired_sha256"]:
                     raise ValueError("completed recovery conflicts with current writer")
                 return receipt
@@ -559,22 +579,7 @@ def apply_overlay_recovery(
             _validate_clean_shard(raw, str(plan["writer"]))
             receipt = _seal(
                 {
-                    "schema": RECEIPT_SCHEMA,
-                    "disposition": "applied_and_schema_verified",
-                    "plan_sha256": plan["plan_sha256"],
-                    "writer": plan["writer"],
-                    "source": plan["source"],
-                    "source_sha256": plan["source_sha256"],
-                    "line_sha256": plan["line_sha256"],
-                    "repaired_sha256": plan["repaired_sha256"],
-                    "recovery_card_id": plan["recovery_card_id"],
-                    "actor": actor,
-                    "evidence": str(evidence),
-                    "plan_artifact": Path(plan_path).name,
-                    "original_artifact": original_name,
-                    "rejected_artifact": rejected_name,
-                    "intent_artifact": intent_name,
-                    "receipt_artifact": receipt_name,
+                    **receipt_fields,
                     "verified_at": _now(),
                 },
                 "receipt_sha256",
