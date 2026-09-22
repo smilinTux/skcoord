@@ -416,14 +416,24 @@ class CardEventLog:
             raise ValueError("card event source is unsafe") from exc
         try:
             opened = os.fstat(descriptor)
-            if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or opened.st_nlink != 1
+                or (opened.st_dev, opened.st_ino) != (existing.st_dev, existing.st_ino)
+            ):
                 raise ValueError("card event source is unsafe")
             chunks: list[bytes] = []
-            while True:
-                chunk = os.read(descriptor, 65536)
-                if not chunk:
-                    return b"".join(chunks)
+            while chunk := os.read(descriptor, 65536):
                 chunks.append(chunk)
+            after = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            if (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns) != (
+                opened.st_dev,
+                opened.st_ino,
+                opened.st_size,
+                opened.st_mtime_ns,
+            ):
+                raise ValueError("card event source changed while reading")
+            return b"".join(chunks)
         finally:
             os.close(descriptor)
 

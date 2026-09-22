@@ -432,6 +432,33 @@ def test_rollback_requires_quiescence_and_refuses_a_different_home(
         )
 
 
+def test_rollback_rejects_a_resealed_receipt_with_unknown_fields(
+    malformed_overlay: dict[str, object],
+) -> None:
+    from skcoord import card_event_recovery as recovery
+
+    plan_path = save_recovery_plan(_plan(malformed_overlay))
+    receipt = apply_overlay_recovery(
+        home=malformed_overlay["home"],
+        plan_path=plan_path,
+        actor="operator",
+        writer_quiesced=True,
+    )
+    receipt_path = Path(malformed_overlay["evidence"]) / receipt["receipt_artifact"]
+    receipt.pop("receipt_sha256")
+    receipt["invented"] = "not part of the receipt schema"
+    receipt = recovery._seal(receipt, "receipt_sha256")
+    receipt_path.write_bytes(recovery._json_bytes(receipt))
+
+    with pytest.raises(ValueError, match="fields"):
+        rollback_overlay_recovery(
+            home=malformed_overlay["home"],
+            receipt_path=receipt_path,
+            actor="operator",
+            writer_quiesced=True,
+        )
+
+
 def test_interrupted_rollback_finishes_from_durable_intent(
     malformed_overlay: dict[str, object], monkeypatch: pytest.MonkeyPatch
 ) -> None:

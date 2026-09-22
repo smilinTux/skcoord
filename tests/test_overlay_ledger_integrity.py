@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 
 import pytest
 from pydantic import ValidationError
@@ -87,6 +88,35 @@ def test_non_utf8_line_is_rejected_without_hiding_healthy_neighbors(tmp_path, ca
     assert log.rejected[0]["line"] == 2
     assert log.rejected[0]["error"]
     assert "�" in log.rejected[0]["excerpt"]
+
+
+def test_reader_rejects_name_replacement_during_read(tmp_path, monkeypatch):
+    from skcoord import card as card_module
+
+    path = _events_dir(tmp_path) / "chiap08.jsonl"
+    path.write_text(json.dumps(GOOD) + "\n", encoding="utf-8")
+    replacement = _events_dir(tmp_path) / "replacement.jsonl"
+    replacement.write_text(json.dumps(dict(GOOD, card_id="bbbbbbb2")) + "\n", encoding="utf-8")
+    log = CardEventLog(tmp_path)
+    directory_fd = log._open_existing_event_directory()
+    assert directory_fd is not None
+    real_read = card_module.os.read
+    replaced = False
+
+    def replace_after_read(descriptor, size):
+        nonlocal replaced
+        chunk = real_read(descriptor, size)
+        if chunk and not replaced:
+            replaced = True
+            os.replace(replacement, path)
+        return chunk
+
+    monkeypatch.setattr(card_module.os, "read", replace_after_read)
+    try:
+        with pytest.raises(ValueError, match="changed while reading"):
+            log._read_regular_file_bytes(directory_fd, "chiap08.jsonl")
+    finally:
+        os.close(directory_fd)
 
 
 def test_valid_json_in_an_invented_schema_is_reported(tmp_path, caplog):

@@ -38,6 +38,26 @@ _PLAN_FIELDS = {
     "planned_at",
     "plan_sha256",
 }
+_RECEIPT_FIELDS = {
+    "schema",
+    "disposition",
+    "plan_sha256",
+    "writer",
+    "source",
+    "source_sha256",
+    "line_sha256",
+    "repaired_sha256",
+    "recovery_card_id",
+    "actor",
+    "evidence",
+    "plan_artifact",
+    "original_artifact",
+    "rejected_artifact",
+    "intent_artifact",
+    "receipt_artifact",
+    "verified_at",
+    "receipt_sha256",
+}
 
 
 def _sha(raw: bytes) -> str:
@@ -98,6 +118,18 @@ def _validate_plan(plan: dict[str, Any]) -> None:
         or not isinstance(plan["diagnostic"], dict)
     ):
         raise ValueError("recovery plan line or diagnostic is invalid")
+
+
+def _validate_receipt(receipt: Any) -> None:
+    """Reject recovery receipts that drift from the sealed v1 schema."""
+    if not isinstance(receipt, dict) or set(receipt) != _RECEIPT_FIELDS:
+        raise ValueError("recovery receipt fields mismatch")
+    _verify_seal(receipt, "receipt_sha256")
+    if (receipt["schema"], receipt["disposition"]) != (
+        RECEIPT_SCHEMA,
+        "applied_and_schema_verified",
+    ):
+        raise ValueError("recovery receipt schema mismatch")
 
 
 def _open_directory(path: Path) -> int:
@@ -455,7 +487,7 @@ def apply_overlay_recovery(
             receipt_raw = _read(evidence_fd, receipt_name)
             if receipt_raw is not None:
                 receipt = json.loads(receipt_raw)
-                _verify_seal(receipt, "receipt_sha256")
+                _validate_receipt(receipt)
                 if current_sha != plan["repaired_sha256"]:
                     raise ValueError("completed recovery conflicts with current writer")
                 return receipt
@@ -558,8 +590,8 @@ def rollback_overlay_recovery(
 ) -> dict[str, Any]:
     """Restore the exact original shard bound by one recovery receipt."""
     receipt = _load_artifact(Path(receipt_path))
-    _verify_seal(receipt, "receipt_sha256")
-    if receipt.get("schema") != RECEIPT_SCHEMA or receipt.get("actor") != actor:
+    _validate_receipt(receipt)
+    if receipt.get("actor") != actor:
         raise ValueError("recovery receipt identity mismatch")
     if not writer_quiesced:
         raise ValueError("overlay writers must be upgraded or quiesced before rollback")
