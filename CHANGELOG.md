@@ -1,6 +1,6 @@
 # Changelog
 
-- **Card f0d0ba98: qualify PR130 recovery publication — pin writer identity in the existing-shard revalidation test.**
+- **Card f0d0ba98: qualify PR130 recovery publication - pin writer identity in the existing-shard revalidation test.**
   `test_append_revalidates_existing_shard_under_the_writer_lock` now monkeypatches
   `card_module.socket.gethostname` to `chiap08` before `append`, so the test no
   longer depends on the runner's real hostname. No production source changed.
