@@ -914,35 +914,66 @@ class Board:
 
     def create_explicit_task(self, task: Task, digest: str, actor: str) -> Path:
         """Create or exactly replay one caller-supplied task ID."""
+        self.ensure_dirs()
+        with _board_mutation_lock(self.home):
+            return self._create_explicit_task_unlocked(task, digest, actor)
+
+    def _create_explicit_task_unlocked(
+        self, task: Task, digest: str, actor: str
+    ) -> Path:
+        """Create/replay with the caller holding the board mutation lock."""
         from .card_store import mirror_coord_create_explicit
+
+        path = self.tasks_dir / f"{task.id}-{_slugify_filename(task.title)[:40]}.json"
+        created = mirror_coord_create_explicit(self.home, task, digest, actor)
+        if created:
+            atomic_write_text(path, json.dumps(task.model_dump(), indent=2) + "\n")
+            return path
+        if path.exists() or path.is_symlink():
+            try:
+                payload = self._read_regular_file_bytes(path)
+            except ValueError as exc:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                raise ValueError("legacy projection is unsafe") from exc
+            try:
+                stored = Task.model_validate(json.loads(payload.decode("utf-8")))
+            except (UnicodeDecodeError, json.JSONDecodeError, ValidationError) as exc:
+                raise ValueError(
+                    f"Task {task.id} has an explicit creation conflict"
+                ) from exc
+            if stored != task:
+                raise ValueError(f"Task {task.id} has an explicit creation conflict")
+            return path
+        atomic_write_text(path, json.dumps(task.model_dump(), indent=2) + "\n")
+        return path
+
+    def create_helper_task(
+        self,
+        task: Task,
+        digest: str,
+        actor: str,
+        parent_id: str,
+        expected_claim_revision: str,
+    ) -> Path:
+        """Delegate isolated source assistance under the current parent's claim.
+
+        The local authority owns the board then parent locks through validation
+        and durable explicit creation. This never transfers the parent's claim.
+        """
+        from .card_store import CardStore, card_mutation_lock
+        from .owner_helpers import validate_helper_request
 
         self.ensure_dirs()
         with _board_mutation_lock(self.home):
-            path = self.tasks_dir / f"{task.id}-{_slugify_filename(task.title)[:40]}.json"
-            created = mirror_coord_create_explicit(self.home, task, digest, actor)
-            if created:
-                atomic_write_text(path, json.dumps(task.model_dump(), indent=2) + "\n")
-                return path
-            if path.exists() or path.is_symlink():
-                try:
-                    payload = self._read_regular_file_bytes(path)
-                except ValueError as exc:
-                    try:
-                        path.unlink(missing_ok=True)
-                    except OSError:
-                        pass
-                    raise ValueError("legacy projection is unsafe") from exc
-                try:
-                    stored = Task.model_validate(json.loads(payload.decode("utf-8")))
-                except (UnicodeDecodeError, json.JSONDecodeError, ValidationError) as exc:
-                    raise ValueError(
-                        f"Task {task.id} has an explicit creation conflict"
-                    ) from exc
-                if stored != task:
-                    raise ValueError(f"Task {task.id} has an explicit creation conflict")
-                return path
-            atomic_write_text(path, json.dumps(task.model_dump(), indent=2) + "\n")
-            return path
+            with card_mutation_lock(self.home, parent_id):
+                store = CardStore(self.home)
+                validate_helper_request(
+                    store, task, digest, actor, parent_id, expected_claim_revision
+                )
+                return self._create_explicit_task_unlocked(task, digest, actor)
 
     def create_claimed_task(
         self, task: Task, agent_name: str, request_digest: str = "", actor: str = ""
