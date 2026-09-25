@@ -42,7 +42,11 @@ def packet(parent, revision, request="one", paths=None, route="sk-m"):
         created_by="owner",
         created_at=parent.created_at,
         tags=[
-            *[tag for tag in parent.tags if tag not in {"sk-s", "sk-m", "sk-l", "sk-xl"}],
+            *[
+                tag
+                for tag in parent.tags
+                if tag.strip().lower() not in {"sk-s", "sk-m", "sk-l", "sk-xl"}
+            ],
             "owner-helper",
             f"parent-{parent.id}",
             route,
@@ -217,8 +221,6 @@ def test_inherited_route_label_is_removed_other_labels_kept(scenario):
             "dependencies": card.dependencies,
             "acceptance_criteria": card.acceptance_criteria,
             "meta": card.meta,
-            "status": card.status.value,
-            "owner": card.owner,
         }
     )
     revision = card.meta["_claim_revision"]
@@ -232,6 +234,78 @@ def test_inherited_route_label_is_removed_other_labels_kept(scenario):
         "parent-sk-l",
         "inherited-sk-xl",
         "custom-restriction",
+        "owner-helper",
+        f"parent-{parent.id}",
+        "sk-s",
+    }
+
+
+@pytest.mark.parametrize(
+    "tags,match",
+    [
+        pytest.param(
+            ["sk-m", "sk-m"],
+            "occurrence",
+            id="duplicate-selected-route",
+        ),
+        pytest.param(
+            ["sk-s", "sk-m"],
+            "second exact route",
+            id="duplicate-other-route",
+        ),
+    ],
+)
+def test_duplicate_route_tags_leave_no_child(scenario, tags, match):
+    board, parent, revision = scenario
+    helper = packet(parent, revision, route="sk-m")
+    helper.tags = [*parent.tags, "owner-helper", f"parent-{parent.id}", *tags]
+    with pytest.raises(ValueError, match=match):
+        create(board, parent, revision, helper)
+    assert CardStore(board.home).fold(helper.id) is None
+
+
+@pytest.mark.parametrize("label", [" sk-m ", "SK-L", "sk-xl\t"])
+def test_padded_case_tab_inherited_routes_removed(scenario, label):
+    board, parent, revision = scenario
+    store = CardStore(board.home)
+    for extra in ("parent-sk-l", "inherited-sk-xl"):
+        store.append_event(parent.id, "add_label", "owner", label=extra)
+    if label not in parent.tags:
+        store.append_event(parent.id, "add_label", "owner", label=label)
+    card = store.fold(parent.id)
+    parent = Task.model_validate(
+        {
+            "id": card.id,
+            "title": card.title,
+            "description": card.description,
+            "created_by": card.originator,
+            "created_at": card.created_at,
+            "tags": card.labels,
+            "dependencies": card.dependencies,
+            "acceptance_criteria": card.acceptance_criteria,
+            "meta": card.meta,
+        }
+    )
+    revision = card.meta["_claim_revision"]
+    helper = packet(parent, revision, route="sk-s")
+    create(board, parent, revision, helper)
+    child = store.fold(helper.id)
+    assert child is not None
+    assert child.meta["logical_route"] == "sk-s"
+    # The padded/case/tab variant is removed as an inherited route label,
+    # while the prefixed lookalikes and all other restrictions survive
+    # byte-exact, and the selected route tag is present exactly once.
+    assert label not in child.labels
+    assert "parent-sk-l" in child.labels
+    assert "inherited-sk-xl" in child.labels
+    assert child.labels.count("sk-s") == 1
+    assert "owner-helper" in child.labels
+    assert f"parent-{parent.id}" in child.labels
+    assert set(child.labels) == {
+        "source-only",
+        "codex-only",
+        "parent-sk-l",
+        "inherited-sk-xl",
         "owner-helper",
         f"parent-{parent.id}",
         "sk-s",

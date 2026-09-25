@@ -30,6 +30,11 @@ _ROUTES = ("sk-s", "sk-m", "sk-l", "sk-xl")
 _INHERITED_ROUTES = set(_ROUTES)
 
 
+def _is_route_label(label: str) -> bool:
+    """Identify inherited route labels exactly as the F3 producer does."""
+    return label.strip().lower() in _INHERITED_ROUTES
+
+
 def parent_contract_digest(parent) -> str:
     """Bind inherited instructions which can change without a new claim."""
     return explicit_creation_request_digest(
@@ -160,13 +165,25 @@ def validate_helper_request(
     if route not in _ROUTES:
         raise ValueError("helper logical_route must be one of sk-s, sk-m, sk-l, sk-xl")
     # Prefixes such as "parent-" or "inherited-" mark unrelated card-scope
-    # or legacy labels and must be preserved; only the exact supported route
-    # labels (sk-s, sk-m, sk-l, sk-xl) are stripped from the helper's tag
-    # set and replaced with the metadata-selected route tag.
+    # or legacy labels and must be preserved byte-for-byte; inherited route
+    # labels are identified with label.strip().lower() against the supported
+    # route set (matching the F3 producer), so padded, case-varied, and
+    # tab-suffixed legacy route labels are removed and replaced with the
+    # metadata-selected route tag.
+    route_count = sum(
+        1 for label in task.tags if _is_route_label(label) and label.strip().lower() == route
+    )
+    if route_count != 1:
+        raise ValueError("helper must carry exactly one occurrence of the selected route tag")
+    other_route_count = sum(
+        1 for label in task.tags if label in _INHERITED_ROUTES and label != route
+    )
+    if other_route_count:
+        raise ValueError("helper must not carry a second exact route tag")
     kept = {
         label
         for label in parent.labels
-        if label.startswith("parent-") or label not in _INHERITED_ROUTES
+        if label.startswith("parent-") or not _is_route_label(label)
     }
     required = kept | {"source-only", "owner-helper", f"parent-{parent_id}", route}
     if set(task.tags) != required:
