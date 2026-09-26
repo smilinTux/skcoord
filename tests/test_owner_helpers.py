@@ -1,6 +1,7 @@
 """Owner-authorized assistance must preserve custody and replay safely."""
 
 import hashlib
+import re
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 
@@ -9,6 +10,16 @@ import pytest
 from skcoord.card_store import CardStore, explicit_creation_request_digest
 from skcoord.coordination import Board, Task
 from skcoord.owner_helpers import parent_contract_digest
+
+# Any reserved route-shaped label, including invalid focused sizes and unknown
+# families, is stripped from inherited parent restrictions.
+_ROUTE_LABEL = re.compile(r"sk-[a-z]+(?:-[a-z]+)?")
+
+FOCUSED_ROUTES = tuple(
+    f"sk-{family}-{size}"
+    for family in ("deepseek", "zai", "glm", "codex")
+    for size in ("s", "m", "l")
+)
 
 
 @pytest.fixture
@@ -42,11 +53,7 @@ def packet(parent, revision, request="one", paths=None, route="sk-m"):
         created_by="owner",
         created_at=parent.created_at,
         tags=[
-            *[
-                tag
-                for tag in parent.tags
-                if tag.strip().lower() not in {"sk-s", "sk-m", "sk-l", "sk-xl"}
-            ],
+            *[tag for tag in parent.tags if not _ROUTE_LABEL.fullmatch(tag.strip().lower())],
             "owner-helper",
             f"parent-{parent.id}",
             route,
@@ -472,3 +479,168 @@ def test_parent_contract_amendment_invalidates_prepared_request(scenario):
     with pytest.raises(ValueError, match="contract changed"):
         create(board, parent, revision, helper)
     assert CardStore(board.home).fold(helper.id) is None
+
+
+@pytest.mark.parametrize("route", FOCUSED_ROUTES)
+def test_focused_routes_are_accepted(scenario, route):
+    board, parent, revision = scenario
+    helper = packet(parent, revision, request=route, route=route)
+    create(board, parent, revision, helper)
+    child = CardStore(board.home).fold(helper.id)
+    assert child is not None
+    assert child.meta["logical_route"] == route
+    assert child.labels.count(route) == 1
+    assert set(child.labels) == {
+        "source-only",
+        "codex-only",
+        "owner-helper",
+        f"parent-{parent.id}",
+        route,
+    }
+
+
+@pytest.mark.parametrize(
+    "route",
+    [
+        pytest.param("sk-deepseek-xl", id="focused-xl-deepseek"),
+        pytest.param("sk-zai-xl", id="focused-xl-zai"),
+        pytest.param("sk-glm-xl", id="focused-xl-glm"),
+        pytest.param("sk-codex-xl", id="focused-xl-codex"),
+        pytest.param("sk-llama-s", id="unknown-family"),
+        pytest.param("sk-mistral-m", id="unknown-family-m"),
+        pytest.param("sk-ds-s", id="family-alias"),
+        pytest.param("sk-deepseek", id="missing-size"),
+        pytest.param("sk-deepseek-ss", id="unknown-size"),
+        pytest.param("deepseek-s", id="missing-prefix"),
+        pytest.param("SK-DEEPSEEK-S", id="upper-case"),
+        pytest.param("Sk-Deepseek-S", id="mixed-case"),
+        pytest.param(" sk-deepseek-s", id="padded-left"),
+        pytest.param("sk-deepseek-s ", id="padded-right"),
+        pytest.param("sk-deepseek-s\n", id="newline"),
+        pytest.param("sk-deepseek\ts", id="embedded-tab"),
+        pytest.param(7, id="non-string-int"),
+        pytest.param(True, id="non-string-bool"),
+    ],
+)
+def test_bad_focused_route_leaves_no_child(scenario, route):
+    board, parent, revision = scenario
+    helper = packet(parent, revision, route="sk-m")
+    # Drop the default route tag so the route failure is isolated.
+    helper.tags = [tag for tag in helper.tags if tag != "sk-m"]
+    helper.meta["logical_route"] = route
+    with pytest.raises(ValueError, match="logical_route"):
+        create(board, parent, revision, helper)
+    assert CardStore(board.home).fold(helper.id) is None
+
+
+@pytest.mark.parametrize(
+    "route,tags,match",
+    [
+        pytest.param(
+            "sk-deepseek-s",
+            ["sk-deepseek-s", "sk-deepseek-s"],
+            "occurrence",
+            id="duplicate-selected-focused-route",
+        ),
+        pytest.param(
+            "sk-deepseek-s",
+            ["sk-codex-s"],
+            "occurrence",
+            id="focused-metadata-label-mismatch",
+        ),
+        pytest.param(
+            "sk-deepseek-s",
+            ["sk-s"],
+            "occurrence",
+            id="generic-label-for-focused-metadata",
+        ),
+        pytest.param(
+            "sk-m",
+            ["sk-deepseek-s"],
+            "occurrence",
+            id="focused-label-for-generic-metadata",
+        ),
+        pytest.param(
+            "sk-deepseek-s",
+            ["sk-deepseek-s", "sk-zai-m"],
+            "second exact route",
+            id="two-distinct-focused-routes",
+        ),
+        pytest.param(
+            "sk-m",
+            ["sk-m", "sk-glm-l"],
+            "second exact route",
+            id="generic-plus-focused-route",
+        ),
+        pytest.param(
+            "sk-deepseek-s",
+            ["sk-deepseek-xl"],
+            "occurrence",
+            id="focused-xl-label-not-selected",
+        ),
+        pytest.param(
+            "sk-deepseek-s",
+            ["sk-llama-s"],
+            "occurrence",
+            id="unknown-family-label-not-selected",
+        ),
+    ],
+)
+def test_focused_route_ambiguity_refused(scenario, route, tags, match):
+    board, parent, revision = scenario
+    helper = packet(parent, revision, route=route)
+    helper.tags = [*parent.tags, "owner-helper", f"parent-{parent.id}", *tags]
+    with pytest.raises(ValueError, match=match):
+        create(board, parent, revision, helper)
+    assert CardStore(board.home).fold(helper.id) is None
+
+
+def test_inherited_focused_route_labels_removed(scenario):
+    board, parent, revision = scenario
+    store = CardStore(board.home)
+    # The parent may already carry focused route labels from its own generation.
+    # Only reserved route shapes are replaced; prefixed lookalikes survive.
+    for label in (
+        "sk-deepseek-s",
+        "sk-codex-l",
+        "sk-deepseek-xl",
+        "parent-sk-deepseek-s",
+        "inherited-sk-codex-l",
+        "custom-restriction",
+    ):
+        store.append_event(parent.id, "add_label", "owner", label=label)
+    card = store.fold(parent.id)
+    parent = Task.model_validate(
+        {
+            "id": card.id,
+            "title": card.title,
+            "description": card.description,
+            "created_by": card.originator,
+            "created_at": card.created_at,
+            "tags": card.labels,
+            "dependencies": card.dependencies,
+            "acceptance_criteria": card.acceptance_criteria,
+            "meta": card.meta,
+        }
+    )
+    revision = card.meta["_claim_revision"]
+    helper = packet(parent, revision, route="sk-glm-m")
+    create(board, parent, revision, helper)
+    child = store.fold(helper.id)
+    assert child is not None
+    assert child.meta["logical_route"] == "sk-glm-m"
+    assert child.labels.count("sk-glm-m") == 1
+    for stripped in ("sk-deepseek-s", "sk-codex-l", "sk-deepseek-xl"):
+        assert stripped not in child.labels
+    assert "parent-sk-deepseek-s" in child.labels
+    assert "inherited-sk-codex-l" in child.labels
+    assert set(child.labels) == {
+        "source-only",
+        "codex-only",
+        "custom-restriction",
+        "parent-sk-deepseek-s",
+        "inherited-sk-codex-l",
+        "owner-helper",
+        f"parent-{parent.id}",
+        "sk-glm-m",
+    }
