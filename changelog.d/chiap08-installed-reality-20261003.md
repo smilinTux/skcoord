@@ -1,0 +1,1 @@
+- Preserve chiap08's installed SKCoord and reconcile its owner-helper creation and exact review-replacement guards with main. This makes the unpublished production APIs importable from a reproducible candidate revision; no deployment or release is performed.
