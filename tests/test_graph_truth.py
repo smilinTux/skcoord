@@ -623,7 +623,12 @@ def test_different_card_mutations_can_progress_concurrently(
 
     def synchronized_append(self, event):
         entered.wait(timeout=2)
-        return original(self, event)
+        result = original(self, event)
+        # Both critical sections entered concurrently. Finish both fixture
+        # writes before asserting stable overlay readback; concurrent file
+        # mutation is deliberately refused by the production reader.
+        entered.wait(timeout=2)
+        return result
 
     monkeypatch.setattr(CardEventLog, "append", synchronized_append)
 
