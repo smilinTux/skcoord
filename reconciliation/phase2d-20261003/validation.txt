@@ -1,6 +1,6 @@
 Installed SKCoord snapshot: 23b6f83f80e87cc816e35bf13db70ebe52740b97.
 Main: fe77c126d8bf535b4b9fb8f2ca9b18d22b175cf1.
-All 48 installed Python files match main except four recorded in provenance.json.
+All 46 installed Python files match main except four recorded in provenance.json.
 The four changed/new files are copied byte-for-byte. Existing creation locks and guards are retained; deployed helper/replacement paths extend them.
 Validation: /home/skuser01/.skenv/bin/python -m pytest tests/ -q
 Result: 926 passed in 16.44 seconds.
@@ -12,3 +12,5 @@ Phase 2d hosted follow-up:
 The Python 3.10 run at 2c196e4e exposed test_different_card_mutations_can_progress_concurrently racing overlay readback against another append. Reproduced on unchanged main fe77c126 at the first of 100 attempted repetitions. Production card.py and graph_truth.py are unchanged from main.
 Commit 0307c7d9 adds a second fixture barrier after append, retaining the first barrier that proves different-card critical sections overlap. No production locking or reader safety check changed.
 After correction: tests/test_graph_truth.py 57 passed; full suite 926 passed; Ruff clean. Main reproduction and complete logs are retained under /home/skuser01/reviews/jarvis-phase2d-20261003.
+
+Exact snapshot inventory: 46 Python source files, 46 bytecode files and three rollback backups, 95 total. The earlier source-count typo was corrected; file manifest hashes are unchanged.
