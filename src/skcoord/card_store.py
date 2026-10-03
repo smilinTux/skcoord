@@ -707,6 +707,9 @@ class CardStore:
         if parent_id not in cards_by_id:
             raise ValueError(f"Governed card {core.id} names unknown parent {parent_id}")
 
+        from .review_replacement import authorized_predecessor
+
+        replacement_predecessor = authorized_predecessor(self, core)
         for existing in cards:
             existing_core = self._load_core(existing.id) or {}
             if self._creation_class(existing_core) != creation_class:
@@ -717,7 +720,11 @@ class CardStore:
                 )
             except ValueError:
                 continue
-            if existing_parent == parent_id and not self._is_terminal_card(existing):
+            if (
+                existing_parent == parent_id
+                and existing.id != replacement_predecessor
+                and not self._is_terminal_card(existing)
+            ):
                 raise ValueError(
                     f"Refusing live {creation_class} duplicate for parent {parent_id}; "
                     f"existing card {existing.id} is non-terminal"
@@ -749,6 +756,13 @@ class CardStore:
             )
 
     def create(self, core: CardCore) -> str:
+        """Apply exact replacement locks before the ordinary creation governor."""
+        from .review_replacement import creation_guard
+
+        with creation_guard(self, core):
+            return self._create_governed(core)
+
+    def _create_governed(self, core: CardCore) -> str:
         """Govern and write ``cards/<id>/core.json`` exactly once.
 
         All callers, including coordination CLI and MCP adapters, converge here.

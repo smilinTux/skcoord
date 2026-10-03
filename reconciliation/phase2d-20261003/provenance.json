@@ -1,0 +1,23 @@
+{
+  "main": "fe77c126d8bf535b4b9fb8f2ca9b18d22b175cf1",
+  "snapshot": "23b6f83f80e87cc816e35bf13db70ebe52740b97",
+  "changed": [
+    {
+      "path": "src/skcoord/card_store.py",
+      "installed_blob": "b0c4c78290fa14d3ac5766d4d71cd51f61b43bdf"
+    },
+    {
+      "path": "src/skcoord/coordination.py",
+      "installed_blob": "cce256ea2372558c65e4f3acbe991948e61a2762"
+    },
+    {
+      "path": "src/skcoord/owner_helpers.py",
+      "installed_blob": "356873a4e886f09c3d6f14601cc587c19943c92c"
+    },
+    {
+      "path": "src/skcoord/review_replacement.py",
+      "installed_blob": "fadf68630cb97d14508313e02f0c8bcc9768fa37"
+    }
+  ],
+  "excluded": "Bytecode and rollback backups retained unchanged in snapshot only. All other Python files equal main."
+}
