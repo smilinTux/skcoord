@@ -103,6 +103,95 @@ def test_repair_dedup_uses_its_own_class(tmp_path: Path) -> None:
         store.create(_core("repair02", "[REPAIR] Duplicate", "parent-parent01"))
 
 
+def test_exact_canonical_successor_replaces_only_unclaimed_legacy_repair(
+    tmp_path: Path,
+) -> None:
+    store = CardStore(tmp_path)
+    store.create(_core("parent01", "Implementation"))
+    old = CardCore(
+        id="repair-old-1",
+        title="[REPAIR] Reconcile legacy card",
+        description="Exact scoped repair.",
+        created_by="operator",
+        acceptance_criteria=["The repair is exact."],
+        dependencies=["parent01"],
+        initial_priority="high",
+        initial_swimlane="feature",
+        initial_labels=["parent-parent01", "dispatch-approved"],
+        meta={"repository": "https://example.invalid/repo", "pin": "abc"},
+    )
+    store.create(old)
+    store.append_event("repair-old-1", "add_label", "jarvis", label="superseded")
+    store.append_event("repair-old-1", "add_label", "jarvis", label="do-not-claim")
+    store.append_event(
+        "repair-old-1",
+        "link",
+        "jarvis",
+        link_key="superseded_by",
+        link_value="a1b2c3d4",
+    )
+    successor = old.model_copy(update={"id": "a1b2c3d4", "created_by": "jarvis"})
+
+    assert store.create(successor) == "a1b2c3d4"
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "changed-content",
+        "canonical-predecessor",
+        "missing-superseded",
+        "missing-do-not-claim",
+        "wrong-successor",
+        "owned-predecessor",
+        "claim-history",
+    ],
+)
+def test_canonical_successor_refuses_inexact_or_claimed_predecessor(
+    tmp_path: Path, change: str
+) -> None:
+    store = CardStore(tmp_path)
+    store.create(_core("parent01", "Implementation"))
+    old_id = "a1b2c3d5" if change == "canonical-predecessor" else "repair-old-1"
+    old = CardCore(
+        id=old_id,
+        title="[REPAIR] Reconcile legacy card",
+        acceptance_criteria=["The repair is exact."],
+        dependencies=["parent01"],
+        initial_labels=["parent-parent01", "dispatch-approved"],
+    )
+    store.create(old)
+    if change != "missing-superseded":
+        store.append_event(old_id, "add_label", "jarvis", label="superseded")
+    if change != "missing-do-not-claim":
+        store.append_event(old_id, "add_label", "jarvis", label="do-not-claim")
+    linked_id = "deadbeef" if change == "wrong-successor" else "a1b2c3d4"
+    store.append_event(
+        old_id, "link", "jarvis", link_key="superseded_by", link_value=linked_id
+    )
+    if change == "owned-predecessor":
+        store.append_event(
+            old_id, "claim", "jarvis", owner="jarvis", claim_revision="a" * 64
+        )
+    elif change == "claim-history":
+        store.append_event(
+            old_id, "claim", "jarvis", owner="jarvis", claim_revision="a" * 64
+        )
+        store.append_event(
+            old_id,
+            "release_claim",
+            "jarvis",
+            released_owner="jarvis",
+            expected_claim_revision="a" * 64,
+        )
+    successor = old.model_copy(update={"id": "a1b2c3d4"})
+    if change == "changed-content":
+        successor = successor.model_copy(update={"description": "Altered."})
+
+    with pytest.raises(ValueError, match="duplicate"):
+        store.create(successor)
+
+
 def test_board_and_mcp_adapter_share_cardstore_refusal_without_legacy_orphans(
     tmp_path: Path,
 ) -> None:

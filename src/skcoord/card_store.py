@@ -667,6 +667,47 @@ class CardStore:
             return True
         return any(event.get("action") == "void" for event in self._read_events(card.id))
 
+    def _is_exact_legacy_successor(self, predecessor: Card, core: CardCore) -> bool:
+        """Allow one exact repair clone to replace unclaimed legacy card IDs."""
+        if (
+            self._creation_class(core) != "repair"
+            or re.fullmatch(r"[0-9a-f]{8}", core.id) is None
+            or re.fullmatch(r"[0-9a-f]{8}", predecessor.id) is not None
+            or predecessor.status not in {Column.BACKLOG, Column.READY}
+            or predecessor.archived
+            or predecessor.owner is not None
+        ):
+            return False
+        previous_core = self._load_core(predecessor.id)
+        if previous_core is None:
+            return False
+        folded = self.fold(predecessor.id)
+        if not {"superseded", "do-not-claim"}.issubset(
+            {label.lower() for label in folded.labels}
+        ) or folded.links.get("superseded_by") != core.id:
+            return False
+        history = self._read_events(predecessor.id) + self._legacy_events(predecessor.id)
+        if any(row.get("action") == "claim" for row in history):
+            return False
+        if previous_core.get("initial_owner") or previous_core.get("initial_claim_revision"):
+            return False
+        compared = (
+            "kind",
+            "title",
+            "description",
+            "acceptance_criteria",
+            "dependencies",
+            "initial_priority",
+            "initial_swimlane",
+            "initial_labels",
+            "meta",
+            "exit_gates",
+            "non_goals",
+            "spec_version",
+        )
+        candidate = core.model_dump(mode="json")
+        return all(previous_core.get(field) == candidate.get(field) for field in compared)
+
     def _govern_create(self, core: CardCore) -> None:
         """Fail closed on duplicate or over-depth review and repair creation."""
         if core.dependencies:
@@ -724,6 +765,7 @@ class CardStore:
                 existing_parent == parent_id
                 and existing.id != replacement_predecessor
                 and not self._is_terminal_card(existing)
+                and not self._is_exact_legacy_successor(existing, core)
             ):
                 raise ValueError(
                     f"Refusing live {creation_class} duplicate for parent {parent_id}; "
