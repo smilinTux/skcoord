@@ -135,6 +135,43 @@ def test_exact_canonical_successor_replaces_only_unclaimed_legacy_repair(
     assert store.create(successor) == "a1b2c3d4"
 
 
+def test_exact_canonical_successor_accepts_legacy_core_optional_defaults(
+    tmp_path: Path,
+) -> None:
+    store = CardStore(tmp_path)
+    store.create(_core("parent01", "Implementation"))
+    old = CardCore(
+        id="repair-old-2",
+        title="[REPAIR] Reconcile legacy card",
+        description="Exact scoped repair.",
+        created_by="operator",
+        acceptance_criteria=["The repair is exact."],
+        dependencies=["parent01"],
+        initial_priority="high",
+        initial_swimlane="feature",
+        initial_labels=["parent-parent01", "dispatch-approved"],
+        meta={"repository": "https://example.invalid/repo", "pin": "abc"},
+    )
+    store.create(old)
+    core_path = store.cards_dir / old.id / "core.json"
+    legacy_core = json.loads(core_path.read_text())
+    for field in ("exit_gates", "non_goals", "spec_version"):
+        legacy_core.pop(field)
+    core_path.write_text(json.dumps(legacy_core) + "\n")
+    store.append_event(old.id, "add_label", "jarvis", label="superseded")
+    store.append_event(old.id, "add_label", "jarvis", label="do-not-claim")
+    store.append_event(
+        old.id,
+        "link",
+        "jarvis",
+        link_key="superseded_by",
+        link_value="a1b2c3d6",
+    )
+    successor = old.model_copy(update={"id": "a1b2c3d6", "created_by": "jarvis"})
+
+    assert store.create(successor) == "a1b2c3d6"
+
+
 @pytest.mark.parametrize(
     "change",
     [

@@ -705,8 +705,17 @@ class CardStore:
             "non_goals",
             "spec_version",
         )
+        legacy_defaults = {
+            "exit_gates": [],
+            "non_goals": [],
+            "spec_version": None,
+        }
         candidate = core.model_dump(mode="json")
-        return all(previous_core.get(field) == candidate.get(field) for field in compared)
+        return all(
+            previous_core.get(field, legacy_defaults.get(field))
+            == candidate.get(field, legacy_defaults.get(field))
+            for field in compared
+        )
 
     def _govern_create(self, core: CardCore) -> None:
         """Fail closed on duplicate or over-depth review and repair creation."""
