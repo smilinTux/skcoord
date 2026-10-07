@@ -2354,10 +2354,38 @@ class Board:
                         )
                         raise
                     return agent
-                agent, bumped = self._claim_task(canonical, task_id, force)
+                bumped = current.current_task if current is not None else None
+                bumped_snapshot = (
+                    CardStore(self.home).fold(bumped)
+                    if bumped is not None and card_store_write_enabled()
+                    else None
+                )
+                bumped_is_owned_claim = (
+                    bumped_snapshot is not None
+                    and bumped_snapshot.owner == canonical
+                    and bumped_snapshot.status.value in {"ready", "doing", "review"}
+                )
+                bumped_requires_demote = bumped is not None and (
+                    not card_store_write_enabled()
+                    or (
+                        bumped_snapshot is not None
+                        and bumped_snapshot.owner == canonical
+                        and bumped_snapshot.status.value in {"doing", "review"}
+                    )
+                )
+                agent, bumped = self._claim_task(
+                    canonical,
+                    task_id,
+                    force,
+                    drop_bumped_claim=(
+                        card_store_write_enabled()
+                        and bumped is not None
+                        and not bumped_is_owned_claim
+                    ),
+                )
                 transitions = [(task_id, uuid.uuid4().hex)]
                 target_claim_revision = uuid.uuid4().hex
-                if bumped is not None:
+                if bumped_requires_demote:
                     transitions.append((bumped, uuid.uuid4().hex))
                 try:
                     self._mirror_card_store(
@@ -2367,7 +2395,7 @@ class Board:
                         transition_id=transitions[0][1],
                         claim_revision=target_claim_revision,
                     )
-                    if bumped is not None:
+                    if bumped_requires_demote:
                         self._mirror_card_store(
                             "demote",
                             task_id=bumped,
@@ -2376,12 +2404,12 @@ class Board:
                         )
                 except Exception as exc:
                     expected_states = [(task_id, canonical, "doing")]
-                    if bumped is not None:
+                    if bumped_requires_demote:
                         expected_states.append((bumped, canonical, "ready"))
                     if self._store_transitions_are_applied(transitions, expected_states):
                         return agent
                     compensation: list[tuple[str, str]] = []
-                    if bumped is not None:
+                    if bumped_requires_demote:
                         try:
                             compensation = self._compensate_partial_claim(
                                 task_id=task_id,
