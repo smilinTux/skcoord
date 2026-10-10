@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import copy
 import fcntl
 import hashlib
 import hmac
@@ -450,6 +451,47 @@ def load_legacy_mutations(home: Path) -> dict[str, list[dict]]:
                 ev[k] = v
         out.setdefault(e.card_id, []).append(ev)
     return out
+
+
+# Process-wide cache of load_legacy_mutations, keyed by home and validated by
+# the exact (name, size, mtime_ns, inode) of every legacy .jsonl. CardStore
+# instances are per call, so the per-instance cache below re-parsed the whole
+# overlay on almost every fold: one sknoded tick on chiap01 spent 65s of 101s
+# in load_legacy_mutations (2026-10-10). Any append changes size, so a
+# signature match means the parsed result is still exact.
+_LEGACY_PROCESS_CACHE: dict[str, tuple[tuple, dict[str, list[dict]]]] = {}
+
+
+def _legacy_signature(home: Path) -> tuple:
+    """Fingerprint every legacy append-only file the loader reads."""
+    signature: list[tuple] = []
+    for sub in ("archive", "card_events"):
+        directory = home / "coordination" / sub
+        try:
+            names = sorted(name for name in os.listdir(directory) if name.endswith(".jsonl"))
+        except FileNotFoundError:
+            signature.append((sub, None))
+            continue
+        for name in names:
+            try:
+                info = os.stat(directory / name, follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            signature.append((sub, name, info.st_size, info.st_mtime_ns, info.st_ino))
+    return tuple(signature)
+
+
+def load_legacy_mutations_cached(home: Path) -> dict[str, list[dict]]:
+    """Return load_legacy_mutations(home), reparsing only when a file changed."""
+    root = Path(home).expanduser()
+    key = str(root)
+    signature = _legacy_signature(root)
+    cached = _LEGACY_PROCESS_CACHE.get(key)
+    if cached is not None and cached[0] == signature:
+        return cached[1]
+    data = load_legacy_mutations(root)
+    _LEGACY_PROCESS_CACHE[key] = (signature, data)
+    return data
 
 
 class CardStore:
@@ -1509,11 +1551,12 @@ class CardStore:
         """Legacy mutations (archive index + overlay) for one card, cached."""
         if self._legacy_cache is None:
             try:
-                self._legacy_cache = load_legacy_mutations(self.home)
+                self._legacy_cache = load_legacy_mutations_cached(self.home)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Legacy mutation load failed: %s", exc)
                 self._legacy_cache = {}
-        return self._legacy_cache.get(card_id, [])
+        # Deep copy: the parsed overlay is shared process-wide.
+        return copy.deepcopy(self._legacy_cache.get(card_id, []))
 
     def fold(self, card_id: str) -> Optional[Card]:
         """Fold core + events into the current ``Card`` state.
