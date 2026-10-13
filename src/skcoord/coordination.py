@@ -35,6 +35,30 @@ from .atomic_io import atomic_write_text
 
 logger = logging.getLogger(__name__)
 
+#: Syncthing conflict copy, e.g. ``name.sync-conflict-20261011-184807-ANXXYPM.json``.
+SYNC_CONFLICT_RE = re.compile(r"\.sync-conflict-\d{8}-\d{6}-[A-Za-z0-9]+(?:\.|$)")
+
+#: Conflict copies already counted in THIS process, so each is noted once.
+_SEEN_CONFLICT_COPIES: set[str] = set()
+
+
+def is_sync_conflict_copy(name: str) -> bool:
+    """True when ``name`` is a Syncthing conflict copy, never a real record."""
+    return SYNC_CONFLICT_RE.search(name) is not None
+
+
+def _note_conflict_copy(path: Path) -> None:
+    """Count a skipped conflict copy once per process, at debug level."""
+    key = str(path)
+    if key in _SEEN_CONFLICT_COPIES:
+        return
+    _SEEN_CONFLICT_COPIES.add(key)
+    logger.debug(
+        "Ignoring Syncthing conflict copy %s (%d seen this process)",
+        path.name,
+        len(_SEEN_CONFLICT_COPIES),
+    )
+
 #: Refusal reasons that can never resolve on their own. A caller that parks a
 #: card on a terminal refusal is correct; parking a transient one strands work.
 _TERMINAL_REFUSALS = frozenset({"absent", "voided", "archived", "done"})
@@ -404,6 +428,9 @@ class Board:
         if not self.tasks_dir.exists():
             return tasks
         for f in sorted(self.tasks_dir.glob("*.json")):
+            if is_sync_conflict_copy(f.name):
+                _note_conflict_copy(f)
+                continue
             try:
                 data = json.loads(f.read_text(encoding="utf-8"))
                 task = Task.model_validate(data)
@@ -430,6 +457,9 @@ class Board:
         if self.agents_dir.is_symlink() or not self.agents_dir.is_dir():
             raise ValueError("agent projection directory must be a regular directory")
         for f in sorted(self.agents_dir.glob("*.json")):
+            if is_sync_conflict_copy(f.name):
+                _note_conflict_copy(f)
+                continue
             try:
                 if f.is_symlink() or not f.is_file():
                     raise ValueError("agent projection must be a regular file")
