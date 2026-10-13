@@ -27,5 +27,7 @@ import skcoord.card as card_module
 def _reset_fold_warning_cache():
     """Give every test a clean warning cache, before and after it runs."""
     card_module._WARNED_LINES.clear()
+    card_module._WARNED_SUMMARIES.clear()
     yield
     card_module._WARNED_LINES.clear()
+    card_module._WARNED_SUMMARIES.clear()

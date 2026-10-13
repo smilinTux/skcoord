@@ -226,6 +226,12 @@ _MAX_WARNINGS_PER_FILE = 5
 #: so this suppresses repetition and not information.
 _WARNED_LINES: set[tuple[str, int]] = set()
 
+#: (file name, unreadable-line count) summaries already logged in THIS process.
+#: The "N unreadable lines total" summary repeated once per fold() call, which
+#: is once per card, so it flooded the log exactly like the per-line warning
+#: did before it was deduplicated. Same count in the same file is the same fact.
+_WARNED_SUMMARIES: set[tuple[str, int]] = set()
+
 
 class CardEventLog:
     """Per-writer append-only overlay log for kanban operations.
@@ -591,7 +597,11 @@ class CardEventLog:
                                 type(exc).__name__,
                                 excerpt,
                             )
-                if bad_in_file > _MAX_WARNINGS_PER_FILE:
+                if (
+                    bad_in_file > _MAX_WARNINGS_PER_FILE
+                    and (name, bad_in_file) not in _WARNED_SUMMARIES
+                ):
+                    _WARNED_SUMMARIES.add((name, bad_in_file))
                     logger.warning(
                         "card_events %s: %d unreadable lines total (%d more beyond the "
                         "ones logged above)",
