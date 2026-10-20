@@ -32,6 +32,19 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
 
 ## [Unreleased]
 
+### Changed
+
+- Docs: SOP.md now grounds the CHI census and the shared home path in
+  `SITE_AND_HOST_NAMING_STANDARD`. The estate boundary is the control plane (one
+  `~/.skcapstone`, one Syncthing ring, one trust root, one operator), not the
+  tailnet, which is why unrelated tailnet devices are correctly out of census
+  scope; and a CI is never renamed to adopt the standard, because a CI id is a key
+  whose rename deletes the event history that current state is folded from.
+  `docs/cmdb-workflow-proposals.md` P8 gets the same boundary: canonicalisation
+  collapses addresses, never respells names. The `chioc09` alias of canonical
+  `chiap09` and every other host reference are statements of fact and are
+  unchanged.
+
 ### Fixed
 
 - **Overlay `verdict` events now fold instead of silently vanishing.**
@@ -235,6 +248,24 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
   and the raw name is kept as an alias, exactly like `collect_docker_containers`.
   Regression tests cover the restart pair and the no-suffix negative control
   (card 151323cb, follows 72f49960).
+
+### Added
+
+- SKCOORD-OPERATOR-PRINCIPAL-01: immutable `operator_principal` provenance
+  records for candidate authors, recommenders, reviewers, and integration
+  actors (`src/skcoord/operator_principal.py`). Records live in the separate
+  evidence store (`coordination/card_events/*.jsonl`) joined with - never
+  inferred from - the structural CardStore events, and carry only identity
+  facts (principal, actor identity, optional subject); no credentials or
+  personal secrets are stored.
+
+- Reviewer independence gate: assignment, independent review, and merge
+  eligibility fail closed when the author and reviewer resolve to the same
+  operator principal across different identities, hosts, sessions, or forge
+  accounts (default alias table covers chef, jarvis, Lumina, Mero families).
+  Backwards compatibility is explicit and conservative: a card with no
+  principal records stays merge-eligible (legacy); once the gate is adopted
+  (at least one record exists), a missing role or principal fails closed.
 
 ### Added
 
