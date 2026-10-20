@@ -1,0 +1,55 @@
+
+{
+  "card_id": "6097241e",
+  "action": "link",
+  "event_id": "EVIDENCE-LINK-20260901T150000Z",
+  "writer": "pi-glm-chiap02-6097241e",
+  "ts": "2026-09-01T15:00:00.000000+00:00",
+  "seq": 0,
+  "column": null,
+  "order": null,
+  "priority": null,
+  "swimlane": null,
+  "label": null,
+  "link_key": "evidence_sha256",
+  "link_value": "bf4977ffe349e6dbb1502f8e1d594c79dce549251a2bfccb14cfce0e6c84ba9b",
+  "owner": null,
+  "title": null,
+  "description": null
+}
+{
+  "card_id": "6097241e",
+  "action": "verdict",
+  "event_id": "VERDICT-PASS-20260901T150000Z",
+  "writer": "pi-glm-chiap02-6097241e",
+  "ts": "2026-09-01T15:00:00.000000+00:00",
+  "seq": 1,
+  "column": "done",
+  "order": null,
+  "priority": null,
+  "swimlane": null,
+  "label": null,
+  "link_key": "verdict",
+  "link_value": "PASS",
+  "owner": null,
+  "title": null,
+  "description": null
+}
+{
+  "card_id": "6097241e",
+  "action": "link",
+  "event_id": "PR-LINK-20260901T150000Z",
+  "writer": "pi-glm-chiap02-6097241e",
+  "ts": "2026-09-01T15:00:00.000000+00:00",
+  "seq": 0,
+  "column": null,
+  "order": null,
+  "priority": null,
+  "swimlane": null,
+  "label": null,
+  "link_key": "pr",
+  "link_value": "https://github.com/smilinTux/skgateway/pull/100",
+  "owner": null,
+  "title": null,
+  "description": null
+}
