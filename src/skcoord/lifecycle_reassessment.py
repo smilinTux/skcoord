@@ -216,15 +216,20 @@ def _dependencies(record: CardRecord) -> list[str]:
 
 def _current_claim(record: CardRecord) -> dict[str, Any] | None:
     claim: dict[str, Any] | None = None
+    terminal = False
     for event in record.events:
         action = event.get("action")
         if (
             action == "claim"
+            and not terminal
             and isinstance(event.get("owner"), str)
             and event.get("owner")
         ):
             claim = event
-        elif action in {"complete", "unassign", "release_claim", "void", "archive"}:
+        elif action in _TERMINAL:
+            terminal = True
+            claim = None
+        elif action in {"unassign", "release_claim"}:
             claim = None
     return claim
 
