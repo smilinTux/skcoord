@@ -11,6 +11,8 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
 
 ### Fixed
 
+- Isolate a failed CardStore fold at the multi-card aggregation boundary, keeping readable cards visible alongside one explicit `UNREADABLE` result.
+
 - CardStore mutations now reject targets without a foldable immutable core,
   legacy migration preserves acceptance criteria with the other birth facts,
   and every board or CardStore entry point rejects a `coordination/`

@@ -952,11 +952,38 @@ class CardStore:
             os.close(cards_fd)
         return card_ids
 
+    @staticmethod
+    def _unreadable_card(card_id: str, reason: str) -> Card:
+        """Represent one failed fold without weakening the per-card reader."""
+        source = f"cards/{card_id}"
+        return Card(
+            id=card_id,
+            kind=Kind.TASK,
+            title="UNREADABLE",
+            description=reason,
+            status=Column.DOING,
+            swimlane="feature",
+            priority="critical",
+            labels=["unreadable"],
+            meta={"unreadable": True, "source": source, "reason": reason},
+            source=source,
+        )
+
     def list_cards(self, include_archived: bool = False) -> list[Card]:
-        """Fold every card. Archived excluded unless requested."""
+        """Fold every card, isolating a failed fold as an explicit result.
+
+        ``fold`` remains fail-closed for single-card callers. This multi-card
+        boundary catches only that per-card failure so one corrupt stream does
+        not erase readable peers or take down board projections.
+        """
         out: list[Card] = []
         for cid in self.list_card_ids():
-            card = self.fold(cid)
+            try:
+                card = self.fold(cid)
+            except (OSError, ValueError) as exc:
+                reason = str(exc) or exc.__class__.__name__
+                logger.error("CardStore card %s is unreadable: %s", cid, reason)
+                card = self._unreadable_card(cid, reason)
             if card is None:
                 continue
             if card.archived and not include_archived:
@@ -1083,6 +1110,8 @@ def _task_view_from_card(card):
         meta=dict(card.meta),
     )
     status = TaskStatus(_COLUMN_TO_STATUS.get(card.status.value, "open"))
+    if card.meta.get("unreadable") is True:
+        status = TaskStatus.BLOCKED
     return TaskView(task=task, status=status, claimed_by=card.owner)
 
 
@@ -1817,7 +1846,11 @@ def export_to_legacy(home: Path, dry_run: bool = False) -> dict:
     board = Board(home)
     board.ensure_dirs()
     cards = [c for c in store.list_cards(include_archived=True)]
-    coord_cards = [c for c in cards if c.kind.value in ("task", "epic")]
+    coord_cards = [
+        c
+        for c in cards
+        if c.kind.value in ("task", "epic") and c.meta.get("unreadable") is not True
+    ]
 
     # --- Task files: synthesize only for cards with no legacy file ---
     existing_ids: set[str] = set()
