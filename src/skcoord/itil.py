@@ -2235,19 +2235,28 @@ class ITILManager:
                 _load_archive,
                 _remove_item_from_list,
                 _save_archive,
+                _store_lock,
             )
 
             for item_id in gtd_item_ids:
-                source_list, item, _ = _find_item_across_lists(item_id)
-                if source_list and item:
-                    _remove_item_from_list(source_list, item_id)
+                # Whole find-archive-remove cycle under the shared GTD store
+                # lock, as gtd_done does. Without it a concurrent writer (MCP,
+                # skos sink, cron) that loaded archive.json before this save
+                # silently dropped our item or we dropped theirs.
+                with _store_lock():
+                    source_list, item, _ = _find_item_across_lists(item_id)
+                    if not source_list or not item or source_list == "archive":
+                        continue
                     item["status"] = "done"
                     item["completed_at"] = _now_iso()
+                    # Archive first, then drop the source: a crash between the
+                    # two duplicates the item instead of losing it.
                     archive = _load_archive()
                     archive.append(item)
                     _save_archive(archive)
+                    _remove_item_from_list(source_list, item_id)
         except Exception:
-            logger.debug("Failed to complete GTD items: %s", gtd_item_ids)
+            logger.warning("Failed to complete GTD items: %s", gtd_item_ids, exc_info=True)
 
     def _itil_ref_is_orphan(self, itil_id: str) -> bool:
         """True when an ITIL-linked GTD ref has no *open* owning record.
