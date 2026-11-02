@@ -34,6 +34,16 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
 
 ### Fixed
 
+- **Lifecycle reconciliation now supports multiple DOING cards per owner.**
+  `AgentFile.current_task` is a scalar projection, but the audit previously
+  required it to equal every owned DOING card and repair overwrote it once per
+  card. Multi-claim owners therefore could never converge, and the transaction
+  rolled back unrelated projection repairs. Audit now accepts any owned DOING
+  card as current while still reporting each missing claim and a genuinely
+  missing or invalid current projection. Repair preserves a valid current card
+  across fenced scopes, otherwise selects the lexically first in-scope owned
+  DOING card, without updating agent liveness or canonical card state.
+
 - **Overlay `verdict` events now fold instead of silently vanishing.**
   `_OVERLAY_TO_STORE_ACTION` (the map `load_legacy_mutations` uses to turn a
   `coordination/card_events/*.jsonl` overlay event into a store action `fold`
