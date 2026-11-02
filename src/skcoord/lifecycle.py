@@ -129,10 +129,13 @@ def _lifecycle_lock(home: Path, *, exclusive: bool) -> Iterator[None]:
 def _audit_lifecycle_unlocked(home: Path, *, task_ids: set[str] | None = None) -> LifecycleAudit:
     """Compare card state with agent projections while the caller holds a lock."""
     board = Board(home)
+    all_cards = {
+        card.id: card for card in KanbanBoard(home).cards(include_archived=True)
+    }
     cards = {
-        card.id: card
-        for card in KanbanBoard(home).cards(include_archived=True)
-        if task_ids is None or card.id in task_ids
+        task_id: card
+        for task_id, card in all_cards.items()
+        if task_ids is None or task_id in task_ids
     }
     agents = {agent.agent: agent for agent in board.load_agents()}
     issues: list[LifecycleIssue] = []
@@ -243,15 +246,34 @@ def _audit_lifecycle_unlocked(home: Path, *, task_ids: set[str] | None = None) -
                     )
                 )
         elif card.status == Column.DOING:
-            if owner is None or owner.current_task != card.id:
+            if owner is None or card.id not in owner.claimed_tasks:
                 issues.append(
                     LifecycleIssue(
-                        "doing_owner_not_current",
+                        "owner_claim_missing",
                         card.id,
                         card.owner,
-                        "doing owner does not report the card as current",
+                        "doing owner lacks a claimed projection",
                     )
                 )
+
+    doing_by_owner: dict[str, list[str]] = {}
+    for card in all_cards.values():
+        if card.owner and card.status == Column.DOING:
+            doing_by_owner.setdefault(card.owner, []).append(card.id)
+    for agent, doing_ids in doing_by_owner.items():
+        scoped_ids = sorted(
+            task_id for task_id in doing_ids if task_ids is None or task_id in task_ids
+        )
+        owner = agents.get(agent)
+        if scoped_ids and (owner is None or owner.current_task not in doing_ids):
+            issues.append(
+                LifecycleIssue(
+                    "doing_owner_not_current",
+                    scoped_ids[0],
+                    agent,
+                    "doing owner does not report any owned doing card as current",
+                )
+            )
 
     ordered = tuple(sorted(issues, key=lambda item: (item.task_id, item.code, item.agent or "")))
     return LifecycleAudit(len(cards), len(agents), ordered)
@@ -468,11 +490,20 @@ def _repair_lifecycle_unlocked(
     unresolved_receipts = _unresolved_receipt_ids(home)
     before = _audit_lifecycle_unlocked(home, task_ids=task_ids)
     _assert_no_active_conflicts(board, before, stale_after_seconds)
-    cards = {
-        card.id: card
-        for card in KanbanBoard(home).cards(include_archived=True)
-        if task_ids is None or card.id in task_ids
+    all_cards = {
+        card.id: card for card in KanbanBoard(home).cards(include_archived=True)
     }
+    cards = {
+        task_id: card
+        for task_id, card in all_cards.items()
+        if task_ids is None or task_id in task_ids
+    }
+    doing_by_owner: dict[str, list[str]] = {}
+    for card in all_cards.values():
+        if card.owner and card.status == Column.DOING:
+            doing_by_owner.setdefault(card.owner, []).append(card.id)
+    for doing_ids in doing_by_owner.values():
+        doing_ids.sort()
     agents = {agent.agent: agent for agent in board.load_agents()}
     actions: list[str] = []
     originals: dict[Path, bytes | None] = {}
@@ -558,7 +589,10 @@ def _repair_lifecycle_unlocked(
                 if card.id in owner.completed_tasks:
                     owner.completed_tasks.remove(card.id)
                 if card.status == Column.DOING:
-                    owner.current_task = card.id
+                    owned_doing = doing_by_owner[owner.agent]
+                    if owner.current_task not in owned_doing:
+                        scoped_doing = [task_id for task_id in owned_doing if task_id in cards]
+                        owner.current_task = scoped_doing[0]
                 elif owner.current_task == card.id:
                     owner.current_task = None
             if owner.model_dump() != original:
