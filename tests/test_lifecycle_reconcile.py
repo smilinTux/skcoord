@@ -218,6 +218,38 @@ def test_scoped_terminal_repair_restores_current_from_outside_scope(tmp_path) ->
     assert repaired.last_seen == original_last_seen
 
 
+def test_scoped_terminal_repair_does_not_select_unclaimed_out_of_scope_doing(
+    tmp_path,
+) -> None:
+    board = Board(tmp_path)
+    outside = _task(board, "doing001")
+    scoped = _task(board, "review01")
+    board.claim_task("jarvis", outside.id)
+    board.claim_task("jarvis", scoped.id)
+    store = CardStore(tmp_path)
+    _move(store, outside.id, "doing")
+    _move(store, scoped.id, "review")
+    agent = board.load_agent("jarvis")
+    assert agent is not None
+    agent.current_task = scoped.id
+    agent.claimed_tasks.remove(outside.id)
+    board.save_agent(agent)
+
+    receipt = repair_lifecycle(tmp_path, actor="operator", task_ids={scoped.id})
+
+    repaired = board.load_agent("jarvis")
+    global_audit = audit_lifecycle(tmp_path)
+    assert receipt.after.clean is True
+    assert repaired is not None
+    assert repaired.current_task is None
+    assert repaired.claimed_tasks == [scoped.id]
+    assert global_audit.clean is False
+    assert {issue.code for issue in global_audit.issues} == {
+        "doing_owner_not_current",
+        "owner_claim_missing",
+    }
+
+
 def test_stale_orphan_claim_is_released_but_history_is_preserved(tmp_path) -> None:
     board = Board(tmp_path)
     stale = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()

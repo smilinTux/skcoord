@@ -559,7 +559,13 @@ def _repair_lifecycle_unlocked(
                 actions.append(f"stop active {current_task} for {agent.agent}")
                 agent.current_task = None
             if current_in_scope and agent.current_task is None:
-                owned_doing = doing_by_owner.get(agent.agent, [])
+                owned_doing = [
+                    task_id
+                    for task_id in doing_by_owner.get(agent.agent, [])
+                    if task_id in agent.claimed_tasks
+                    or task_ids is None
+                    or task_id in task_ids
+                ]
                 if owned_doing:
                     agent.current_task = owned_doing[0]
             reopened = [
