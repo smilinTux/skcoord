@@ -48,6 +48,11 @@ from .card import (
     Kind,
     render_html,
 )
+from .human_gate_close import (
+    append_human_gate_decision,
+    close_decided_human_gate_cards,
+    find_decided_human_gate_cards,
+)
 from .coordination import (
     AgentFile,
     AgentState,
