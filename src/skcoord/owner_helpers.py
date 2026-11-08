@@ -26,13 +26,19 @@ _HELPER = (
     "logical_route",
 )
 
-_ROUTES = ("sk-s", "sk-m", "sk-l", "sk-xl")
-_INHERITED_ROUTES = set(_ROUTES)
+_GENERIC_ROUTES = ("sk-s", "sk-m", "sk-l", "sk-xl")
+_FOCUSED_ROUTES = tuple(
+    f"sk-{family}-{size}"
+    for family in ("codex", "deepseek", "glm", "zai")
+    for size in ("s", "m", "l")
+)
+_ROUTES = _GENERIC_ROUTES + _FOCUSED_ROUTES
+_ROUTE_LABEL = re.compile(r"sk-[a-z]+(?:-[a-z]+)?")
 
 
 def _is_route_label(label: str) -> bool:
     """Identify inherited route labels exactly as the F3 producer does."""
-    return label.strip().lower() in _INHERITED_ROUTES
+    return _ROUTE_LABEL.fullmatch(label.strip().lower()) is not None
 
 
 def parent_contract_digest(parent) -> str:
@@ -162,8 +168,8 @@ def validate_helper_request(
         if not isinstance(task.meta[key], str) or task.meta[key] != value:
             raise ValueError(f"helper {key} must match its parent's exact source")
     route = task.meta["logical_route"]
-    if route not in _ROUTES:
-        raise ValueError("helper logical_route must be one of sk-s, sk-m, sk-l, sk-xl")
+    if not isinstance(route, str) or route not in _ROUTES:
+        raise ValueError("helper logical_route is not a supported exact route")
     # Prefixes such as "parent-" or "inherited-" mark unrelated card-scope
     # or legacy labels and must be preserved byte-for-byte; inherited route
     # labels are identified with label.strip().lower() against the supported
@@ -176,7 +182,7 @@ def validate_helper_request(
     if route_count != 1:
         raise ValueError("helper must carry exactly one occurrence of the selected route tag")
     other_route_count = sum(
-        1 for label in task.tags if label in _INHERITED_ROUTES and label != route
+        1 for label in task.tags if _is_route_label(label) and label.strip().lower() != route
     )
     if other_route_count:
         raise ValueError("helper must not carry a second exact route tag")

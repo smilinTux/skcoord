@@ -1,6 +1,7 @@
 """Owner-authorized assistance must preserve custody and replay safely."""
 
 import hashlib
+import re
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 
@@ -9,6 +10,13 @@ import pytest
 from skcoord.card_store import CardStore, explicit_creation_request_digest
 from skcoord.coordination import Board, Task
 from skcoord.owner_helpers import parent_contract_digest
+
+_ROUTE_LABEL = re.compile(r"sk-[a-z]+(?:-[a-z]+)?")
+FOCUSED_ROUTES = tuple(
+    f"sk-{family}-{size}"
+    for family in ("deepseek", "zai", "glm", "codex")
+    for size in ("s", "m", "l")
+)
 
 
 @pytest.fixture
@@ -42,11 +50,7 @@ def packet(parent, revision, request="one", paths=None, route="sk-m"):
         created_by="owner",
         created_at=parent.created_at,
         tags=[
-            *[
-                tag
-                for tag in parent.tags
-                if tag.strip().lower() not in {"sk-s", "sk-m", "sk-l", "sk-xl"}
-            ],
+            *[tag for tag in parent.tags if not _ROUTE_LABEL.fullmatch(tag.strip().lower())],
             "owner-helper",
             f"parent-{parent.id}",
             route,
@@ -470,5 +474,71 @@ def test_parent_contract_amendment_invalidates_prepared_request(scenario):
         parent.id, "describe", "owner", description="A newly discovered restriction"
     )
     with pytest.raises(ValueError, match="contract changed"):
+        create(board, parent, revision, helper)
+    assert CardStore(board.home).fold(helper.id) is None
+
+
+@pytest.mark.parametrize("route", FOCUSED_ROUTES)
+def test_focused_routes_are_accepted(scenario, route):
+    board, parent, revision = scenario
+    helper = packet(parent, revision, request=route, route=route)
+    create(board, parent, revision, helper)
+    child = CardStore(board.home).fold(helper.id)
+    assert child is not None
+    assert child.meta["logical_route"] == route
+    assert child.labels.count(route) == 1
+
+
+@pytest.mark.parametrize(
+    "route",
+    [
+        "sk-deepseek-xl",
+        "sk-llama-s",
+        "sk-deepseek-*",
+        "sk-deepseek",
+        "SK-DEEPSEEK-S",
+        " sk-deepseek-s",
+        "sk-deepseek-s ",
+        7,
+        True,
+        None,
+    ],
+)
+def test_bad_focused_route_leaves_no_child(scenario, route):
+    board, parent, revision = scenario
+    helper = packet(parent, revision, route="sk-m")
+    helper.tags = [tag for tag in helper.tags if tag != "sk-m"]
+    helper.meta["logical_route"] = route
+    with pytest.raises(ValueError, match="logical_route"):
+        create(board, parent, revision, helper)
+    assert CardStore(board.home).fold(helper.id) is None
+
+
+@pytest.mark.parametrize(
+    "route,tags",
+    [
+        ("sk-deepseek-s", ["sk-deepseek-s", "sk-deepseek-s"]),
+        ("sk-deepseek-s", ["sk-codex-s"]),
+        ("sk-deepseek-s", ["sk-s"]),
+        ("sk-m", ["sk-deepseek-s"]),
+        ("sk-deepseek-s", ["sk-deepseek-s", "sk-zai-m"]),
+        ("sk-m", ["sk-m", "sk-glm-l"]),
+    ],
+)
+def test_focused_route_ambiguity_refused(scenario, route, tags):
+    board, parent, revision = scenario
+    helper = packet(parent, revision, route=route)
+    helper.tags = [*parent.tags, "owner-helper", f"parent-{parent.id}", *tags]
+    with pytest.raises(ValueError):
+        create(board, parent, revision, helper)
+    assert CardStore(board.home).fold(helper.id) is None
+
+
+def test_extra_metadata_and_tag_remain_rejected(scenario):
+    board, parent, revision = scenario
+    helper = packet(parent, revision, route="sk-deepseek-s")
+    helper.meta["provider"] = "deepseek"
+    helper.tags.append("new-grant")
+    with pytest.raises(ValueError, match="only source and helper contract fields"):
         create(board, parent, revision, helper)
     assert CardStore(board.home).fold(helper.id) is None
