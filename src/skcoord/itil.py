@@ -263,6 +263,10 @@ class Change(BaseModel):
     prepared_by: Optional[str] = None
     validation: Optional[dict[str, Any]] = None
     scheduled_window: Optional[dict[str, Any]] = None
+    # CAB retirement (card 4655a851): preflight tracking for hard conditions.
+    # A fail-closed preflight that stops before mutation is recorded here.
+    preflight_status: Optional[str] = None  # "passed", "failed", or None
+    preflight_reason: str = ""  # Why preflight failed, if it did
 
 
 class KEDBEntry(BaseModel):
@@ -391,6 +395,77 @@ def _auto_incident_id(service: str, failure_class: str, day_bucket: str) -> str:
     return "inc-" + hashlib.blake2b(key.encode("utf-8"), digest_size=4).hexdigest()
 
 
+# Import CAB configuration module (created in card 4655a851)
+try:
+    from .itil_config import (
+        cab_enabled,
+        rollback_plan_required_for_risk,
+        rollback_plan_required_for_change_type,
+        is_destructive_change,
+    )
+except ImportError:
+    # Fallback defaults if config module is not available
+    def cab_enabled() -> bool:
+        return False
+    def rollback_plan_required_for_risk(risk: str) -> bool:
+        return risk.lower() == "high"
+    def rollback_plan_required_for_change_type(change_type: str) -> bool:
+        return change_type.lower() == "emergency"
+    def is_destructive_change(change_type: str, risk: str) -> bool:
+        return change_type.lower() == "emergency" or risk.lower() == "high"
+
+
+def _check_hard_preconditions(
+    change_type: str,
+    risk: str,
+    rollback_plan: str,
+    preflight_passed: bool,
+    preflight_reason: str,
+) -> tuple[bool, str]:
+    """Check hard preconditions for a change (card 4655a851).
+
+    For destructive or high-risk changes, three hard conditions must be met:
+    1. Rollback plan must be stated
+    2. Preflight must pass (fail-closed)
+    3. Chef explicit approval (operator authorization) is required
+
+    This is a fail-closed check: any missing condition blocks execution.
+
+    Args:
+        change_type: The change's ChangeType value.
+        risk: The change's risk level.
+        rollback_plan: The rollback plan text from core.json.
+        preflight_passed: Whether preflight checks passed.
+        preflight_reason: Reason if preflight failed, empty if passed.
+
+    Returns:
+        Tuple of (passed, reason). If passed is True, reason is empty.
+        If passed is False, reason explains which condition failed.
+    """
+    if not is_destructive_change(change_type, risk):
+        return True, ""
+    
+    # Check rollback plan requirement
+    if not rollback_plan.strip():
+        return False, (
+            f"Rollback plan required for {change_type}/{risk} change. "
+            "A rollback plan is a hard precondition for destructive and "
+            "high-risk changes."
+        )
+    
+    # Check preflight requirement
+    if not preflight_passed:
+        return False, (
+            f"Preflight check required for {change_type}/{risk} change. "
+            f"Preflight failed: {preflight_reason or 'unknown reason'}. "
+            "Preflight is a fail-closed hard precondition: execution stops "
+            "before any mutation on preflight failure."
+        )
+    
+    # All hard conditions passed
+    return True, ""
+
+
 def _cab_resolved_status(
     status: str,
     change_type: str,
@@ -418,6 +493,15 @@ def _cab_resolved_status(
     in ``_fold_change`` still owns the record's own approval timeline entry
     and its exact wording, duplicating these same conditions (kept in sync
     by hand; see that block's comments).
+
+    CAB retirement (card 4655a851): CAB voting is disabled by default.
+    When CAB is retired, votes are ignored and approval comes only from:
+    - Standard changes (auto-approve)
+    - Auto-normal tier (operator, low/medium risk, has rollback, no reject)
+    - Direct human approval events (status -> approved with node != "migrated")
+
+    When CAB is re-enabled (SKCOORD_ITIL_CAB_ENABLED=1), votes are read
+    and the original CAB approval logic applies.
 
     No-self-approval (change-mgmt P1.4): an APPROVE vote whose voter equals
     *prepared_by* is excluded here exactly as it is in the post-loop block,
@@ -450,14 +534,19 @@ def _cab_resolved_status(
         and not any(v.decision == CABDecisionValue.REJECTED for v in votes)
     ):
         return "approved"
-    rejections = [v for v in votes if v.decision == CABDecisionValue.REJECTED]
-    if rejections:
-        return "rejected"
-    approvals = [
-        v for v in votes if v.decision == CABDecisionValue.APPROVED and v.agent != prepared_by
-    ]
-    if any(_is_human_approval(v) for v in approvals):
-        return "approved"
+    
+    # CAB retirement (card 4655a851): only apply CAB vote logic if enabled
+    if cab_enabled():
+        rejections = [v for v in votes if v.decision == CABDecisionValue.REJECTED]
+        if rejections:
+            return "rejected"
+        approvals = [
+            v for v in votes if v.decision == CABDecisionValue.APPROVED and v.agent != prepared_by
+        ]
+        if any(_is_human_approval(v) for v in approvals):
+            return "approved"
+    
+    # When CAB is retired, status remains as-is (approved only via standard/auto-normal)
     return status
 
 
@@ -1022,17 +1111,21 @@ class ITILManager:
                 #   - failed -> closed needs a rollback note.
                 pir_gated = gate_status == "deployed" and to == "verified"
                 rollback_gated = gate_status == "failed" and to == "closed"
-                # CAB bypass guard: a raw `status` event may never be the thing
-                # that grants approval. `_cab_resolved_status` above already
-                # derives "approved" for every LEGITIMATE route (a qualifying
-                # CAB vote, with the drafter's self-approval excluded, plus the
-                # standard/auto-normal auto-approve), so if the gate still
-                # reads proposed/reviewing here then no such route applied and
-                # this event is trying to self-promote. Without this, any
-                # caller of `update_change(..., new_status="approved")` -- the
-                # MCP tool and CLI included -- could approve its own change
-                # with a free-text agent string and no vote, silently routing
-                # around submit_cab_vote() and its no-self-approval fold guard.
+                # CAB bypass guard (card 4655a851 retirement): a raw `status` event
+                # may never be the thing that grants approval. `_cab_resolved_status`
+                # above already derives "approved" for every LEGITIMATE route:
+                # - Standard changes (auto-approve)
+                # - Auto-normal tier (operator, low/medium risk, has rollback)
+                # - CAB votes when CAB is enabled (qualifying human approval)
+                #
+                # If the gate still reads proposed/reviewing, no legitimate route
+                # applied and this event is trying to self-promote. Without this,
+                # any caller could approve its own change with free text.
+                #
+                # CAB retirement: When CAB is retired, this guard still applies
+                # because approval still requires a legitimate route, not a
+                # free-text self-promotion.
+                #
                 # EXEMPTION - historical replay: `itil_migrate_events.py` maps a
                 # legacy "status:proposed->approved" timeline entry onto this
                 # same `status` kind, stamping node="migrated" (_MIGRATED_NODE).
@@ -1047,10 +1140,42 @@ class ITILManager:
                     and gate_status in ("proposed", "reviewing")
                     and e.get("node") != "migrated"
                 )
+                
+                # Hard preconditions guard (card 4655a851): transitions to
+                # implementing/deployed for destructive/high-risk changes must
+                # satisfy rollback plan and preflight requirements. This is
+                # fail-closed: missing conditions block the transition.
+                hard_preconditions_gated = False
+                hard_preconditions_reason = ""
+                if to in ("implementing", "deployed"):
+                    rollback = core.get("rollback_plan", "")
+                    # Check if any preflight_failed event exists in the timeline
+                    preflight_failed = any(
+                        t.get("action") == "preflight_failed" for t in timeline
+                    )
+                    preflight_reason = ""
+                    if preflight_failed:
+                        # Find the most recent preflight failure reason
+                        for t in reversed(timeline):
+                            if t.get("action") == "preflight_failed":
+                                preflight_reason = t.get("note", "")
+                                break
+                    
+                    passed, reason = _check_hard_preconditions(
+                        change_type,
+                        core.get("risk", "medium"),
+                        rollback,
+                        not preflight_failed,  # preflight_passed is True if no failure
+                        preflight_reason,
+                    )
+                    if not passed:
+                        hard_preconditions_gated = True
+                        hard_preconditions_reason = reason
                 if (
                     to in _CHANGE_TRANSITIONS.get(gate_status, set())
                     and not ((pir_gated or rollback_gated) and not note.strip())
                     and not cab_gated
+                    and not hard_preconditions_gated
                 ):
                     timeline.append(
                         {
@@ -1061,6 +1186,19 @@ class ITILManager:
                         }
                     )
                     status = to
+                elif hard_preconditions_gated:
+                    # Hard precondition failure (card 4655a851): record the
+                    # blocked transition with the specific reason
+                    timeline.append(
+                        {
+                            "ts": ts,
+                            "agent": agent,
+                            "action": f"status:{gate_status}->{to}",
+                            "note": note,
+                            "conflicted": True,
+                            "conflict_reason": hard_preconditions_reason,
+                        }
+                    )
                 elif cab_gated:
                     timeline.append(
                         {
@@ -1120,6 +1258,30 @@ class ITILManager:
             elif kind in ("note", "auto-approved"):
                 action = "auto-approved" if kind == "auto-approved" else "note"
                 timeline.append({"ts": ts, "agent": agent, "action": action, "note": note})
+            elif kind == "preflight_passed":
+                # Preflight passed (card 4655a851). Records that a fail-closed
+                # preflight check succeeded. This is a hard precondition
+                # for destructive/high-risk changes.
+                timeline.append(
+                    {
+                        "ts": ts,
+                        "agent": agent,
+                        "action": "preflight_passed",
+                        "note": note or "Preflight check passed",
+                    }
+                )
+            elif kind == "preflight_failed":
+                # Preflight failure (card 4655a851). A fail-closed preflight
+                # that stops before mutation records this event with a reason.
+                # The change cannot proceed to implementing/deployed.
+                timeline.append(
+                    {
+                        "ts": ts,
+                        "agent": agent,
+                        "action": "preflight_failed",
+                        "note": note or "Preflight check failed",
+                    }
+                )
             elif kind == "pr_link":
                 # Appended by the AI runner when a PREPARE run on this change
                 # finishes with a draft PR. Last-write-wins on re-prepare;
@@ -1300,6 +1462,10 @@ class ITILManager:
         # CAB derivation - mirrors the old _evaluate_cab guard exactly:
         # any rejection blocks; else >=1 human approval unblocks.
         #
+        # CAB retirement (card 4655a851): CAB votes are only applied when
+        # cab_enabled() returns True. When CAB is retired, this entire block
+        # is skipped and status remains derived from standard/auto-normal only.
+        #
         # No-self-approval (CR change-mgmt P1.4, CRITICAL): an APPROVE vote
         # whose voter identity equals `prepared_by` (the drafter of this
         # change's PR) is dropped from the approvals pool before the "any
@@ -1310,7 +1476,7 @@ class ITILManager:
         # `prepared_by` is None (no `pr_link` event, i.e. every change
         # record that predates this card) the filter is a no-op, preserving
         # the fold-invariance guarantee.
-        if status in ("proposed", "reviewing") and votes:
+        if cab_enabled() and status in ("proposed", "reviewing") and votes:
             rejections = [v for v in votes if v.decision == CABDecisionValue.REJECTED]
             approvals = [
                 v
@@ -1338,6 +1504,21 @@ class ITILManager:
                     }
                 )
 
+        # Extract preflight state from events (card 4655a851)
+        preflight_status = None
+        preflight_reason = ""
+        for t in timeline:
+            if t.get("action") == "preflight_failed":
+                preflight_status = "failed"
+                preflight_reason = t.get("note", "")
+                break
+        # If no preflight failure found and preflight_passed event exists
+        if preflight_status is None:
+            for t in timeline:
+                if t.get("action") == "preflight_passed":
+                    preflight_status = "passed"
+                    break
+        
         return Change(
             id=core["id"],
             type="change",
@@ -1360,6 +1541,8 @@ class ITILManager:
             prepared_by=prepared_by,
             validation=validation,
             scheduled_window=scheduled_window,
+            preflight_status=preflight_status,
+            preflight_reason=preflight_reason,
         )
 
     # ── Incidents ─────────────────────────────────────────────────────
@@ -1893,6 +2076,131 @@ class ITILManager:
             except (json.JSONDecodeError, Exception):
                 continue
         return votes
+
+    # ── Preflight (card 4655a851: CAB retirement, hard preconditions) ──
+
+    def record_preflight_passed(
+        self,
+        change_id: str,
+        agent: str,
+        note: str = "",
+    ) -> Change:
+        """Record that a preflight check passed for a change.
+
+        A preflight check is a fail-closed safety check that runs before any
+        mutation. For destructive/high-risk changes, a passing preflight is
+        a hard precondition for execution.
+
+        Args:
+            change_id: The change record this preflight applies to.
+            agent: The agent running the preflight check.
+            note: Optional details about what was checked.
+
+        Returns:
+            The folded Change after appending the preflight_passed event.
+        """
+        rid = self._resolve_id(self.changes_dir, change_id)
+        if not self._record_exists(self.changes_dir, rid):
+            raise ValueError(f"Change {change_id} not found")
+
+        self._append_event(
+            self.changes_dir, rid, agent, "preflight_passed", note=note or "Preflight check passed"
+        )
+        return self._fold_record(self.changes_dir, rid, Change)
+
+    def record_preflight_failed(
+        self,
+        change_id: str,
+        agent: str,
+        reason: str,
+    ) -> Change:
+        """Record that a preflight check failed for a change.
+
+        This is a fail-closed outcome: the change cannot proceed to
+        implementing/deployed until the preflight issue is resolved and a
+        new preflight_passed event is recorded.
+
+        Args:
+            change_id: The change record this preflight applies to.
+            agent: The agent running the preflight check.
+            reason: Why the preflight failed (required, must explain the block).
+
+        Returns:
+            The folded Change after appending the preflight_failed event.
+        """
+        rid = self._resolve_id(self.changes_dir, change_id)
+        if not self._record_exists(self.changes_dir, rid):
+            raise ValueError(f"Change {change_id} not found")
+
+        self._append_event(
+            self.changes_dir, rid, agent, "preflight_failed", note=reason or "Preflight check failed"
+        )
+        return self._fold_record(self.changes_dir, rid, Change)
+
+    def check_execution_preconditions(self, change_id: str) -> tuple[bool, str]:
+        """Check whether a change satisfies hard preconditions for execution.
+
+        This is used by the deploy runner and any other executor to validate
+        that a change can safely proceed to implementing/deployed. It is a
+        read-only check that does not append events.
+
+        For destructive/high-risk changes (card 4655a851):
+        1. A rollback plan must be stated (checked in core.json)
+        2. Preflight must have passed (checked for preflight_passed event)
+        3. No outstanding preflight_failed events exist
+
+        Args:
+            change_id: The change to check.
+
+        Returns:
+            Tuple of (passed, reason). If passed is True, the change can
+            proceed. If passed is False, reason explains what blocks execution.
+        """
+        rid = self._resolve_id(self.changes_dir, change_id)
+        core = self._load_core(self.changes_dir, rid)
+        if core is None:
+            return False, f"Change {change_id} not found"
+
+        change_type = core.get("change_type", "normal")
+        risk = core.get("risk", "medium")
+        rollback_plan = core.get("rollback_plan", "")
+
+        # Check if change is destructive/high-risk
+        if not is_destructive_change(change_type, risk):
+            return True, ""
+
+        # Check rollback plan
+        if not rollback_plan.strip():
+            return False, (
+                f"Rollback plan required for {change_type}/{risk} change. "
+                "A rollback plan is a hard precondition for destructive and "
+                "high-risk changes."
+            )
+
+        # Check preflight status from events
+        events = self._read_events(self.changes_dir, rid)
+        preflight_passed = False
+        preflight_failed_reason = None
+
+        # Process events in order, last state wins
+        for e in events:
+            kind = e.get("kind")
+            if kind == "preflight_passed":
+                preflight_passed = True
+                preflight_failed_reason = None
+            elif kind == "preflight_failed":
+                preflight_passed = False
+                preflight_failed_reason = e.get("note", "")
+
+        if not preflight_passed:
+            return False, (
+                f"Preflight check required for {change_type}/{risk} change. "
+                f"Preflight failed: {preflight_failed_reason or 'unknown reason'}. "
+                "Preflight is a fail-closed hard precondition: execution stops "
+                "before any mutation on preflight failure."
+            )
+
+        return True, ""
 
     # ── KEDB ──────────────────────────────────────────────────────────
 
