@@ -390,3 +390,21 @@ def test_a_node_without_cron_is_partial_not_unavailable(
     scanned = scan_network(tmp_path, [Target("nocron", ("fleet",))], lambda _h: NoCronRunner())
     assert scanned.targets[0].coverage[0].status == "partial"
     assert scanned.complete
+
+
+def test_network_artifact_carries_scope_and_drift_by_kind(tmp_path: Path) -> None:
+    """Card d3aa9751: SKBrain's CmdbDriftBounded reads the newest verified
+    artifact's ``scope`` and ``drift.by_kind``. Network artifacts carried
+    neither, so recording a network shadow read as "no drift summary, scope
+    unscoped" (False) until the next local run."""
+    mgr = CMDBManager(tmp_path / "cmdb")
+    declared = DiscoveredCI("service", "ghost", "fleet:service", observed=False)
+    host = DiscoveredCI("host", "nor", "host", observed=True, node="nor")
+    scan = ScanResult(
+        [declared, host], [TargetResult("nor", ("fleet",), 1, completed_collectors=1)]
+    )
+    artifact, _ = run_reconcile(mgr, scan)
+    assert artifact["scope"] == "network"
+    by_kind = artifact["drift"]["by_kind"]
+    assert by_kind["declared_not_observed"] == 1
+    assert sum(by_kind.values()) == artifact["drift"]["count"]
