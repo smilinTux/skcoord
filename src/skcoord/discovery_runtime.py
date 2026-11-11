@@ -240,7 +240,8 @@ def collect_host_facts(runner: CommandRunner) -> list[DiscoveredCI]:
 
 _ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
-_CRON_RUN_WRAPPERS = frozenset({"sk-cron-run", "sk-cron-run.sh"})
+_LEGACY_CRON_RUN_WRAPPER = "sk-cron-run.sh"
+_CRON_RUN_WRAPPERS = frozenset({"sk-cron-run", _LEGACY_CRON_RUN_WRAPPER})
 """Fleet-managed cron jobs are dispatched through this wrapper as
 ``sk-cron-run <declared-job-name> <actual-command> [args...]``, prefixed by
 zero or more inline ``VAR=value`` assignments (see the ``skos schedule``
@@ -324,7 +325,11 @@ def collect_cron_jobs(runner: CommandRunner) -> list[DiscoveredCI]:
             continue
         for schedule, principal, command_name, cron_run_name in _cron_rows(text, system=system):
             fingerprint_parts = [scope, schedule, principal, command_name]
-            if cron_run_name:
+            if cron_run_name and command_name == _LEGACY_CRON_RUN_WRAPPER:
+                # Only the .sh spelling ever fed the fingerprint. Entries run
+                # by the console script were fingerprinted without a job name
+                # before it was recognised, and the CMDB is append-only, so
+                # adding it now would orphan every one of them.
                 fingerprint_parts.append(cron_run_name)
             fingerprint = hashlib.sha256("\0".join(fingerprint_parts).encode()).hexdigest()[:16]
             attributes: dict[str, Any] = {

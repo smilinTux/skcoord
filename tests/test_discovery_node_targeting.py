@@ -267,3 +267,19 @@ def test_sk_cron_run_without_the_sh_suffix_carries_the_job_name() -> None:
     (job,) = collect_cron_jobs(runner)
     assert job.aliases == ("skmem-pg-backup",)
     assert job.attributes["cron_run_name"] == "skmem-pg-backup"
+
+
+def test_recognising_the_console_script_does_not_change_cron_identity() -> None:
+    """The CMDB is append-only: these entries were already stored under a
+    fingerprint taken before the wrapper was recognised. Changing it would
+    create a new CI and orphan the old one for every sk-cron-run line."""
+    import hashlib
+
+    runner = FakeRunner(
+        host="noroc2027",
+        answers={"/etc/crontab": "", "crontab": "15 3 * * * /x/bin/sk-cron-run job-a /bin/true\n"},
+    )
+    (job,) = collect_cron_jobs(runner)
+    before = hashlib.sha256("\0".join(["user", "15 3 * * *", "current-user", "sk-cron-run"]).encode())
+    assert job.name == f"noroc2027:cron:user:{before.hexdigest()[:16]}"
+    assert job.aliases == ("job-a",)
