@@ -165,6 +165,11 @@ def collect_fleet_objects(home: Path) -> list[DiscoveredCI]:
             if not obj:
                 continue
             spec = obj.get("spec") or {}
+            if spec.get("deleted"):
+                # The fleet's own tombstone: a retired object stays on disk
+                # (generation history) but declares nothing. The Cron and
+                # Service controllers already skip it; so must discovery.
+                continue
             name = obj.get("name") or path.stem
             attributes = {
                 k: v
