@@ -40,7 +40,6 @@ from .discovery import (
     merge,
     reconcile,
 )
-
 from .discovery_connects import CONNECTS_COLLECTORS
 
 _SCHEMA = "skcoord.cmdb.reconcile-run/v1"

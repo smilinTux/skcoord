@@ -135,7 +135,10 @@ def test_node_selector_resolves_against_node_labels(tmp_path: Path) -> None:
         {
             "kind": "Cronjob",
             "name": "skmem-health",
-            "spec": {"command": "deploy/ops/skmem-health.sh", "nodeSelector": {"always-on": "true"}},
+            "spec": {
+                "command": "deploy/ops/skmem-health.sh",
+                "nodeSelector": {"always-on": "true"},
+            },
         },
     )
     found = _by_name(collect_fleet_objects(home))
@@ -218,7 +221,10 @@ def test_a_job_targeting_the_scanned_node_with_nothing_running_is_still_missing(
         {
             "kind": "Cronjob",
             "name": "skmem-health",
-            "spec": {"command": "deploy/ops/skmem-health.sh", "nodeSelector": {"always-on": "true"}},
+            "spec": {
+                "command": "deploy/ops/skmem-health.sh",
+                "nodeSelector": {"always-on": "true"},
+            },
         },
     )
     assert _missing(_scan_of_noroc2027(home)) == {"ci-service-skmem-health"}
@@ -261,7 +267,7 @@ def test_sk_cron_run_without_the_sh_suffix_carries_the_job_name() -> None:
             "crontab": (
                 "15 3 * * * /home/cbrd21/.skenv/bin/sk-cron-run skmem-pg-backup "
                 "env RETAIN=1 /bin/bash /x/skmem-pg-backup.sh >> /x/log 2>&1\n"
-            )
+            ),
         }
     )
     (job,) = collect_cron_jobs(runner)
@@ -280,7 +286,9 @@ def test_recognising_the_console_script_does_not_change_cron_identity() -> None:
         answers={"/etc/crontab": "", "crontab": "15 3 * * * /x/bin/sk-cron-run job-a /bin/true\n"},
     )
     (job,) = collect_cron_jobs(runner)
-    before = hashlib.sha256("\0".join(["user", "15 3 * * *", "current-user", "sk-cron-run"]).encode())
+    before = hashlib.sha256(
+        "\0".join(["user", "15 3 * * *", "current-user", "sk-cron-run"]).encode()
+    )
     assert job.name == f"noroc2027:cron:user:{before.hexdigest()[:16]}"
     assert job.aliases == ("job-a",)
 
@@ -365,8 +373,9 @@ def test_a_unit_folded_across_nodes_still_counts_on_every_node(tmp_path: Path) -
         DiscoveredCI("host", "192.168.0.41", "host", observed=True, node="192.168.0.41"),
     ]
     # .41 first: merge() keeps the first sighting's node, as in the live scan.
-    found = merge([*collect_fleet_objects(home), *hosts, _unit_on("192.168.0.41"),
-                   _unit_on("noroc2027")])
+    found = merge(
+        [*collect_fleet_objects(home), *hosts, _unit_on("192.168.0.41"), _unit_on("noroc2027")]
+    )
     assert {d.node for d in found if d.name == "claude-code-api"} == {"192.168.0.41"}
     assert "ci-service-skgateway-claude-wrapper" not in _missing(found)
 
@@ -389,6 +398,7 @@ def test_a_folded_unit_does_not_count_on_a_node_it_never_ran_on(tmp_path: Path) 
         DiscoveredCI("host", "192.168.0.41", "host", observed=True, node="192.168.0.41"),
         DiscoveredCI("host", "ollama", "host", observed=True, node="192.168.0.100"),
     ]
-    found = merge([*collect_fleet_objects(home), *hosts, _unit_on("192.168.0.41"),
-                   _unit_on("192.168.0.100")])
+    found = merge(
+        [*collect_fleet_objects(home), *hosts, _unit_on("192.168.0.41"), _unit_on("192.168.0.100")]
+    )
     assert "ci-service-skgateway-claude-wrapper" in _missing(found)
