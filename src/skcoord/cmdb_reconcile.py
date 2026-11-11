@@ -14,6 +14,7 @@ import re
 import threading
 import time
 import uuid
+from collections import Counter
 from concurrent.futures import (
     Future,
     ThreadPoolExecutor,
@@ -585,6 +586,7 @@ def run_reconcile(
     config_version: str = "unknown",
     lifecycle_actions: Sequence[dict] = (),
     agent: str = "cmdb-discovery",
+    scope: str = "network",
 ) -> tuple[dict, list[NormalizedDrift]]:
     """Reconcile one scan and construct its durable operator-facing record."""
     scan_id, started = str(uuid.uuid4()), _now()
@@ -636,6 +638,10 @@ def run_reconcile(
         "applied": apply,
         "code_version": code_version,
         "config_version": config_version,
+        # SKBrain's CmdbDriftBounded keys its baseline by ``scope`` and gates
+        # on ``drift.by_kind``, the same fields local artifacts carry (card
+        # d3aa9751). Without them a network shadow read as "no drift summary".
+        "scope": scope,
         "scope_fingerprint": scope_fingerprint,
         "completeness": scan_result.completeness(),
         "reconcile": report_data,
@@ -653,6 +659,7 @@ def run_reconcile(
         },
         "drift": {
             "count": len(normalized),
+            "by_kind": dict(sorted(Counter(item.kind for item in normalized).items())),
             "by_severity": {
                 severity: sum(item.severity == severity for item in normalized)
                 for severity in ("high", "medium", "low")
