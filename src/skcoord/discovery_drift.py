@@ -59,6 +59,11 @@ def drift(
     # under a fingerprinted name but wrapped by sk-cron-run, or a fleet object
     # whose ``spec.unit``/registry ``pid_file`` names the real running unit,
     # would otherwise be structurally unmatchable no matter what is running.
+    hosts = [d for d in discovered if d.ci_type == CIType.HOST.value]
+    scanned = [_host_names(h) for h in hosts if h.observed]
+    known = [_host_names(h) for h in hosts]
+    host_names_by_id = {h.ci_id: _host_names(h) for h in hosts}
+
     observed_keys: set[str] = set()
     declared_keys: set[str] = set()
     observed_keys_by_node: dict[str, set[str]] = {}
@@ -66,13 +71,10 @@ def drift(
         keys = _service_keys(d)
         if d.observed:
             observed_keys |= keys
-            observed_keys_by_node.setdefault(_node_key(d.node), set()).update(keys)
+            for node in _observed_nodes(d, host_names_by_id):
+                observed_keys_by_node.setdefault(node, set()).update(keys)
         if d.declared:
             declared_keys |= keys
-
-    hosts = [d for d in discovered if d.ci_type == CIType.HOST.value]
-    scanned = [_host_names(h) for h in hosts if h.observed]
-    known = [_host_names(h) for h in hosts]
 
     for item in services:
         if item.observed or not item.declared:
@@ -134,6 +136,23 @@ def drift(
 
 def _node_key(value: Optional[str]) -> str:
     return str(value or "").strip().lower().rstrip(".")
+
+
+def _observed_nodes(item: DiscoveredCI, host_names_by_id: dict[str, set[str]]) -> set[str]:
+    """Every node a service was seen running on.
+
+    merge() folds one unit seen on several hosts (claude-code-api.service on
+    noroc2027, .41 and .100) into a single CI that keeps only one ``node``.
+    Each sighting's ``runs_on`` edge survives the fold, and only observing
+    collectors emit ``runs_on``, so the edges name every node it ran on.
+    """
+    nodes = {_node_key(item.node)} if item.node else set()
+    for rel_type, target in item.relationships:
+        if rel_type != "runs_on":
+            continue
+        nodes.add(_node_key(target.removeprefix(f"ci-{CIType.HOST.value}-")))
+        nodes |= host_names_by_id.get(target, set())
+    return nodes or {""}
 
 
 def _host_names(host: DiscoveredCI) -> set[str]:

@@ -315,6 +315,20 @@ def collect_cron_jobs(runner: CommandRunner) -> list[DiscoveredCI]:
     name is added as an alias, so a fleet cronjob spec can actually be matched
     against the box that runs it instead of never matching by construction.
     """
+    # A node with no cron at all (192.168.0.100 has no crontab binary and no
+    # /etc/crontab) is a valid profile, not a transport failure. This fixed,
+    # non-secret probe answers whenever the transport works, so absence reads
+    # as explicit partial coverage instead of an unavailable collector that
+    # leaves every scan including the node incomplete. Same convention as
+    # collect_docker_containers.
+    runner.run(
+        [
+            "python3",
+            "-c",
+            "import json,os,shutil; print(json.dumps({'crontab': bool(shutil.which('crontab')), "
+            "'etc_crontab': os.path.exists('/etc/crontab')}))",
+        ]
+    )
     sources = (
         ("user", runner.run(["crontab", "-l"]), False),
         ("system", runner.run(["cat", "/etc/crontab"]), True),

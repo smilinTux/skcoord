@@ -27,6 +27,7 @@ from skcoord.cmdb_reconcile import (
     write_run_artifact,
 )
 from skcoord.discovery import DISCOVERED_TAG, OBSERVED_COLLECTORS, DiscoveredCI, DriftFinding
+from skcoord.discovery_connects import CONNECTS_COLLECTORS
 
 
 class CannedRunner:
@@ -64,8 +65,9 @@ def test_network_scan_reports_complete_target_accounting(tmp_path: Path) -> None
         OrchestrationConfig(global_concurrency=2, per_host_concurrency=1, deadline_seconds=2),
     )
     assert result.complete
-    assert result.completeness()["collectors_expected"] == len(OBSERVED_COLLECTORS)
-    assert result.completeness()["collectors_complete"] == len(OBSERVED_COLLECTORS)
+    expected = len(OBSERVED_COLLECTORS) + len(CONNECTS_COLLECTORS)
+    assert result.completeness()["collectors_expected"] == expected
+    assert result.completeness()["collectors_complete"] == expected
     assert any(item.name == "nor.local" for item in result.discovered)
 
 
@@ -79,6 +81,7 @@ def test_network_deadline_marks_run_incomplete(
         return []
 
     monkeypatch.setattr(module, "OBSERVED_COLLECTORS", (slow,))
+    monkeypatch.setattr(module, "CONNECTS_COLLECTORS", ())
     result = scan_network(
         tmp_path,
         [Target("nor", ("approved:test",))],
@@ -122,6 +125,7 @@ def test_tool_gaps_are_explicit_coverage_without_command_text(
         return []
 
     monkeypatch.setattr(module, "OBSERVED_COLLECTORS", (mixed,))
+    monkeypatch.setattr(module, "CONNECTS_COLLECTORS", ())
     result = scan_network(tmp_path, [Target("mixed", ("fleet",))], lambda _host: MixedRunner())
 
     assert result.complete
@@ -151,6 +155,7 @@ def test_fully_unavailable_collector_makes_target_incomplete(
         return []
 
     monkeypatch.setattr(module, "OBSERVED_COLLECTORS", (unavailable,))
+    monkeypatch.setattr(module, "CONNECTS_COLLECTORS", ())
     result = scan_network(
         tmp_path,
         [Target("partial", ("fleet",))],
@@ -352,3 +357,36 @@ def test_scope_fingerprint_changes_for_same_count_different_collectors() -> None
     second = ScanResult([], [target], collector_scope=("collect.a", "collect.c"))
 
     assert first.scope_fingerprint() != second.scope_fingerprint()
+
+
+def test_network_scan_runs_the_same_collectors_as_a_local_scan(tmp_path: Path) -> None:
+    """Port ownership and container networks were local-only: a network pass
+    reported every stored docker network as stored_not_discovered, and a
+    governed network apply would have orphaned them (2026-11-11)."""
+    result = scan_network(tmp_path, [Target("nor.local", ("fleet",))], CannedRunner)
+    ran = {record.collector for target in result.targets for record in target.coverage}
+    assert {c.__name__ for c in CONNECTS_COLLECTORS} <= ran
+
+
+def test_a_node_without_cron_is_partial_not_unavailable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """192.168.0.100 (2026-11-11) has no crontab binary and no /etc/crontab.
+    That is a valid node profile, like a workstation without docker, and must
+    not leave every network scan that includes it incomplete."""
+    import skcoord.cmdb_reconcile as module
+    from skcoord.discovery import collect_cron_jobs
+
+    class NoCronRunner:
+        host = "nocron"
+
+        def run(self, argv):
+            if argv == ["true"] or argv[:1] == ["python3"]:
+                return "{}\n"
+            return None
+
+    monkeypatch.setattr(module, "OBSERVED_COLLECTORS", (collect_cron_jobs,))
+    monkeypatch.setattr(module, "CONNECTS_COLLECTORS", ())
+    scanned = scan_network(tmp_path, [Target("nocron", ("fleet",))], lambda _h: NoCronRunner())
+    assert scanned.targets[0].coverage[0].status == "partial"
+    assert scanned.complete
