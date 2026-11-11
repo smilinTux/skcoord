@@ -283,3 +283,46 @@ def test_recognising_the_console_script_does_not_change_cron_identity() -> None:
     before = hashlib.sha256("\0".join(["user", "15 3 * * *", "current-user", "sk-cron-run"]).encode())
     assert job.name == f"noroc2027:cron:user:{before.hexdigest()[:16]}"
     assert job.aliases == ("job-a",)
+
+
+# ── retired declarations ──────────────────────────────────────────────────
+
+
+def test_a_deleted_fleet_object_is_not_a_declaration(tmp_path: Path) -> None:
+    """``spec.deleted: true`` is how the fleet retires an object (the
+    CronController and ServiceController already skip it). Discovery must
+    too, or a retired declaration is reported as missing forever."""
+    _write(
+        tmp_path / "fleet" / "objects" / "cronjob" / "skos-morning-brief.json",
+        {
+            "kind": "Cronjob",
+            "name": "skos-morning-brief",
+            "spec": {"command": "skos brief send", "schedule": "@daily", "deleted": True},
+        },
+    )
+    _write(
+        tmp_path / "fleet" / "objects" / "service" / "skos-scheduler.json",
+        {"kind": "Service", "name": "skos-scheduler", "spec": {"deleted": True}},
+    )
+    _write(
+        tmp_path / "fleet" / "objects" / "cronjob" / "kept.json",
+        {"kind": "Cronjob", "name": "kept", "spec": {"command": "x", "deleted": False}},
+    )
+    assert [c.name for c in collect_fleet_objects(tmp_path)] == ["kept"]
+
+
+def test_a_registry_entry_is_matched_through_the_unit_it_recorded(tmp_path: Path) -> None:
+    """skcapstone's register_service records the caller's own systemd unit.
+    ``capauth`` registered from ``capauth-authz.service`` must match it."""
+    from skcoord.discovery import collect_registry
+
+    _write(
+        tmp_path / "registry" / "capauth.json",
+        {"name": "capauth", "pid_file": None, "systemd_unit": "capauth-authz.service"},
+    )
+    (entry,) = collect_registry(tmp_path)
+    assert "capauth-authz.service" in entry.aliases
+    observed = DiscoveredCI(
+        "service", "capauth-authz", "systemd--user", observed=True, node="noroc2027"
+    )
+    assert _missing([entry, observed]) == set()

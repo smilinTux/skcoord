@@ -165,6 +165,11 @@ def collect_fleet_objects(home: Path) -> list[DiscoveredCI]:
             if not obj:
                 continue
             spec = obj.get("spec") or {}
+            if spec.get("deleted"):
+                # The fleet's own tombstone: a retired object stays on disk
+                # (generation history) but declares nothing. The Cron and
+                # Service controllers already skip it; so must discovery.
+                continue
             name = obj.get("name") or path.stem
             attributes = {
                 k: v
@@ -252,6 +257,13 @@ def collect_registry(home: Path) -> list[DiscoveredCI]:
             stem = Path(str(pid_file)).stem
             if stem and stem.lower() != name.lower():
                 aliases = (stem,)
+        # skcapstone's register_service records the systemd unit the caller
+        # runs under (from its own cgroup), so ``capauth`` registered by
+        # capauth-authz.service can be tied to that unit.
+        unit = obj.get("systemd_unit")
+        if isinstance(unit, str) and unit:
+            aliases = (*aliases, unit)
+            attributes["systemd_unit"] = unit
         out.append(
             DiscoveredCI(
                 ci_type=CIType.SERVICE.value,
