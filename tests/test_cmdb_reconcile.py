@@ -366,3 +366,27 @@ def test_network_scan_runs_the_same_collectors_as_a_local_scan(tmp_path: Path) -
     result = scan_network(tmp_path, [Target("nor.local", ("fleet",))], CannedRunner)
     ran = {record.collector for target in result.targets for record in target.coverage}
     assert {c.__name__ for c in CONNECTS_COLLECTORS} <= ran
+
+
+def test_a_node_without_cron_is_partial_not_unavailable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """192.168.0.100 (2026-11-11) has no crontab binary and no /etc/crontab.
+    That is a valid node profile, like a workstation without docker, and must
+    not leave every network scan that includes it incomplete."""
+    import skcoord.cmdb_reconcile as module
+    from skcoord.discovery import collect_cron_jobs
+
+    class NoCronRunner:
+        host = "nocron"
+
+        def run(self, argv):
+            if argv == ["true"] or argv[:1] == ["python3"]:
+                return "{}\n"
+            return None
+
+    monkeypatch.setattr(module, "OBSERVED_COLLECTORS", (collect_cron_jobs,))
+    monkeypatch.setattr(module, "CONNECTS_COLLECTORS", ())
+    scanned = scan_network(tmp_path, [Target("nocron", ("fleet",))], lambda _h: NoCronRunner())
+    assert scanned.targets[0].coverage[0].status == "partial"
+    assert scanned.complete
