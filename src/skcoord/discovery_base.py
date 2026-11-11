@@ -32,6 +32,16 @@ class ObservationState(str, Enum):
     UNKNOWN = "unknown"
 
 
+def is_agent_home_name(name: str) -> bool:
+    """Whether a directory under ``~/.skcapstone/agents`` can be an agent home.
+
+    Hidden entries (``.git``, ``.stversions``) and dunder placeholders such as
+    ``__unresolved-profile__`` are tooling state, never agents.
+    """
+    name = str(name).strip()
+    return bool(name) and not name.startswith((".", "__"))
+
+
 def observation_state(
     observed_at: str, *, now: Optional[datetime] = None, max_age: timedelta = timedelta(hours=6)
 ) -> ObservationState:

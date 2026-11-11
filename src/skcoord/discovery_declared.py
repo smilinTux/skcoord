@@ -11,6 +11,7 @@ from .discovery_base import (
     AUTHORITY_OBSERVED,
     DISCOVERED_TAG,
     DiscoveredCI,
+    is_agent_home_name,
 )
 
 
@@ -284,7 +285,7 @@ def collect_agents(home: Path) -> list[DiscoveredCI]:
     if not root.is_dir():
         return out
     for path in sorted(root.iterdir()):
-        if not path.is_dir():
+        if not path.is_dir() or not is_agent_home_name(path.name):
             continue
         soul = path / "soul" / "base.json"
         attributes: dict[str, Any] = {"home": str(path)}
