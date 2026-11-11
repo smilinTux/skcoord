@@ -61,12 +61,18 @@ def drift(
     # would otherwise be structurally unmatchable no matter what is running.
     observed_keys: set[str] = set()
     declared_keys: set[str] = set()
+    observed_keys_by_node: dict[str, set[str]] = {}
     for d in services:
         keys = _service_keys(d)
         if d.observed:
             observed_keys |= keys
+            observed_keys_by_node.setdefault(_node_key(d.node), set()).update(keys)
         if d.declared:
             declared_keys |= keys
+
+    hosts = [d for d in discovered if d.ci_type == CIType.HOST.value]
+    scanned = [_host_names(h) for h in hosts if h.observed]
+    known = [_host_names(h) for h in hosts]
 
     for item in services:
         if item.observed or not item.declared:
@@ -75,7 +81,19 @@ def drift(
             # A CLI-invoked tool (spec.cli), not a daemon. It has no running
             # unit, timer or container by design -- that is not a gap.
             continue
-        if not (_service_keys(item) & observed_keys):
+        candidates = observed_keys
+        targets = item.attributes.get("target_nodes")
+        if isinstance(targets, list):
+            # A declaration bound to specific node(s) (placement, fleet
+            # status, or a nodeSelector resolved against Node labels). Only a
+            # node this pass actually scanned can prove it missing, and only
+            # units observed on that node can prove it present: a per-node job
+            # for .41 is neither missing from, nor satisfied by, noroc2027.
+            nodes = _scanned_target_names(targets, scanned, known)
+            if not nodes:
+                continue
+            candidates = set().union(*(observed_keys_by_node.get(n, set()) for n in nodes))
+        if not (_service_keys(item) & candidates):
             findings.append(
                 DriftFinding(
                     item.ci_id,
@@ -112,6 +130,42 @@ def drift(
                 )
 
     return findings
+
+
+def _node_key(value: Optional[str]) -> str:
+    return str(value or "").strip().lower().rstrip(".")
+
+
+def _host_names(host: DiscoveredCI) -> set[str]:
+    """Every name a host CI answers to: identity aliases plus its node."""
+    names = set(host.identity_aliases)
+    if host.node:
+        names.add(_node_key(host.node))
+    return names
+
+
+def _scanned_target_names(
+    targets: Sequence[str], scanned: list[set[str]], known: list[set[str]]
+) -> set[str]:
+    """The names of the scanned hosts that are one of ``targets``.
+
+    A target is a fleet Node object name (``node-41``). The fleet:node host
+    CI carries it as an alias next to the node's hostname or address, so the
+    known host CIs bridge it to whatever name the scan used for that machine
+    (``noroc2027``, or a laptop hostname answering on ``192.168.0.41``).
+    Empty means no target node was scanned this pass.
+    """
+    out: set[str] = set()
+    for target in targets:
+        key = _node_key(target)
+        names = {key, key.removeprefix("node-")}
+        for group in known:
+            if names & group:
+                names |= group
+        for group in scanned:
+            if names & group:
+                out |= group
+    return out
 
 
 def _service_key(name: str) -> str:
