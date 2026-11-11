@@ -7,7 +7,7 @@ import re
 from typing import Any, Iterable
 
 from .cmdb import CIType, make_ci_id
-from .discovery_base import DISCOVERED_TAG, CommandRunner, DiscoveredCI
+from .discovery_base import DISCOVERED_TAG, CommandRunner, DiscoveredCI, is_agent_home_name
 from .discovery_runtime import _PERSISTENT_FILESYSTEMS, _PSEUDO_FILESYSTEMS
 from .discovery_systemd import _stable_container_name
 
@@ -26,9 +26,7 @@ def _walk_filesystems(rows: object) -> Iterable[dict]:
 def collect_datastores(runner: CommandRunner) -> list[DiscoveredCI]:
     """Persistent filesystem mounts and database-like containers as datastores."""
     out: list[DiscoveredCI] = []
-    stdout = runner.run(
-        ["findmnt", "-J", "-b", "-o", "TARGET,SOURCE,FSTYPE,SIZE,USED,AVAIL,USE%"]
-    )
+    stdout = runner.run(["findmnt", "-J", "-b", "-o", "TARGET,SOURCE,FSTYPE,SIZE,USED,AVAIL,USE%"])
     if stdout:
         try:
             filesystems = json.loads(stdout).get("filesystems", [])
@@ -138,8 +136,9 @@ def collect_observed_agents(runner: CommandRunner) -> list[DiscoveredCI]:
             relationships=(("runs_on", make_ci_id(CIType.HOST.value, runner.host)),),
         )
         for name in names
-        if str(name).strip() and not str(name).endswith("-template")
+        if is_agent_home_name(name) and not str(name).endswith("-template")
     ]
+
 
 def collect_model_endpoints(runner: CommandRunner) -> list[DiscoveredCI]:
     """Observed Ollama endpoint, version and bounded installed-model inventory."""

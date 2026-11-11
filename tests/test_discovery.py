@@ -275,6 +275,15 @@ def test_agents_are_collected_with_soul_facts(home: Path) -> None:
     assert found[0].attributes["soul_role"] == "devops"
 
 
+def test_agent_collector_skips_dot_and_placeholder_dirs(home: Path) -> None:
+    # Live 2026-11-11: ~/.skcapstone/agents/.git and a literal
+    # __unresolved-profile__ directory became ci-agent-.git and
+    # ci-agent-__unresolved-profile__ (card a518e362).
+    (home / "agents" / ".git").mkdir()
+    (home / "agents" / "__unresolved-profile__").mkdir()
+    assert [a.name for a in collect_agents(home)] == ["lumina"]
+
+
 def test_declared_collectors_are_empty_on_an_empty_home(tmp_path: Path) -> None:
     assert collect_fleet_objects(tmp_path) == []
     assert collect_registry(tmp_path) == []
@@ -567,6 +576,17 @@ def test_remote_agent_homes_are_observed_on_their_host() -> None:
     assert [ci.name for ci in found] == ["jarvis"]
     assert found[0].observed is True
     assert found[0].node == "alpha"
+
+
+def test_remote_agent_listing_skips_dot_and_placeholder_dirs() -> None:
+    found = collect_observed_agents(
+        FakeRunner(
+            host="alpha",
+            answers={"python3": '[".git", "__unresolved-profile__", "jarvis"]\n'},
+        )
+    )
+
+    assert [ci.name for ci in found] == ["jarvis"]
 
 
 def test_model_endpoint_records_health_version_and_bounded_models() -> None:
