@@ -309,3 +309,20 @@ def test_a_deleted_fleet_object_is_not_a_declaration(tmp_path: Path) -> None:
         {"kind": "Cronjob", "name": "kept", "spec": {"command": "x", "deleted": False}},
     )
     assert [c.name for c in collect_fleet_objects(tmp_path)] == ["kept"]
+
+
+def test_a_registry_entry_is_matched_through_the_unit_it_recorded(tmp_path: Path) -> None:
+    """skcapstone's register_service records the caller's own systemd unit.
+    ``capauth`` registered from ``capauth-authz.service`` must match it."""
+    from skcoord.discovery import collect_registry
+
+    _write(
+        tmp_path / "registry" / "capauth.json",
+        {"name": "capauth", "pid_file": None, "systemd_unit": "capauth-authz.service"},
+    )
+    (entry,) = collect_registry(tmp_path)
+    assert "capauth-authz.service" in entry.aliases
+    observed = DiscoveredCI(
+        "service", "capauth-authz", "systemd--user", observed=True, node="noroc2027"
+    )
+    assert _missing([entry, observed]) == set()

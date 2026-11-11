@@ -257,6 +257,13 @@ def collect_registry(home: Path) -> list[DiscoveredCI]:
             stem = Path(str(pid_file)).stem
             if stem and stem.lower() != name.lower():
                 aliases = (stem,)
+        # skcapstone's register_service records the systemd unit the caller
+        # runs under (from its own cgroup), so ``capauth`` registered by
+        # capauth-authz.service can be tied to that unit.
+        unit = obj.get("systemd_unit")
+        if isinstance(unit, str) and unit:
+            aliases = (*aliases, unit)
+            attributes["systemd_unit"] = unit
         out.append(
             DiscoveredCI(
                 ci_type=CIType.SERVICE.value,
