@@ -1360,3 +1360,67 @@ def test_drift_reports_stored_cis_no_collector_saw(tmp_path: Path) -> None:
     findings = drift([], mgr)
 
     assert [f.kind for f in findings] == ["stored_not_discovered"]
+
+
+def _host_known_by_other_id(mgr: CMDBManager):
+    # Live 2026-11-11 (chg-a543c87b): the scan target 192.168.0.41 is the
+    # existing host CI ci-host-cbrd21-laptop12thgenintelcore, so the sighting
+    # is re-keyed, but every runs_on edge kept ci-host-192.168.0.41.
+    return mgr.create_ci(
+        "192.0.2.10",
+        "host",
+        attributes={"aliases": ["192.0.2.10"]},
+        tags=[DISCOVERED_TAG],
+        ci_id="ci-host-alpha",
+    )
+
+
+def _sightings():
+    host = DiscoveredCI("host", "192.0.2.10", "host", observed=True, aliases=("192.0.2.10",))
+    service = DiscoveredCI(
+        "service",
+        "skgateway",
+        "systemd",
+        observed=True,
+        node="192.0.2.10",
+        relationships=(("runs_on", host.ci_id),),
+        authority="network:192.0.2.10",
+    )
+    return host, service
+
+
+def test_edges_follow_a_host_that_resolves_to_an_existing_ci(tmp_path: Path) -> None:
+    mgr = CMDBManager(tmp_path)
+    canonical = _host_known_by_other_id(mgr)
+    host, service = _sightings()
+    assert host.ci_id != canonical.id
+
+    report = reconcile(mgr, [host, service], apply=True)
+
+    assert {r["target"] for r in report.relationships if r["rel_type"] == "runs_on"} == {
+        canonical.id
+    }
+    assert mgr.audit_relationships() == []
+    assert any(
+        r.rel_type == "runs_on" and r.target == canonical.id
+        for r in mgr.get_ci(service.ci_id).relationships
+    )
+
+
+def test_reconcile_corrects_edges_left_dangling_by_the_old_remap(tmp_path: Path) -> None:
+    mgr = CMDBManager(tmp_path)
+    canonical = _host_known_by_other_id(mgr)
+    host, service = _sightings()
+    mgr.create_ci("skgateway", "service", tags=[DISCOVERED_TAG], ci_id=service.ci_id)
+    mgr.add_relationship(
+        service.ci_id, "cmdb-discovery", "runs_on", host.ci_id, authority="network:192.0.2.10"
+    )
+    assert mgr.audit_relationships(), "fixture must start with the dangling edge"
+
+    reconcile(mgr, [host, service], apply=True)
+
+    assert mgr.audit_relationships() == []
+    targets = {
+        r.target for r in mgr.get_ci(service.ci_id).relationships if r.rel_type == "runs_on"
+    }
+    assert targets == {canonical.id}
