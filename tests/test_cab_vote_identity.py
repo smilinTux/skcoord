@@ -259,17 +259,24 @@ def test_disqualified_rejection_still_blocks(tmp_path):
     """Exclusions narrow approvals only; a creator's veto still rejects."""
     mgr = ITILManager(tmp_path)
     chg = _change(mgr, created_by="lumina")
-    mgr.submit_cab_vote(chg.id, agent="lumina", decision="rejected")
+    mgr.submit_cab_vote(chg.id, agent="lumina", decision="rejected", subject="lumina")
     mgr.submit_cab_vote(chg.id, **signed_vote(chg.id))
     assert _status(mgr, chg.id) == "rejected"
 
 
+def _raw_rejection(mgr, change_id, agent):
+    """A rejection file written directly, as an older writer could have."""
+    mgr.ensure_dirs()
+    payload = json.dumps({"change_id": change_id, "agent": agent, "decision": "rejected"})
+    (mgr.cab_dir / f"{change_id}-{agent}.json").write_text(payload)
+
+
 @pytest.mark.parametrize("placeholder", sorted(_PLACEHOLDER_VOTERS))
 def test_placeholder_rejection_is_recorded_but_does_not_change_status(tmp_path, placeholder):
-    """An anonymous veto is stored, yet flips nothing: a placeholder names no one."""
+    """An anonymous veto on disk is read, yet flips nothing: a placeholder names no one."""
     mgr = ITILManager(tmp_path)
     chg = _change(mgr)
-    mgr.submit_cab_vote(chg.id, agent=placeholder, decision="rejected")
+    _raw_rejection(mgr, chg.id, placeholder)
     assert any(v.decision.value == "rejected" for v in mgr.get_cab_votes(chg.id))
     assert _status(mgr, chg.id) == "proposed"
     mgr.submit_cab_vote(chg.id, **signed_vote(chg.id))
@@ -281,10 +288,37 @@ def test_placeholder_rejection_does_not_block_auto_normal(tmp_path):
     chg = _change(
         mgr, created_by="operator", tags=["auto-normal"], risk="low", rollback_plan="revert"
     )
-    mgr.submit_cab_vote(chg.id, agent="human", decision="rejected")
+    _raw_rejection(mgr, chg.id, "human")
     assert _status(mgr, chg.id) == "approved"
-    mgr.submit_cab_vote(chg.id, agent="architect", decision="rejected")
+    mgr.submit_cab_vote(chg.id, agent="architect", decision="rejected", subject="architect")
     assert _status(mgr, chg.id) != "approved"
+
+
+@pytest.mark.parametrize("agent", ["human", "sentinel"])
+def test_subject_less_rejection_is_refused_like_an_approval_role(tmp_path, agent):
+    """Round 2 item 5: a rejection must name an authenticated voter. Nothing is written."""
+    mgr = ITILManager(tmp_path)
+    chg = _change(mgr)
+    with pytest.raises(ValueError, match="rejection requires an authenticated subject"):
+        mgr.submit_cab_vote(chg.id, agent=agent, decision="rejected")
+    with pytest.raises(ValueError):
+        mgr.submit_cab_vote(chg.id, agent=agent, decision=CABDecisionValue.REJECTED)
+    assert mgr.get_cab_votes(chg.id) == []
+    # Abstaining and an unsigned approval are still recorded (neither counts).
+    mgr.submit_cab_vote(chg.id, agent=agent, decision="abstain")
+    assert len(mgr.get_cab_votes(chg.id)) == 1
+
+
+def test_timeline_names_an_unsigned_blocker(tmp_path):
+    mgr = ITILManager(tmp_path)
+    chg = _change(mgr)
+    mgr.submit_cab_vote(chg.id, agent="sentinel", decision="rejected", subject="sentinel")
+    mgr.submit_cab_vote(chg.id, **signed_vote(chg.id, decision="rejected"))
+    folded = next(c for c in mgr.list_changes() if c.id == chg.id)
+    assert folded.status.value == "rejected"
+    (note,) = [r["note"] for r in folded.timeline if r.get("action") == "status:proposed->rejected"]
+    assert "sentinel (unsigned)" in note
+    assert "chef (signed)" in note
 
 
 def test_creator_vote_cannot_gate_a_mid_fold_transition(tmp_path):
@@ -338,7 +372,7 @@ def test_unauthenticated_vote_cannot_replace_a_signed_one(tmp_path, decision):
     chg = _change(mgr)
     mgr.submit_cab_vote(chg.id, **signed_vote(chg.id))
     with pytest.raises(ValueError, match="refusing to replace"):
-        mgr.submit_cab_vote(chg.id, agent="chef", decision=decision)
+        mgr.submit_cab_vote(chg.id, agent="chef", decision=decision, subject="chef")
     assert _status(mgr, chg.id) == "approved"
 
 

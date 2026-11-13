@@ -455,6 +455,15 @@ def _counting_rejections(votes: list[CABDecision]) -> list[CABDecision]:
     ]
 
 
+def _blocker_label(vote: CABDecision) -> str:
+    """How a blocking rejection is named in the timeline: voter plus signed or unsigned.
+
+    An unsigned rejection still blocks (a veto is fail-safe); the label makes
+    plain that no verified grant stands behind it.
+    """
+    return f"{vote.agent} ({'signed' if _is_authenticated_vote(vote) else 'unsigned'})"
+
+
 def _qualifying_approvals(
     votes: list[CABDecision],
     *,
@@ -1472,7 +1481,7 @@ class ITILManager:
                         "ts": max(v.decided_at for v in rejections),
                         "agent": "cab-system",
                         "action": "status:proposed->rejected",
-                        "note": "Rejected by: " + ", ".join(v.agent for v in rejections),
+                        "note": "Rejected by: " + ", ".join(_blocker_label(v) for v in rejections),
                     }
                 )
             elif approvals:
@@ -2028,6 +2037,10 @@ class ITILManager:
             raise ValueError(f"unsupported CAB subject role: {subject_role!r}")
         if subject_role in {"owner", "approver"} and not subject:
             raise ValueError("a qualifying human role requires an authenticated subject")
+        if CABDecisionValue(decision) == CABDecisionValue.REJECTED and not subject:
+            # Card bada5c86: a rejection blocks, so like a qualifying approval it
+            # must be bound to an authenticated voter, never a free-text label.
+            raise ValueError("a CAB rejection requires an authenticated subject")
         vote = CABDecision(
             change_id=change_id,
             agent=voter,
