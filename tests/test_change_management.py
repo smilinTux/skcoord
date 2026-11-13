@@ -15,19 +15,9 @@ from __future__ import annotations
 import sys
 
 import pytest
+from cab_grants import signed_vote  # card bada5c86: real signed grants
 
 from skcoord.itil import ITILManager
-
-# A qualifying approval carries authenticated provenance (card bada5c86): a bare
-# agent="human" vote is recorded but never counts.
-AUTHENTICATED_APPROVAL = dict(
-    agent="chef",
-    decision="approved",
-    subject="chef",
-    subject_role="owner",
-    subject_fingerprint="A" * 40,
-    authorization_id="authz-test",
-)
 
 
 @pytest.fixture(autouse=True)
@@ -75,7 +65,7 @@ def test_pre_existing_change_folds_byte_identically(tmp_path):
     # Old-style events only: no pr_link/validation/schedule/unschedule/
     # window_missed anywhere in the log.
     mgr.update_change(chg.id, "lumina", new_status="reviewing", note="looks fine")
-    mgr.submit_cab_vote(chg.id, **AUTHENTICATED_APPROVAL)
+    mgr.submit_cab_vote(chg.id, **signed_vote(chg.id))
 
     before = mgr.list_changes()[0]
     # Fold again from disk (fresh read) - must be byte-identical.
@@ -173,7 +163,7 @@ def test_validation_fail_leaves_status_unchanged(tmp_path):
 
 
 def _approve_via_human_vote(mgr: ITILManager, change_id: str) -> None:
-    mgr.submit_cab_vote(change_id, **AUTHENTICATED_APPROVAL)
+    mgr.submit_cab_vote(change_id, **signed_vote(change_id))
 
 
 def test_schedule_valid_only_while_approved(tmp_path):
@@ -313,23 +303,15 @@ def test_submit_cab_vote_literal_human_subject_no_longer_unblocks(tmp_path):
     chg = mgr.propose_change(title="real human vote", change_type="normal", managed_by="lumina")
     mgr.submit_cab_vote(chg.id, agent="human", decision="approved", subject="human")
     assert mgr.list_changes()[0].status.value == "proposed"
-    mgr.submit_cab_vote(chg.id, **AUTHENTICATED_APPROVAL)
+    mgr.submit_cab_vote(chg.id, **signed_vote(chg.id))
     assert mgr.list_changes()[0].status.value == "approved"
 
 
 def test_authenticated_named_owner_unblocks_without_literal_human(tmp_path):
-    """Chef remains Chef in the audit log while the role proves humanity."""
+    """Chef remains Chef in the audit log while the signed grant proves humanity."""
     mgr = ITILManager(tmp_path)
     chg = mgr.propose_change(title="owner-approved", change_type="normal", managed_by="atlas")
-    vote = mgr.submit_cab_vote(
-        chg.id,
-        agent="ignored",
-        decision="approved",
-        subject="chef",
-        subject_role="owner",
-        subject_fingerprint="A" * 40,
-        authorization_id="authz-123",
-    )
+    vote = mgr.submit_cab_vote(chg.id, **{**signed_vote(chg.id), "agent": "ignored"})
     assert vote.agent == "chef"
     assert vote.subject_role == "owner"
     assert mgr.list_changes()[0].status.value == "approved"
@@ -366,7 +348,7 @@ def test_no_self_approval_drafters_own_approve_is_ignored(tmp_path):
     folded_after_prep = mgr.list_changes()[0]
     assert folded_after_prep.prepared_by == "chef"
 
-    mgr.submit_cab_vote(chg.id, **AUTHENTICATED_APPROVAL)
+    mgr.submit_cab_vote(chg.id, **signed_vote(chg.id))
     folded = mgr.list_changes()[0]
     # Self-approval dropped from the approvals pool -> stays unapproved.
     assert folded.status.value == "proposed"
@@ -383,7 +365,7 @@ def test_no_self_approval_a_different_subjects_approve_moves_it_forward(tmp_path
     )
     assert mgr.list_changes()[0].prepared_by == "lumina"
 
-    mgr.submit_cab_vote(chg.id, **AUTHENTICATED_APPROVAL)
+    mgr.submit_cab_vote(chg.id, **signed_vote(chg.id))
     folded = mgr.list_changes()[0]
     assert folded.status.value == "approved"
 
@@ -410,6 +392,6 @@ def test_no_self_approval_is_a_noop_without_a_pr_link_event(tmp_path):
     chg = mgr.propose_change(title="no prep run", change_type="normal", managed_by="lumina")
     assert chg.prepared_by is None
     mgr.submit_cab_vote(chg.id, agent="lumina", decision="approved")
-    mgr.submit_cab_vote(chg.id, **AUTHENTICATED_APPROVAL)
+    mgr.submit_cab_vote(chg.id, **signed_vote(chg.id))
     folded = mgr.list_changes()[0]
     assert folded.status.value == "approved"

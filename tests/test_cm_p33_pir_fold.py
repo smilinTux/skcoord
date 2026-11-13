@@ -21,19 +21,9 @@ from __future__ import annotations
 import sys
 
 import pytest
+from cab_grants import signed_vote  # card bada5c86: real signed grants
 
 from skcoord.itil import ITILManager
-
-# A qualifying approval carries authenticated provenance (card bada5c86): a bare
-# agent="human" vote is recorded but never counts.
-AUTHENTICATED_APPROVAL = dict(
-    agent="chef",
-    decision="approved",
-    subject="chef",
-    subject_role="owner",
-    subject_fingerprint="A" * 40,
-    authorization_id="authz-test",
-)
 
 
 @pytest.fixture(autouse=True)
@@ -58,7 +48,7 @@ def _deployed_change(mgr: ITILManager, title: str):
         managed_by="lumina",
         rollback_plan="revert the deploy",
     )
-    mgr.submit_cab_vote(chg.id, **AUTHENTICATED_APPROVAL)
+    mgr.submit_cab_vote(chg.id, **signed_vote(chg.id))
     assert mgr.list_changes()[0].status.value == "approved"
     mgr.update_change(chg.id, "lumina", new_status="implementing")
     mgr.update_change(chg.id, "lumina", new_status="deployed", note="deploy step reported success")
@@ -74,7 +64,7 @@ def _failed_change(mgr: ITILManager, title: str):
         managed_by="lumina",
         rollback_plan="revert the deploy",
     )
-    mgr.submit_cab_vote(chg.id, **AUTHENTICATED_APPROVAL)
+    mgr.submit_cab_vote(chg.id, **signed_vote(chg.id))
     mgr.update_change(chg.id, "lumina", new_status="implementing")
     mgr.update_change(chg.id, "lumina", new_status="failed", note="deploy step errored out")
     assert mgr.list_changes()[0].status.value == "failed"
@@ -213,7 +203,7 @@ def test_pre_existing_change_folds_byte_identically(tmp_path):
         tags=["legacy"],
     )
     mgr.update_change(chg.id, "lumina", new_status="reviewing", note="looks fine")
-    mgr.submit_cab_vote(chg.id, **AUTHENTICATED_APPROVAL)
+    mgr.submit_cab_vote(chg.id, **signed_vote(chg.id))
 
     before = mgr.list_changes()[0]
     # Fold again from disk (fresh read) - must be byte-identical.

@@ -9,13 +9,12 @@ jarvis vote cites the human owner's authorization in ``conditions`` and whose
 event log carries valid deployed -> verified -> closed transitions) demoted
 back to ``reviewing`` at fold time.
 
-The compatibility rule (``_LEGACY_CAB_PROVENANCE_CUTOFF`` +
-``_is_legacy_unprovenanced_approval``) honors an unprovenanced approval vote
-decided before the cutoff as a historical human approval. The cutoff is a
-fixed past timestamp, so no vote written through ``submit_cab_vote()`` after
-the fact can ever satisfy it, and the raw-status CAB bypass guard stays
-fail-closed for live events. No vote is fabricated or backdated: the rule is
-a pure fold-time derivation over the existing, untouched evidence.
+The compatibility rule (``_LEGACY_CAB_APPROVALS`` +
+``_is_legacy_unprovenanced_approval``) honors exactly the pinned historical
+votes, keyed by change id, voter and the sha256 of the vote file (card
+bada5c86 replaced an earlier "decided before 2026-08-21" rule that a backdated
+``decided_at`` could satisfy). No vote written after the fact can match, and
+the raw-status CAB bypass guard stays fail-closed for live events.
 
 The fixture under ``tests/fixtures/itil-terminal-legacy/`` is a verbatim copy
 of the live chg-a76c0aee record (core, both writer event logs, and the CAB
@@ -33,7 +32,6 @@ import tempfile
 import pytest
 
 from skcoord.itil import (
-    _LEGACY_CAB_PROVENANCE_CUTOFF,
     CABDecision,
     ITILManager,
     _is_legacy_unprovenanced_approval,
@@ -118,9 +116,8 @@ def test_new_change_cannot_self_approve_via_legacy_shaped_vote(mgr):
     """Acceptance 2 (vote route): a new unprovenanced vote never qualifies.
 
     Same shape as the historical jarvis vote - AI agent, human authorization
-    cited in ``conditions``, no provenance fields - but ``submit_cab_vote``
-    stamps ``decided_at`` with the wall-clock now, which is at/after the
-    cutoff, so the legacy clause cannot apply.
+    cited in ``conditions``, no provenance fields - but it is not one of the
+    pinned historical votes, so the legacy clause cannot apply.
     """
     chg = mgr.propose_change(title="fresh change", created_by="jarvis")
 
@@ -157,16 +154,14 @@ def test_new_change_cannot_self_approve_via_raw_terminal_chain(mgr):
     assert any("CAB approval required" in t.get("conflict_reason", "") for t in conflicts)
 
 
-def test_post_cutoff_historical_shape_still_demotes(legacy_mgr):
-    """The same record with a post-cutoff vote stays demoted (guard intact).
+def test_edited_historical_vote_stops_qualifying(legacy_mgr):
+    """The same record with any byte of the pinned vote changed stays demoted.
 
-    Moves the fixture vote's ``decided_at`` past the cutoff in the throwaway
-    copy only - proving the cutoff, not the record's content, is what gates
-    the legacy clause.
+    Edits the fixture vote's ``decided_at`` in the throwaway copy only: the pin
+    is on the file's content, so the edited vote is no longer the historical
+    one (guard intact).
     """
-    vote_path = (
-        legacy_mgr.cab_dir / "chg-a76c0aee-jarvis.json"
-    )
+    vote_path = legacy_mgr.cab_dir / "chg-a76c0aee-jarvis.json"
     vote = json.loads(vote_path.read_text(encoding="utf-8"))
     vote["decided_at"] = "2026-08-21T15:54:46.863110+00:00"
     vote_path.write_text(json.dumps(vote, indent=2), encoding="utf-8")
@@ -174,27 +169,22 @@ def test_post_cutoff_historical_shape_still_demotes(legacy_mgr):
     assert _folded_change(legacy_mgr).status.value == "reviewing"
 
 
-def test_legacy_clause_requires_empty_provenance_fields():
-    """A non-qualifying role (or any provenance) opts out of the legacy clause."""
-    base = {
-        "change_id": "chg-x",
-        "agent": "jarvis",
-        "decision": "approved",
-        "decided_at": "2026-08-20T22:07:08.455062+00:00",
-    }
-    assert _is_legacy_unprovenanced_approval(CABDecision(**base))
+def test_legacy_clause_requires_empty_provenance_fields(legacy_mgr):
+    """Any provenance field opts the pinned vote out of the legacy clause."""
+    (vote,) = legacy_mgr.get_cab_votes("chg-a76c0aee")
+    assert _is_legacy_unprovenanced_approval(vote)
     for field in ("subject_role", "subject_fingerprint", "authorization_id"):
-        vote = CABDecision(**{**base, field: "implementer"})
-        assert not _is_legacy_unprovenanced_approval(vote)
+        edited = vote.model_copy(update={field: "implementer"})
+        edited._source_sha256 = vote._source_sha256
+        assert not _is_legacy_unprovenanced_approval(edited)
 
 
-def test_legacy_clause_fails_closed_on_bad_timestamps():
-    """Naive, malformed, or post-cutoff timestamps never qualify."""
-    base = {"change_id": "chg-x", "agent": "jarvis", "decision": "approved"}
-    for decided_at in (
-        "2026-08-20T22:07:08.455062",  # naive: not provably pre-upgrade
-        "not-a-timestamp",
-        _LEGACY_CAB_PROVENANCE_CUTOFF,  # the boundary itself is excluded
-    ):
-        vote = CABDecision(**{**base, "decided_at": decided_at})
-        assert not _is_legacy_unprovenanced_approval(vote)
+def test_legacy_clause_ignores_timestamps():
+    """A backdated vote with the pinned change and voter is not the pinned vote."""
+    vote = CABDecision(
+        change_id="chg-a76c0aee",
+        agent="jarvis",
+        decision="approved",
+        decided_at="2026-08-20T22:07:08.455062+00:00",
+    )
+    assert not _is_legacy_unprovenanced_approval(vote)
