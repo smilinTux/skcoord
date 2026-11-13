@@ -29,9 +29,13 @@ grant that verifies against a pinned approver key
 fold honors them only through `_LEGACY_CAB_APPROVALS` in `src/skcoord/itil.py`:
 a frozen set of (change id, voter, sha256 of the vote file).
 `_is_pinned_legacy_approval` matches an approval read from disk whose file hash
-equals the pinned one. The hash fixes every field, provenance included, so a
-vote that is edited by one byte, written later, backdated or built in memory
-never matches.
+equals the pinned one, for the pinned change and voter. The hash fixes every
+field, provenance included, so a vote that is edited by one byte, written
+later, backdated or built in memory never matches. The change id and voter are
+not taken from the file alone: `get_cab_votes` ignores a file whose name does
+not bind the change id and voter recorded in it, and the fold keeps only votes
+for the change it is folding. A pinned file copied under another change's name
+therefore never matches, even if the same hash were pinned for both.
 
 The list was built from read-only folds of every reachable estate on
 2026-11-13: noroc2027 (and its copy on 192.168.0.41) and the chi nodes
