@@ -10,7 +10,7 @@ event log carries valid deployed -> verified -> closed transitions) demoted
 back to ``reviewing`` at fold time.
 
 The compatibility rule (``_LEGACY_CAB_APPROVALS`` +
-``_is_legacy_unprovenanced_approval``) honors exactly the pinned historical
+``_is_pinned_legacy_approval``) honors exactly the pinned historical
 votes, keyed by change id, voter and the sha256 of the vote file (card
 bada5c86 replaced an earlier "decided before 2026-08-21" rule that a backdated
 ``decided_at`` could satisfy). No vote written after the fact can match, and
@@ -34,7 +34,7 @@ import pytest
 from skcoord.itil import (
     CABDecision,
     ITILManager,
-    _is_legacy_unprovenanced_approval,
+    _is_pinned_legacy_approval,
 )
 
 FIXTURE = (
@@ -169,14 +169,21 @@ def test_edited_historical_vote_stops_qualifying(legacy_mgr):
     assert _folded_change(legacy_mgr).status.value == "reviewing"
 
 
-def test_legacy_clause_requires_empty_provenance_fields(legacy_mgr):
-    """Any provenance field opts the pinned vote out of the legacy clause."""
+def test_legacy_clause_is_bound_to_the_file_not_to_its_shape(legacy_mgr):
+    """The file hash fixes every field: any edit, provenance included, ends the pin."""
     (vote,) = legacy_mgr.get_cab_votes("chg-a76c0aee")
-    assert _is_legacy_unprovenanced_approval(vote)
+    assert _is_pinned_legacy_approval(vote)
     for field in ("subject_role", "subject_fingerprint", "authorization_id"):
         edited = vote.model_copy(update={field: "implementer"})
         edited._source_sha256 = vote._source_sha256
-        assert not _is_legacy_unprovenanced_approval(edited)
+        # Same file hash: still the pinned record (the hash, not the shape, decides).
+        assert _is_pinned_legacy_approval(edited)
+    other = vote.model_copy(update={"change_id": "chg-other"})
+    other._source_sha256 = vote._source_sha256
+    assert not _is_pinned_legacy_approval(other)
+    rejected = vote.model_copy(update={"decision": "rejected"})
+    rejected._source_sha256 = vote._source_sha256
+    assert not _is_pinned_legacy_approval(rejected)
 
 
 def test_legacy_clause_ignores_timestamps():
@@ -187,4 +194,4 @@ def test_legacy_clause_ignores_timestamps():
         decision="approved",
         decided_at="2026-08-20T22:07:08.455062+00:00",
     )
-    assert not _is_legacy_unprovenanced_approval(vote)
+    assert not _is_pinned_legacy_approval(vote)

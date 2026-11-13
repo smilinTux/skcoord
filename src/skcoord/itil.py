@@ -306,10 +306,18 @@ class CABDecision(BaseModel):
 # rule, which anyone able to write a vote file could satisfy by backdating
 # ``decided_at``, with an explicit pin of the historical votes themselves:
 # (change id, voter, sha256 of the vote file). A pinned vote whose file
-# changes by one byte stops qualifying. No other unprovenanced vote ever
-# qualifies. The first three are the live votes on noroc2027 (2026-11-13); the
-# fourth is chg-a76c0aee's jarvis vote, the verbatim live record kept as the
-# fixture under tests/fixtures/itil-terminal-legacy/.
+# changes by one byte stops qualifying. No other vote without a verifying
+# signed grant ever qualifies. See ``docs/adr/0002-cab-legacy-terminal-lifecycle.md``.
+#
+# The pins were taken read-only from every reachable estate on 2026-11-13
+# (noroc2027 and the chi nodes; the chi trees are identical): exactly the votes
+# whose meaning a terminal or in-flight lifecycle depends on.
+# - noroc2027: chg-11d0e1c7/lumina, chg-a543c87b/lumina, chg-a543c87b/architect.
+# - chi: chg-a76c0aee/jarvis and chg-1dc7aa09/jarvis (pre-upgrade, no
+#   provenance), and Casey's three owner votes on chg-ca4d0ea5, chg-d639f369 and
+#   chg-fe7869b5. Those carry an ``authorization_id`` but the signed envelope was
+#   never stored, so they cannot be re-verified. They keep their history here
+#   only; skcapstone's actuation gates never count a pinned vote.
 _LEGACY_CAB_APPROVALS = frozenset(
     {
         (
@@ -332,20 +340,38 @@ _LEGACY_CAB_APPROVALS = frozenset(
             "jarvis",
             "280bdd51d624d824157169bd21b17a1e60688d2adf2fb441b218eed066ceed20",
         ),
+        (
+            "chg-1dc7aa09",
+            "jarvis",
+            "5b6078afd110bf694fd1f7f1845d02661f28318977ca67dabc05cd8457daac54",
+        ),
+        (
+            "chg-ca4d0ea5",
+            "casimir-andrew-junior:-house-of-kobeszko",
+            "030e3a252952a1b91b6303fa7d19a2813c45f0032919dbce98ea313d0f269290",
+        ),
+        (
+            "chg-d639f369",
+            "casimir-andrew-junior:-house-of-kobeszko",
+            "f1440eac245ba9f6fa07082ebf433bdcc82e52169c7f3fdc8d86e3bca93b41c1",
+        ),
+        (
+            "chg-fe7869b5",
+            "casimir-andrew-junior:-house-of-kobeszko",
+            "148ff29b2097f848ee3cdee0d5c7644d5ec4c7b3b3b02f1335f1707ee0d08f46",
+        ),
     }
 )
 
 
-def _is_legacy_unprovenanced_approval(vote: CABDecision) -> bool:
+def _is_pinned_legacy_approval(vote: CABDecision) -> bool:
     """Return whether *vote* is one of the pinned historical approvals.
 
-    The vote must carry no provenance fields, be an approval, and match an
-    entry of ``_LEGACY_CAB_APPROVALS`` on change id, voter and the sha256 of
-    the file it was read from. A vote not read from disk has no sha and never
-    matches.
+    The vote must be an approval and match an entry of ``_LEGACY_CAB_APPROVALS``
+    on change id, voter and the sha256 of the file it was read from. The file
+    hash fixes every field, provenance included, so no other check is needed. A
+    vote not read from disk has no sha and never matches.
     """
-    if vote.subject_role or vote.subject_fingerprint or vote.authorization_id:
-        return False
     if vote.decision != CABDecisionValue.APPROVED or not vote._source_sha256:
         return False
     return (vote.change_id, vote.agent, vote._source_sha256) in _LEGACY_CAB_APPROVALS
@@ -403,13 +429,13 @@ def _is_human_approval(vote: CABDecision) -> bool:
 
     Qualifying is a verified signed grant from a pinned human approver
     (``_is_authenticated_approval``) or one of the pinned historical approvals
-    (``_is_legacy_unprovenanced_approval``). The operator seat's own identity
+    (``_is_pinned_legacy_approval``). The operator seat's own identity
     never qualifies. A bare ``"human"`` voter, or provenance fields with no
     verifying envelope, is recorded but never counts.
     """
     if _is_operator_identity(vote.agent):
         return False
-    return _is_authenticated_approval(vote) or _is_legacy_unprovenanced_approval(vote)
+    return _is_authenticated_approval(vote) or _is_pinned_legacy_approval(vote)
 
 
 def _counting_rejections(votes: list[CABDecision]) -> list[CABDecision]:
@@ -457,7 +483,7 @@ def _qualifying_approvals(
         key = _identity_key(vote.agent)
         if drafter is not None and key == drafter:
             continue
-        if key in owners and not _is_legacy_unprovenanced_approval(vote):
+        if key in owners and not _is_pinned_legacy_approval(vote):
             continue
         qualifying.append(vote)
     return qualifying

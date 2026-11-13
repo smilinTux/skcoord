@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sys
 
 import pytest
@@ -415,7 +416,35 @@ def test_legacy_pin_holds_exactly_the_known_votes():
         ("chg-a543c87b", "lumina"),
         ("chg-a543c87b", "architect"),
         ("chg-a76c0aee", "jarvis"),
+        ("chg-1dc7aa09", "jarvis"),
+        ("chg-ca4d0ea5", "casimir-andrew-junior:-house-of-kobeszko"),
+        ("chg-d639f369", "casimir-andrew-junior:-house-of-kobeszko"),
+        ("chg-fe7869b5", "casimir-andrew-junior:-house-of-kobeszko"),
     }
+    assert all(re.fullmatch(r"[0-9a-f]{64}", sha) for _, _, sha in _LEGACY_CAB_APPROVALS)
+
+
+def test_pinned_vote_with_unverifiable_provenance_keeps_its_meaning(tmp_path, monkeypatch):
+    """Casey's chi votes carry an authorization id but no stored envelope: the pin
+    keeps their history, and the same fields on an unpinned file prove nothing."""
+    mgr = ITILManager(tmp_path)
+    chg = _change(mgr)
+    payload = json.dumps(
+        {
+            "change_id": chg.id,
+            "agent": "casey",
+            "decision": "approved",
+            "subject_role": "owner",
+            "subject_fingerprint": "B" * 40,
+            "authorization_id": "authz-64c1742ef2aff8624335b0b8",
+        }
+    )
+    sha = _legacy_file(mgr, chg.id, "casey", payload)
+    assert _status(mgr, chg.id) == "proposed"
+    monkeypatch.setattr(
+        "skcoord.itil._LEGACY_CAB_APPROVALS", _LEGACY_CAB_APPROVALS | {(chg.id, "casey", sha)}
+    )
+    assert _status(mgr, chg.id) == "approved"
 
 
 def test_envelope_helper_round_trips():
