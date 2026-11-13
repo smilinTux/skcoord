@@ -22,4 +22,9 @@
   file whose name does not bind the change id and voter inside it, the fold
   drops votes for any other change, and `verify_vote_authorization` takes the
   caller's `change_id=`, so a vote or pinned file copied under another
-  change's name neither approves nor blocks it (card bada5c86).
+  change's name neither approves nor blocks it. A signed decision cannot be
+  rolled back: a voter who holds a signed vote can be replaced only by a signed
+  vote whose grant's `issued_at` is strictly later, and the fold counts, per
+  voter, only the signed vote with the latest `issued_at` (`current_votes`).
+  Voter names are stripped and compared case folded, so one human has one vote
+  slot (card bada5c86).

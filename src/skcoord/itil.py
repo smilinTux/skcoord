@@ -473,6 +473,43 @@ def _counting_rejections(votes: list[CABDecision]) -> list[CABDecision]:
     ]
 
 
+def _signed_issued_at(vote: CABDecision) -> Optional[datetime]:
+    """The ``issued_at`` of *vote*'s stored grant (covered by its signature), or None."""
+    envelope = getattr(vote, "authorization", None)
+    if not isinstance(envelope, dict):
+        return None
+    try:
+        issued = datetime.fromisoformat(str(envelope.get("issued_at")).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return issued if issued.tzinfo is not None else None
+
+
+def current_votes(votes: list[CABDecision]) -> list[CABDecision]:
+    """Each voter's current vote: one slot per human (card bada5c86).
+
+    Voters are compared by ``identity_key`` (whitespace stripped, case folded). For a
+    voter with at least one verified signed vote, only the signed vote with the latest
+    signed ``issued_at`` counts (a rejection wins a tie), and that voter's unsigned
+    votes are dropped: an older grant written back under another file name cannot
+    undo a later decision. Votes of voters with no signed vote are kept as they are.
+    """
+    signed: dict[str, tuple[tuple[datetime, bool], CABDecision]] = {}
+    unsigned: list[CABDecision] = []
+    for vote in votes:
+        issued = _signed_issued_at(vote) if _is_authenticated_vote(vote) else None
+        if issued is None:
+            unsigned.append(vote)
+            continue
+        key = _identity_key(vote.agent)
+        rank = (issued, vote.decision == CABDecisionValue.REJECTED)
+        if key not in signed or rank > signed[key][0]:
+            signed[key] = (rank, vote)
+    return [vote for _rank, vote in signed.values()] + [
+        vote for vote in unsigned if _identity_key(vote.agent) not in signed
+    ]
+
+
 def _blocker_label(vote: CABDecision) -> str:
     """How a blocking rejection is named in the timeline: voter plus signed or unsigned.
 
@@ -1148,7 +1185,7 @@ class ITILManager:
         # Card bada5c86: only votes bound to THIS change count. The change id is
         # the folded record's, never one read from a vote file, so a vote copied
         # under another change's name drops out here.
-        votes = votes_for_change(core.get("id", ""), votes)
+        votes = current_votes(votes_for_change(core.get("id", ""), votes))
         change_type = core.get("change_type", "normal")
         status = "proposed"
         timeline: list[dict[str, Any]] = []
@@ -2054,7 +2091,8 @@ class ITILManager:
             identity: ``subject`` if given, else ``agent``).
         """
         self.ensure_dirs()
-        voter = subject if subject else agent
+        # One vote slot per human: surrounding whitespace is not part of a name.
+        voter = (subject if subject else agent).strip()
         if subject_role and subject_role not in {"owner", "operator", "approver", "implementer"}:
             raise ValueError(f"unsupported CAB subject role: {subject_role!r}")
         if subject_role in {"owner", "approver"} and not subject:
@@ -2075,18 +2113,41 @@ class ITILManager:
         )
         filename = f"{change_id}-{voter}.json"
         path = self.cab_dir / filename
-        if path.exists() and not _is_authenticated_vote(vote):
-            try:
-                existing = CABDecision.model_validate_json(path.read_text(encoding="utf-8"))
-            except Exception:  # noqa: BLE001 - an unreadable file holds no signed vote
-                existing = None
-            if existing is not None and _is_authenticated_vote(existing):
-                raise ValueError(
-                    f"refusing to replace the authenticated CAB vote of {voter!r} on "
-                    f"{change_id} with an unauthenticated one"
-                )
+        self._refuse_rollback(change_id, voter, vote)
         atomic_write_text(path, json.dumps(vote.model_dump(), indent=2, default=str) + "\n")
         return vote
+
+    def _refuse_rollback(self, change_id: str, voter: str, vote: CABDecision) -> None:
+        """Raise ``ValueError`` unless *vote* may take *voter*'s slot on *change_id*.
+
+        When the voter (compared by ``identity_key``, across every file name) already
+        holds a verified signed vote, the new vote must also be signed and its grant's
+        signed ``issued_at`` must be strictly later than every one held. Otherwise an
+        unsigned vote, or a replayed older grant (an approval Chef has since revoked
+        with a signed rejection), could roll the decision back (card bada5c86).
+        """
+        key = _identity_key(voter)
+        held = [
+            existing
+            for existing in self.get_cab_votes(change_id)
+            if _identity_key(existing.agent) == key and _is_authenticated_vote(existing)
+        ]
+        if not held:
+            return
+        if not _is_authenticated_vote(vote):
+            raise ValueError(
+                f"refusing to replace the authenticated CAB vote of {voter!r} on "
+                f"{change_id} with an unauthenticated one"
+            )
+        times = [t for t in (_signed_issued_at(v) for v in held) if t is not None]
+        newest = max(times) if times else None
+        issued = _signed_issued_at(vote)
+        if issued is None or newest is None or issued <= newest:
+            raise ValueError(
+                f"refusing to replace the authenticated CAB vote of {voter!r} on "
+                f"{change_id}: the new grant was issued at {issued and issued.isoformat()}, "
+                f"not after the one held ({newest and newest.isoformat()})"
+            )
 
     def get_cab_votes(self, change_id: str) -> list[CABDecision]:
         """Get all CAB votes for a change."""

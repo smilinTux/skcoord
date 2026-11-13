@@ -77,10 +77,10 @@ def identity_key(identity: Any) -> str:
     ``chef``, ``Chef``, ``capauth:chef@skworld.io`` and ``chef@chef.skworld.io``
     all compare equal.
     """
-    key = str(identity or "").strip().lower()
+    key = str(identity or "").strip().casefold()
     if key.startswith("capauth:"):
         key = key[len("capauth:") :]
-    return key.split("@", 1)[0]
+    return key.split("@", 1)[0].strip()
 
 
 def signing_bytes(envelope: dict) -> bytes:
