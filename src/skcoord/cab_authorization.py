@@ -132,8 +132,20 @@ def _signature_ok(backend: str, fingerprint: str, data: bytes, signature: str, a
         return False
 
 
-def verify_vote_authorization(vote: Any, approvers: dict[str, dict] | None = None) -> bool:
-    """Whether *vote* carries a stored grant that verifies against a pinned approver."""
+def verify_vote_authorization(
+    vote: Any,
+    approvers: dict[str, dict] | None = None,
+    *,
+    change_id: str | None = None,
+) -> bool:
+    """Whether *vote* carries a stored grant that verifies against a pinned approver.
+
+    *change_id*, when given, is the change being folded or gated, supplied by
+    the caller: the vote and its envelope must both bind it, so a grant copied
+    from another change's vote file does not verify.
+    """
+    if change_id is not None and getattr(vote, "change_id", None) != change_id:
+        return False
     envelope = getattr(vote, "authorization", None)
     if not isinstance(envelope, dict) or set(envelope) != ENVELOPE_FIELDS:
         return False

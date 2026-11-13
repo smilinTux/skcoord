@@ -364,13 +364,31 @@ _LEGACY_CAB_APPROVALS = frozenset(
 )
 
 
+def vote_file_matches(filename: str, change_id: str, vote: CABDecision) -> bool:
+    """Whether a vote file's name binds the change and voter recorded inside it.
+
+    A vote is written to ``<change_id>-<voter>.json``. The file must sit under
+    the change being read (*change_id*, from the caller), the change id inside it
+    must be that change, and the voter in the name must be the vote's ``agent``.
+    """
+    return vote.change_id == change_id and filename == f"{change_id}-{vote.agent}.json"
+
+
+def votes_for_change(change_id: str, votes: list[CABDecision]) -> list[CABDecision]:
+    """The votes whose change id is *change_id* (the change being folded or gated)."""
+    return [v for v in votes if change_id and v.change_id == change_id]
+
+
 def _is_pinned_legacy_approval(vote: CABDecision) -> bool:
     """Return whether *vote* is one of the pinned historical approvals.
 
     The vote must be an approval and match an entry of ``_LEGACY_CAB_APPROVALS``
     on change id, voter and the sha256 of the file it was read from. The file
-    hash fixes every field, provenance included, so no other check is needed. A
-    vote not read from disk has no sha and never matches.
+    hash fixes the fields inside it; the change id and voter it is matched on
+    are bound to the file's name and the change being folded by
+    ``get_cab_votes`` and ``votes_for_change``, so a pinned file copied under
+    another change never matches. A vote not read from disk has no sha and
+    never matches.
     """
     if vote.decision != CABDecisionValue.APPROVED or not vote._source_sha256:
         return False
@@ -1127,6 +1145,10 @@ class ITILManager:
         fold-time derivations (no writer ever mutates the change record for
         them), reproducing the old ``_evaluate_cab`` logic exactly.
         """
+        # Card bada5c86: only votes bound to THIS change count. The change id is
+        # the folded record's, never one read from a vote file, so a vote copied
+        # under another change's name drops out here.
+        votes = votes_for_change(core.get("id", ""), votes)
         change_type = core.get("change_type", "normal")
         status = "proposed"
         timeline: list[dict[str, Any]] = []
@@ -2076,9 +2098,15 @@ class ITILManager:
                 raw = f.read_bytes()
                 vote = CABDecision.model_validate(json.loads(raw.decode("utf-8")))
                 vote._source_sha256 = hashlib.sha256(raw).hexdigest()
-                votes.append(vote)
             except (json.JSONDecodeError, Exception):
                 continue
+            # Card bada5c86: a vote counts only under the name it was written
+            # to. A file copied under another change's or another voter's name
+            # (the change id or voter inside differs from the one in the
+            # filename) is ignored, so it can neither approve nor block.
+            if not vote_file_matches(f.name, change_id, vote):
+                continue
+            votes.append(vote)
         return votes
 
     # ── KEDB ──────────────────────────────────────────────────────────
