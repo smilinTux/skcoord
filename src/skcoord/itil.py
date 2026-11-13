@@ -412,6 +412,23 @@ def _is_human_approval(vote: CABDecision) -> bool:
     return _is_authenticated_approval(vote) or _is_legacy_unprovenanced_approval(vote)
 
 
+def _counting_rejections(votes: list[CABDecision]) -> list[CABDecision]:
+    """The rejections that block a change (card bada5c86).
+
+    A rejection by a named voter always blocks, signed grant or not: a veto is
+    fail-safe. A rejection whose voter is a placeholder (``human``, ``unknown``,
+    an empty label: what a caller writes when it has no identity) is recorded but
+    does not count, so an anonymous caller cannot flip a change's status either
+    way.
+    """
+    return [
+        v
+        for v in votes
+        if v.decision == CABDecisionValue.REJECTED
+        and _identity_key(v.agent) not in _PLACEHOLDER_VOTERS
+    ]
+
+
 def _qualifying_approvals(
     votes: list[CABDecision],
     *,
@@ -549,10 +566,10 @@ def _cab_resolved_status(
         and core.get("created_by") == "operator"
         and core.get("risk", "medium") != "high"
         and (core.get("rollback_plan") or "").strip()
-        and not any(v.decision == CABDecisionValue.REJECTED for v in votes)
+        and not _counting_rejections(votes)
     ):
         return "approved"
-    rejections = [v for v in votes if v.decision == CABDecisionValue.REJECTED]
+    rejections = _counting_rejections(votes)
     if rejections:
         return "rejected"
     if _qualifying_approvals(
@@ -1389,7 +1406,7 @@ class ITILManager:
             and core.get("created_by") == "operator"
             and core.get("risk", "medium") != "high"
             and (core.get("rollback_plan") or "").strip()
-            and not any(v.decision == CABDecisionValue.REJECTED for v in votes)
+            and not _counting_rejections(votes)
         ):
             status = "approved"
             timeline.append(
@@ -1415,7 +1432,7 @@ class ITILManager:
         # record that predates this card) the filter is a no-op, preserving
         # the fold-invariance guarantee.
         if status in ("proposed", "reviewing") and votes:
-            rejections = [v for v in votes if v.decision == CABDecisionValue.REJECTED]
+            rejections = _counting_rejections(votes)
             approvals = _qualifying_approvals(
                 votes,
                 prepared_by=prepared_by,

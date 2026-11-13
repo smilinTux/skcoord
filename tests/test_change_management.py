@@ -376,9 +376,10 @@ def test_no_self_approval_drafters_reject_still_blocks(tmp_path):
     mgr = ITILManager(tmp_path)
     chg = mgr.propose_change(title="self drafted reject", change_type="normal", managed_by="lumina")
     mgr._append_event(
-        mgr.changes_dir, chg.id, "human", "pr_link", url="https://x/pull/9", run_id="run-9"
+        mgr.changes_dir, chg.id, "lumina", "pr_link", url="https://x/pull/9", run_id="run-9"
     )
-    mgr.submit_cab_vote(chg.id, agent="human", decision="rejected", subject="human")
+    # Card bada5c86: a named drafter (a placeholder's veto no longer counts).
+    mgr.submit_cab_vote(chg.id, agent="lumina", decision="rejected", subject="lumina")
     folded = mgr.list_changes()[0]
     assert folded.status.value == "rejected"
 

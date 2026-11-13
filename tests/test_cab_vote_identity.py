@@ -263,6 +263,29 @@ def test_disqualified_rejection_still_blocks(tmp_path):
     assert _status(mgr, chg.id) == "rejected"
 
 
+@pytest.mark.parametrize("placeholder", sorted(_PLACEHOLDER_VOTERS))
+def test_placeholder_rejection_is_recorded_but_does_not_change_status(tmp_path, placeholder):
+    """An anonymous veto is stored, yet flips nothing: a placeholder names no one."""
+    mgr = ITILManager(tmp_path)
+    chg = _change(mgr)
+    mgr.submit_cab_vote(chg.id, agent=placeholder, decision="rejected")
+    assert any(v.decision.value == "rejected" for v in mgr.get_cab_votes(chg.id))
+    assert _status(mgr, chg.id) == "proposed"
+    mgr.submit_cab_vote(chg.id, **signed_vote(chg.id))
+    assert _status(mgr, chg.id) == "approved"
+
+
+def test_placeholder_rejection_does_not_block_auto_normal(tmp_path):
+    mgr = ITILManager(tmp_path)
+    chg = _change(
+        mgr, created_by="operator", tags=["auto-normal"], risk="low", rollback_plan="revert"
+    )
+    mgr.submit_cab_vote(chg.id, agent="human", decision="rejected")
+    assert _status(mgr, chg.id) == "approved"
+    mgr.submit_cab_vote(chg.id, agent="architect", decision="rejected")
+    assert _status(mgr, chg.id) != "approved"
+
+
 def test_creator_vote_cannot_gate_a_mid_fold_transition(tmp_path):
     """`_cab_resolved_status` applies the same exclusions as the post-loop block."""
     mgr = ITILManager(tmp_path)

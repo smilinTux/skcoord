@@ -172,7 +172,8 @@ def test_rejected_to_closed_does_not_require_a_note(tmp_path):
     is."""
     mgr = ITILManager(tmp_path)
     chg = mgr.propose_change(title="reject me", change_type="normal", managed_by="lumina")
-    mgr.submit_cab_vote(chg.id, agent="human", decision="rejected")
+    # Card bada5c86: a named voter's veto; a placeholder's no longer counts.
+    mgr.submit_cab_vote(chg.id, agent="chef", decision="rejected")
     assert mgr.list_changes()[0].status.value == "rejected"
 
     mgr.update_change(chg.id, "human", new_status="closed")
