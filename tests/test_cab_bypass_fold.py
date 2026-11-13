@@ -30,6 +30,17 @@ import pytest
 
 from skcoord.itil import ITILManager
 
+# A qualifying approval carries authenticated provenance (card bada5c86): a bare
+# agent="human" vote is recorded but never counts.
+AUTHENTICATED_APPROVAL = dict(
+    agent="chef",
+    decision="approved",
+    subject="chef",
+    subject_role="owner",
+    subject_fingerprint="A" * 40,
+    authorization_id="authz-test",
+)
+
 
 @pytest.fixture(autouse=True)
 def _no_skcapstone_module_leak():
@@ -73,7 +84,7 @@ def test_qualifying_cab_vote_still_approves(mgr):
     """Non-regression: the legitimate CAB route is untouched."""
     chg = mgr.propose_change(title="legit change", created_by="lumina")
 
-    mgr.submit_cab_vote(chg.id, agent="human", decision="approved")
+    mgr.submit_cab_vote(chg.id, **AUTHENTICATED_APPROVAL)
 
     assert mgr.list_changes()[0].status.value == "approved"
 
@@ -88,7 +99,7 @@ def test_standard_change_auto_approve_still_works(mgr):
 def test_approved_to_implementing_still_works(mgr):
     """Non-regression: the guard must not strand a properly approved change."""
     chg = mgr.propose_change(title="legit", created_by="lumina")
-    mgr.submit_cab_vote(chg.id, agent="human", decision="approved")
+    mgr.submit_cab_vote(chg.id, **AUTHENTICATED_APPROVAL)
 
     folded = mgr.update_change(
         chg.id, agent="lumina", new_status="implementing", note="go"

@@ -330,20 +330,108 @@ def _is_legacy_unprovenanced_approval(vote: CABDecision) -> bool:
     return decided < datetime.fromisoformat(_LEGACY_CAB_PROVENANCE_CUTOFF)
 
 
-def _is_human_approval(vote: CABDecision) -> bool:
-    """Return whether a vote carries a qualifying human approval role.
+# Identities that are never a human approver (card bada5c86). The ATLAS
+# operator seat runs as ``SKAGENT=operator`` and writes ledger entries as
+# ``atlas``; a device seat (``device:<hex>``, formerly ``operator:<hex>``) is a
+# machine by construction. Matched on the local part, so every spelling of the
+# same identity (``operator``, ``capauth:operator@skworld.io``,
+# ``operator@chef.skworld.io``) is excluded alike.
+_OPERATOR_IDENTITY_NAMES = frozenset({"operator", "atlas"})
+_MACHINE_SUBJECT_PREFIXES = ("device:", "operator:")
+# Labels that name no one: what a caller writes when it has no identity.
+_PLACEHOLDER_VOTERS = frozenset({"", "human", "unattributed", "unknown"})
+_HUMAN_APPROVER_ROLES = frozenset({"owner", "approver"})
 
-    Qualifying is an authenticated human identity (``agent == "human"``), an
-    authenticated human role (``owner``/``approver``), or - under the
-    pre-provenance compatibility rule - a historical unprovenanced approval
-    decided before ``_LEGACY_CAB_PROVENANCE_CUTOFF``. The legacy clause only
-    re-honors votes that already exist in historical records; no vote written
-    after the cutoff can satisfy it, so new changes still require
-    authenticated provenance.
+
+def _identity_key(identity: Optional[str]) -> str:
+    """Spelling-independent comparison key for an identity: its lowercase local part.
+
+    ``chef``, ``Chef``, ``capauth:chef@skworld.io`` and ``chef@chef.skworld.io``
+    all compare equal. Used only to EXCLUDE votes, so a collision can only make an
+    approval not count, never make one count.
     """
-    if vote.agent == "human" or vote.subject_role in {"owner", "approver"}:
-        return True
-    return _is_legacy_unprovenanced_approval(vote)
+    key = str(identity or "").strip().lower()
+    if key.startswith("capauth:"):
+        key = key[len("capauth:") :]
+    return key.split("@", 1)[0]
+
+
+def _is_operator_identity(identity: Optional[str]) -> bool:
+    """Whether *identity* is the operator seat's own (or a device seat's)."""
+    key = _identity_key(identity)
+    return key in _OPERATOR_IDENTITY_NAMES or key.startswith(_MACHINE_SUBJECT_PREFIXES)
+
+
+def _is_authenticated_approval(vote: CABDecision) -> bool:
+    """Whether *vote* carries authenticated human provenance (card bada5c86).
+
+    All of: a human approver role (``owner``/``approver``), the signer's key
+    fingerprint, the id of the signed authorization it was verified against, and a
+    voter that names someone (not a placeholder such as ``human``). These fields
+    are written only after a signed CapAuth authorization verifies (skcapstone
+    ``itil cab vote --authorization``); a role a caller merely asserted, with no
+    fingerprint or authorization, is not authentication.
+    """
+    return (
+        vote.subject_role in _HUMAN_APPROVER_ROLES
+        and bool(vote.subject_fingerprint)
+        and bool(vote.authorization_id)
+        and _identity_key(vote.agent) not in _PLACEHOLDER_VOTERS
+    )
+
+
+def _is_human_approval(vote: CABDecision) -> bool:
+    """Return whether a vote carries a qualifying human approval identity.
+
+    Qualifying is authenticated human provenance (``_is_authenticated_approval``)
+    or, under the pre-provenance compatibility rule, a historical unprovenanced
+    approval decided before ``_LEGACY_CAB_PROVENANCE_CUTOFF``. The operator
+    seat's own identity never qualifies.
+
+    Card bada5c86: the literal voter ``"human"`` no longer qualifies on its own.
+    It is exactly what the skcapstone MCP tool recorded when CapAuth resolution
+    failed, so it proved nothing. Such a vote is still recorded; it never counts.
+    The legacy clause only re-honors votes that already exist in historical
+    records; no vote written after the cutoff can satisfy it.
+    """
+    if _is_operator_identity(vote.agent):
+        return False
+    return _is_authenticated_approval(vote) or _is_legacy_unprovenanced_approval(vote)
+
+
+def _qualifying_approvals(
+    votes: list[CABDecision],
+    *,
+    prepared_by: Optional[str],
+    created_by: Optional[str] = "",
+    managed_by: Optional[str] = "",
+) -> list[CABDecision]:
+    """The APPROVE votes that count toward a change's CAB approval.
+
+    A vote counts when it is a human approval (``_is_human_approval``) and its
+    voter is not the change's drafter (``prepared_by``, change-mgmt P1.4), its
+    creator or its ``managed_by`` owner (card bada5c86). Identities are compared
+    with ``_identity_key``.
+
+    A historical pre-cutoff approval keeps the meaning it had when it was
+    written: the creator and managed-by exclusions did not exist then, and those
+    changes completed their lifecycles under that regime, so they are not
+    applied to it (the drafter exclusion is, as before). No vote written today
+    can be a legacy vote.
+    """
+    drafter = _identity_key(prepared_by) if prepared_by else None
+    owners = {_identity_key(x) for x in (created_by, managed_by) if x}
+    qualifying = []
+    for vote in votes:
+        if vote.decision != CABDecisionValue.APPROVED or not _is_human_approval(vote):
+            continue
+        key = _identity_key(vote.agent)
+        if drafter is not None and key == drafter:
+            continue
+        if key in owners and not _is_legacy_unprovenanced_approval(vote):
+            continue
+        qualifying.append(vote)
+    return qualifying
 
 
 # ---------------------------------------------------------------------------
@@ -419,9 +507,11 @@ def _cab_resolved_status(
     and its exact wording, duplicating these same conditions (kept in sync
     by hand; see that block's comments).
 
-    No-self-approval (change-mgmt P1.4): an APPROVE vote whose voter equals
-    *prepared_by* is excluded here exactly as it is in the post-loop block,
-    so a drafter's self-approval can never gate a mid-fold transition either.
+    No-self-approval (change-mgmt P1.4, widened by card bada5c86): approvals
+    are filtered by ``_qualifying_approvals`` here exactly as in the post-loop
+    block, so a vote by the drafter, creator, managed-by owner or the operator
+    seat, or one without authenticated provenance, can never gate a mid-fold
+    transition either.
 
     Args:
         status: The loop's current status at this point in the replay.
@@ -453,10 +543,12 @@ def _cab_resolved_status(
     rejections = [v for v in votes if v.decision == CABDecisionValue.REJECTED]
     if rejections:
         return "rejected"
-    approvals = [
-        v for v in votes if v.decision == CABDecisionValue.APPROVED and v.agent != prepared_by
-    ]
-    if any(_is_human_approval(v) for v in approvals):
+    if _qualifying_approvals(
+        votes,
+        prepared_by=prepared_by,
+        created_by=core.get("created_by"),
+        managed_by=core.get("managed_by"),
+    ):
         return "approved"
     return status
 
@@ -1327,7 +1419,12 @@ class ITILManager:
                         "note": "Rejected by: " + ", ".join(v.agent for v in rejections),
                     }
                 )
-            elif any(_is_human_approval(v) for v in approvals):
+            elif _qualifying_approvals(
+                votes,
+                prepared_by=prepared_by,
+                created_by=core.get("created_by"),
+                managed_by=core.get("managed_by"),
+            ):
                 status = "approved"
                 timeline.append(
                     {
@@ -1845,6 +1942,11 @@ class ITILManager:
         expected of it - it only ever records what the caller explicitly
         binds. Leaving ``subject`` unset keeps today's free-text behavior for
         direct/legacy callers (CLI, tests), so this is a non-breaking addition.
+
+        Card bada5c86: recording is not qualifying. A vote without
+        authenticated provenance (role, fingerprint and authorization id) is
+        stored as given but never counts as an approval; see
+        ``_qualifying_approvals``.
 
         Args:
             change_id: The change record this vote applies to.

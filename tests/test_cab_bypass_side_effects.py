@@ -25,6 +25,17 @@ import pytest
 
 from skcoord.itil import ITILManager
 
+# A qualifying approval carries authenticated provenance (card bada5c86): a bare
+# agent="human" vote is recorded but never counts.
+AUTHENTICATED_APPROVAL = dict(
+    agent="chef",
+    decision="approved",
+    subject="chef",
+    subject_role="owner",
+    subject_fingerprint="A" * 40,
+    authorization_id="authz-test",
+)
+
 
 @pytest.fixture(autouse=True)
 def _no_skcapstone_module_leak():
@@ -80,7 +91,7 @@ def test_refused_approval_publishes_nothing_and_emits_no_gtd_task(mgr):
 def test_legitimate_cab_approval_still_publishes_and_emits(mgr):
     """Positive control: the fix must not be 'switch the side effects off'."""
     chg = mgr.propose_change(title="legit", created_by="lumina", implementer="lumina")
-    mgr.submit_cab_vote(chg.id, agent="human", decision="approved")
+    mgr.submit_cab_vote(chg.id, **AUTHENTICATED_APPROVAL)
     mgr.published.clear()
 
     folded = mgr.update_change(chg.id, agent="human", new_status="approved", note="CAB ok")
@@ -149,7 +160,7 @@ def test_reapproving_an_already_approved_change_emits_no_second_task(mgr):
     for one approval.
     """
     chg = mgr.propose_change(title="legit", created_by="lumina", implementer="lumina")
-    mgr.submit_cab_vote(chg.id, agent="human", decision="approved")
+    mgr.submit_cab_vote(chg.id, **AUTHENTICATED_APPROVAL)
     mgr.update_change(chg.id, agent="human", new_status="approved", note="CAB ok")
 
     assert mgr.gtd_texts == [f"[ITIL:{chg.id}] Implement: legit"], "precondition: the real one"
@@ -174,7 +185,7 @@ def test_refused_approval_does_not_block_a_later_real_approval(mgr):
     mgr.update_change(chg.id, agent="attacker", new_status="approved", note="no vote cast")
     assert mgr.gtd_texts == [], "precondition: the bypass attempt emitted nothing"
 
-    mgr.submit_cab_vote(chg.id, agent="human", decision="approved")
+    mgr.submit_cab_vote(chg.id, **AUTHENTICATED_APPROVAL)
     mgr.published.clear()
 
     folded = mgr.update_change(chg.id, agent="human", new_status="approved", note="CAB ok")
