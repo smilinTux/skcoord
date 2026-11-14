@@ -31,3 +31,15 @@ def _reset_fold_warning_cache():
     yield
     card_module._WARNED_LINES.clear()
     card_module._WARNED_SUMMARIES.clear()
+
+
+@pytest.fixture(autouse=True)
+def _pinned_test_approver(tmp_path_factory, monkeypatch):
+    """Pin the test approver key (card bada5c86); never read the operator's pin."""
+    import cab_grants
+
+    import skcoord.cab_authorization as cab_authorization
+
+    path = tmp_path_factory.mktemp("pin") / "cab-approvers.json"
+    cab_grants.pin_file(path)
+    monkeypatch.setattr(cab_authorization, "APPROVERS_FILE", path)

@@ -36,9 +36,10 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 
 from .atomic_io import atomic_write_text
+from .cab_authorization import identity_key, verify_vote_authorization
 
 logger = logging.getLogger("skcapstone.itil")
 
@@ -287,63 +288,269 @@ class CABDecision(BaseModel):
     decision: CABDecisionValue = CABDecisionValue.ABSTAIN
     conditions: str = ""
     decided_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    #: The signed CapAuth authorization envelope this vote was cast under, stored
+    #: verbatim so the fold can re-verify it (card bada5c86). None for a vote cast
+    #: without one; such a vote is recorded but never qualifies.
+    authorization: Optional[dict[str, Any]] = None
+    #: sha256 of the vote file as read from disk (set by ``get_cab_votes``).
+    _source_sha256: str = PrivateAttr(default="")
 
 
 # ── CAB provenance compatibility (terminal-lifecycle preservation) ─────────
 #
 # Votes recorded before the authenticated-provenance upgrade (commit 63a18b2,
-# "bind CAB approval to authenticated human roles", 2026-08-20) carry no
-# subject_role/subject_fingerprint/authorization_id. Changes approved under
-# that pre-upgrade regime completed their lifecycle (deployed -> verified ->
-# closed) through votes and status events that were valid at write time; the
-# upgrade then demoted those already-terminal records back to `reviewing` at
-# fold time (chg-a76c0aee, chg-1dc7aa09). The cutoff below is the
-# compatibility boundary: an unprovenanced approval vote decided BEFORE it is
-# honored as a historical human approval; anything at or after it must carry
-# authenticated provenance. The cutoff is a fixed past timestamp, so a vote
-# written through submit_cab_vote() - whose decided_at is always the
-# wall-clock now - can never qualify, and the raw `status -> approved` bypass
-# guard is untouched (it stays fail-closed for every live event). Backdating
-# decided_at requires direct write access to the cab-decisions tree, the same
-# accepted threat level as forging node="migrated" on a replayed event.
-_LEGACY_CAB_PROVENANCE_CUTOFF = "2026-08-21T00:00:00+00:00"
+# 2026-08-20) carry no provenance. Changes approved under that regime
+# completed their lifecycle through votes that were valid at write time.
+#
+# Card bada5c86 replaced the earlier "decided before 2026-08-21" timestamp
+# rule, which anyone able to write a vote file could satisfy by backdating
+# ``decided_at``, with an explicit pin of the historical votes themselves:
+# (change id, voter, sha256 of the vote file). A pinned vote whose file
+# changes by one byte stops qualifying. No other vote without a verifying
+# signed grant ever qualifies. See ``docs/adr/0002-cab-legacy-terminal-lifecycle.md``.
+#
+# The pins were taken read-only from every reachable estate on 2026-11-13
+# (noroc2027 and the chi nodes; the chi trees are identical): exactly the votes
+# whose meaning a terminal or in-flight lifecycle depends on.
+# - noroc2027: chg-11d0e1c7/lumina, chg-a543c87b/lumina, chg-a543c87b/architect.
+# - chi: chg-a76c0aee/jarvis and chg-1dc7aa09/jarvis (pre-upgrade, no
+#   provenance), and Casey's three owner votes on chg-ca4d0ea5, chg-d639f369 and
+#   chg-fe7869b5. Those carry an ``authorization_id`` but the signed envelope was
+#   never stored, so they cannot be re-verified. They keep their history here
+#   only; skcapstone's actuation gates never count a pinned vote.
+_LEGACY_CAB_APPROVALS = frozenset(
+    {
+        (
+            "chg-11d0e1c7",
+            "lumina",
+            "4461e3beb07fdef9047a1c93cb0847ef498c6752033578938d98959d8b3d030e",
+        ),
+        (
+            "chg-a543c87b",
+            "lumina",
+            "bbe5fa6c6771f4232ec38135b10610b079067cc916c60ee0a6a8ec972bd38439",
+        ),
+        (
+            "chg-a543c87b",
+            "architect",
+            "6271a73905b16378fe01d55ed9267ab6d3501cc400c1cb5c6e8d8781701fec07",
+        ),
+        (
+            "chg-a76c0aee",
+            "jarvis",
+            "280bdd51d624d824157169bd21b17a1e60688d2adf2fb441b218eed066ceed20",
+        ),
+        (
+            "chg-1dc7aa09",
+            "jarvis",
+            "5b6078afd110bf694fd1f7f1845d02661f28318977ca67dabc05cd8457daac54",
+        ),
+        (
+            "chg-ca4d0ea5",
+            "casimir-andrew-junior:-house-of-kobeszko",
+            "030e3a252952a1b91b6303fa7d19a2813c45f0032919dbce98ea313d0f269290",
+        ),
+        (
+            "chg-d639f369",
+            "casimir-andrew-junior:-house-of-kobeszko",
+            "f1440eac245ba9f6fa07082ebf433bdcc82e52169c7f3fdc8d86e3bca93b41c1",
+        ),
+        (
+            "chg-fe7869b5",
+            "casimir-andrew-junior:-house-of-kobeszko",
+            "148ff29b2097f848ee3cdee0d5c7644d5ec4c7b3b3b02f1335f1707ee0d08f46",
+        ),
+    }
+)
 
 
-def _is_legacy_unprovenanced_approval(vote: CABDecision) -> bool:
-    """Return whether *vote* is a pre-provenance historical approval.
+def vote_file_matches(filename: str, change_id: str, vote: CABDecision) -> bool:
+    """Whether a vote file's name binds the change and voter recorded inside it.
 
-    Schema-derived compatibility rule: all three authenticated provenance
-    fields must be empty (the pre-upgrade record shape) and ``decided_at``
-    must be a timezone-aware timestamp strictly before
-    ``_LEGACY_CAB_PROVENANCE_CUTOFF``. Unparseable or naive timestamps fail
-    closed. See the constant's comment above for the full rationale and
-    threat analysis.
+    A vote is written to ``<change_id>-<voter>.json``. The file must sit under
+    the change being read (*change_id*, from the caller), the change id inside it
+    must be that change, and the voter in the name must be the vote's ``agent``.
     """
-    if vote.subject_role or vote.subject_fingerprint or vote.authorization_id:
+    return vote.change_id == change_id and filename == f"{change_id}-{vote.agent}.json"
+
+
+def votes_for_change(change_id: str, votes: list[CABDecision]) -> list[CABDecision]:
+    """The votes whose change id is *change_id* (the change being folded or gated)."""
+    return [v for v in votes if change_id and v.change_id == change_id]
+
+
+def _is_pinned_legacy_approval(vote: CABDecision) -> bool:
+    """Return whether *vote* is one of the pinned historical approvals.
+
+    The vote must be an approval and match an entry of ``_LEGACY_CAB_APPROVALS``
+    on change id, voter and the sha256 of the file it was read from. The file
+    hash fixes the fields inside it; the change id and voter it is matched on
+    are bound to the file's name and the change being folded by
+    ``get_cab_votes`` and ``votes_for_change``, so a pinned file copied under
+    another change never matches. A vote not read from disk has no sha and
+    never matches.
+    """
+    if vote.decision != CABDecisionValue.APPROVED or not vote._source_sha256:
         return False
-    try:
-        decided = datetime.fromisoformat(vote.decided_at)
-    except (TypeError, ValueError):
+    return (vote.change_id, vote.agent, vote._source_sha256) in _LEGACY_CAB_APPROVALS
+
+
+# Identities that are never a human approver (card bada5c86). The ATLAS
+# operator seat runs as ``SKAGENT=operator`` and writes ledger entries as
+# ``atlas``; a device seat (``device:<hex>``, formerly ``operator:<hex>``) is a
+# machine by construction. Matched on the local part, so every spelling of the
+# same identity (``operator``, ``capauth:operator@skworld.io``,
+# ``operator@chef.skworld.io``) is excluded alike.
+_OPERATOR_IDENTITY_NAMES = frozenset({"operator", "atlas"})
+_MACHINE_SUBJECT_PREFIXES = ("device:", "operator:")
+# Labels that name no one: what a caller writes when it has no identity.
+_PLACEHOLDER_VOTERS = frozenset({"", "human", "unattributed", "unknown"})
+_HUMAN_APPROVER_ROLES = frozenset({"owner", "approver"})
+
+
+def _identity_key(identity: Optional[str]) -> str:
+    """Spelling-independent comparison key: lowercase local part (see ``identity_key``).
+
+    Used only to EXCLUDE votes, so a collision can only make an approval not
+    count, never make one count.
+    """
+    return identity_key(identity)
+
+
+def _is_operator_identity(identity: Optional[str]) -> bool:
+    """Whether *identity* is the operator seat's own (or a device seat's)."""
+    key = _identity_key(identity)
+    return key in _OPERATOR_IDENTITY_NAMES or key.startswith(_MACHINE_SUBJECT_PREFIXES)
+
+
+def _is_authenticated_vote(vote: CABDecision) -> bool:
+    """Whether *vote* carries a stored signed grant that verifies (card bada5c86).
+
+    The stored envelope must verify against a PINNED human approver key
+    (``skcoord.cab_authorization``) and bind this change, this decision, this
+    role, issuer and fingerprint; the voter must name a person, not a
+    placeholder such as ``human``. Non-empty provenance fields alone prove
+    nothing: any caller can write them.
+    """
+    if _identity_key(vote.agent) in _PLACEHOLDER_VOTERS:
         return False
-    if decided.tzinfo is None:
-        return False
-    return decided < datetime.fromisoformat(_LEGACY_CAB_PROVENANCE_CUTOFF)
+    return verify_vote_authorization(vote)
+
+
+def _is_authenticated_approval(vote: CABDecision) -> bool:
+    """Whether *vote* is an approval with verified human provenance."""
+    return vote.decision == CABDecisionValue.APPROVED and _is_authenticated_vote(vote)
 
 
 def _is_human_approval(vote: CABDecision) -> bool:
-    """Return whether a vote carries a qualifying human approval role.
+    """Return whether a vote carries a qualifying human approval identity.
 
-    Qualifying is an authenticated human identity (``agent == "human"``), an
-    authenticated human role (``owner``/``approver``), or - under the
-    pre-provenance compatibility rule - a historical unprovenanced approval
-    decided before ``_LEGACY_CAB_PROVENANCE_CUTOFF``. The legacy clause only
-    re-honors votes that already exist in historical records; no vote written
-    after the cutoff can satisfy it, so new changes still require
-    authenticated provenance.
+    Qualifying is a verified signed grant from a pinned human approver
+    (``_is_authenticated_approval``) or one of the pinned historical approvals
+    (``_is_pinned_legacy_approval``). The operator seat's own identity
+    never qualifies. A bare ``"human"`` voter, or provenance fields with no
+    verifying envelope, is recorded but never counts.
     """
-    if vote.agent == "human" or vote.subject_role in {"owner", "approver"}:
-        return True
-    return _is_legacy_unprovenanced_approval(vote)
+    if _is_operator_identity(vote.agent):
+        return False
+    return _is_authenticated_approval(vote) or _is_pinned_legacy_approval(vote)
+
+
+def _counting_rejections(votes: list[CABDecision]) -> list[CABDecision]:
+    """The rejections that block a change (card bada5c86).
+
+    A rejection by a named voter always blocks, signed grant or not: a veto is
+    fail-safe. A rejection whose voter is a placeholder (``human``, ``unknown``,
+    an empty label: what a caller writes when it has no identity) is recorded but
+    does not count, so an anonymous caller cannot flip a change's status either
+    way.
+    """
+    return [
+        v
+        for v in votes
+        if v.decision == CABDecisionValue.REJECTED
+        and _identity_key(v.agent) not in _PLACEHOLDER_VOTERS
+    ]
+
+
+def _signed_issued_at(vote: CABDecision) -> Optional[datetime]:
+    """The ``issued_at`` of *vote*'s stored grant (covered by its signature), or None."""
+    envelope = getattr(vote, "authorization", None)
+    if not isinstance(envelope, dict):
+        return None
+    try:
+        issued = datetime.fromisoformat(str(envelope.get("issued_at")).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return issued if issued.tzinfo is not None else None
+
+
+def current_votes(votes: list[CABDecision]) -> list[CABDecision]:
+    """Each voter's current vote: one slot per human (card bada5c86).
+
+    Voters are compared by ``identity_key`` (whitespace stripped, case folded). For a
+    voter with at least one verified signed vote, only the signed vote with the latest
+    signed ``issued_at`` counts (a rejection wins a tie), and that voter's unsigned
+    votes are dropped: an older grant written back under another file name cannot
+    undo a later decision. Votes of voters with no signed vote are kept as they are.
+    """
+    signed: dict[str, tuple[tuple[datetime, bool], CABDecision]] = {}
+    unsigned: list[CABDecision] = []
+    for vote in votes:
+        issued = _signed_issued_at(vote) if _is_authenticated_vote(vote) else None
+        if issued is None:
+            unsigned.append(vote)
+            continue
+        key = _identity_key(vote.agent)
+        rank = (issued, vote.decision == CABDecisionValue.REJECTED)
+        if key not in signed or rank > signed[key][0]:
+            signed[key] = (rank, vote)
+    return [vote for _rank, vote in signed.values()] + [
+        vote for vote in unsigned if _identity_key(vote.agent) not in signed
+    ]
+
+
+def _blocker_label(vote: CABDecision) -> str:
+    """How a blocking rejection is named in the timeline: voter plus signed or unsigned.
+
+    An unsigned rejection still blocks (a veto is fail-safe); the label makes
+    plain that no verified grant stands behind it.
+    """
+    return f"{vote.agent} ({'signed' if _is_authenticated_vote(vote) else 'unsigned'})"
+
+
+def _qualifying_approvals(
+    votes: list[CABDecision],
+    *,
+    prepared_by: Optional[str],
+    created_by: Optional[str] = "",
+    managed_by: Optional[str] = "",
+) -> list[CABDecision]:
+    """The APPROVE votes that count toward a change's CAB approval.
+
+    A vote counts when it is a human approval (``_is_human_approval``) and its
+    voter is not the change's drafter (``prepared_by``, change-mgmt P1.4), its
+    creator or its ``managed_by`` owner (card bada5c86). Identities are compared
+    with ``_identity_key``.
+
+    A pinned historical approval keeps the meaning it had when it was written:
+    the creator and managed-by exclusions did not exist then, and those changes
+    completed their lifecycles under that regime, so they are not applied to it
+    (the drafter exclusion is, as before). No vote written today can be one.
+    """
+    drafter = _identity_key(prepared_by) if prepared_by else None
+    owners = {_identity_key(x) for x in (created_by, managed_by) if x}
+    qualifying = []
+    for vote in votes:
+        if vote.decision != CABDecisionValue.APPROVED or not _is_human_approval(vote):
+            continue
+        key = _identity_key(vote.agent)
+        if drafter is not None and key == drafter:
+            continue
+        if key in owners and not _is_pinned_legacy_approval(vote):
+            continue
+        qualifying.append(vote)
+    return qualifying
 
 
 # ---------------------------------------------------------------------------
@@ -419,9 +626,11 @@ def _cab_resolved_status(
     and its exact wording, duplicating these same conditions (kept in sync
     by hand; see that block's comments).
 
-    No-self-approval (change-mgmt P1.4): an APPROVE vote whose voter equals
-    *prepared_by* is excluded here exactly as it is in the post-loop block,
-    so a drafter's self-approval can never gate a mid-fold transition either.
+    No-self-approval (change-mgmt P1.4, widened by card bada5c86): approvals
+    are filtered by ``_qualifying_approvals`` here exactly as in the post-loop
+    block, so a vote by the drafter, creator, managed-by owner or the operator
+    seat, or one without authenticated provenance, can never gate a mid-fold
+    transition either.
 
     Args:
         status: The loop's current status at this point in the replay.
@@ -447,16 +656,18 @@ def _cab_resolved_status(
         and core.get("created_by") == "operator"
         and core.get("risk", "medium") != "high"
         and (core.get("rollback_plan") or "").strip()
-        and not any(v.decision == CABDecisionValue.REJECTED for v in votes)
+        and not _counting_rejections(votes)
     ):
         return "approved"
-    rejections = [v for v in votes if v.decision == CABDecisionValue.REJECTED]
+    rejections = _counting_rejections(votes)
     if rejections:
         return "rejected"
-    approvals = [
-        v for v in votes if v.decision == CABDecisionValue.APPROVED and v.agent != prepared_by
-    ]
-    if any(_is_human_approval(v) for v in approvals):
+    if _qualifying_approvals(
+        votes,
+        prepared_by=prepared_by,
+        created_by=core.get("created_by"),
+        managed_by=core.get("managed_by"),
+    ):
         return "approved"
     return status
 
@@ -971,6 +1182,10 @@ class ITILManager:
         fold-time derivations (no writer ever mutates the change record for
         them), reproducing the old ``_evaluate_cab`` logic exactly.
         """
+        # Card bada5c86: only votes bound to THIS change count. The change id is
+        # the folded record's, never one read from a vote file, so a vote copied
+        # under another change's name drops out here.
+        votes = current_votes(votes_for_change(core.get("id", ""), votes))
         change_type = core.get("change_type", "normal")
         status = "proposed"
         timeline: list[dict[str, Any]] = []
@@ -1285,7 +1500,7 @@ class ITILManager:
             and core.get("created_by") == "operator"
             and core.get("risk", "medium") != "high"
             and (core.get("rollback_plan") or "").strip()
-            and not any(v.decision == CABDecisionValue.REJECTED for v in votes)
+            and not _counting_rejections(votes)
         ):
             status = "approved"
             timeline.append(
@@ -1311,12 +1526,13 @@ class ITILManager:
         # record that predates this card) the filter is a no-op, preserving
         # the fold-invariance guarantee.
         if status in ("proposed", "reviewing") and votes:
-            rejections = [v for v in votes if v.decision == CABDecisionValue.REJECTED]
-            approvals = [
-                v
-                for v in votes
-                if v.decision == CABDecisionValue.APPROVED and v.agent != prepared_by
-            ]
+            rejections = _counting_rejections(votes)
+            approvals = _qualifying_approvals(
+                votes,
+                prepared_by=prepared_by,
+                created_by=core.get("created_by"),
+                managed_by=core.get("managed_by"),
+            )
             if rejections:
                 status = "rejected"
                 timeline.append(
@@ -1324,10 +1540,11 @@ class ITILManager:
                         "ts": max(v.decided_at for v in rejections),
                         "agent": "cab-system",
                         "action": "status:proposed->rejected",
-                        "note": "Rejected by: " + ", ".join(v.agent for v in rejections),
+                        "note": "Rejected by: " + ", ".join(_blocker_label(v) for v in rejections),
                     }
                 )
-            elif any(_is_human_approval(v) for v in approvals):
+            elif approvals:
+                # Card bada5c86: the note names only the approvals that counted.
                 status = "approved"
                 timeline.append(
                     {
@@ -1827,6 +2044,7 @@ class ITILManager:
         subject_role: str = "",
         subject_fingerprint: str = "",
         authorization_id: str = "",
+        authorization: dict[str, Any] | None = None,
     ) -> CABDecision:
         """Submit a CAB vote for a change (per-agent file, already conflict-free).
 
@@ -1846,6 +2064,15 @@ class ITILManager:
         binds. Leaving ``subject`` unset keeps today's free-text behavior for
         direct/legacy callers (CLI, tests), so this is a non-breaking addition.
 
+        Card bada5c86: recording is not qualifying. A vote counts as an
+        approval only when *authorization* is the signed CapAuth envelope it
+        was cast under and that envelope verifies against a pinned human
+        approver key (``skcoord.cab_authorization``); the provenance fields on
+        their own prove nothing. Any other vote is stored as given but never
+        counts; see ``_qualifying_approvals``. Vote files are keyed by voter,
+        so an unauthenticated vote may not replace an authenticated one: that
+        raises ``ValueError`` and nothing is written.
+
         Args:
             change_id: The change record this vote applies to.
             agent: Free-text vote label. Used as the voter identity only when
@@ -1856,17 +2083,24 @@ class ITILManager:
             subject: Caller-supplied authenticated identity. When set, this
                 value - not ``agent`` - is recorded as the voter and used for
                 both the vote's filename and its identity in the fold.
+            authorization: The verified signed grant (the envelope's fields as
+                a dict), stored verbatim for re-verification at fold time.
 
         Returns:
             The recorded ``CABDecision`` (``.agent`` is the bound voter
             identity: ``subject`` if given, else ``agent``).
         """
         self.ensure_dirs()
-        voter = subject if subject else agent
+        # One vote slot per human: surrounding whitespace is not part of a name.
+        voter = (subject if subject else agent).strip()
         if subject_role and subject_role not in {"owner", "operator", "approver", "implementer"}:
             raise ValueError(f"unsupported CAB subject role: {subject_role!r}")
         if subject_role in {"owner", "approver"} and not subject:
             raise ValueError("a qualifying human role requires an authenticated subject")
+        if CABDecisionValue(decision) == CABDecisionValue.REJECTED and not subject:
+            # Card bada5c86: a rejection blocks, so like a qualifying approval it
+            # must be bound to an authenticated voter, never a free-text label.
+            raise ValueError("a CAB rejection requires an authenticated subject")
         vote = CABDecision(
             change_id=change_id,
             agent=voter,
@@ -1875,11 +2109,45 @@ class ITILManager:
             authorization_id=authorization_id,
             decision=CABDecisionValue(decision),
             conditions=conditions,
+            authorization=authorization,
         )
         filename = f"{change_id}-{voter}.json"
         path = self.cab_dir / filename
+        self._refuse_rollback(change_id, voter, vote)
         atomic_write_text(path, json.dumps(vote.model_dump(), indent=2, default=str) + "\n")
         return vote
+
+    def _refuse_rollback(self, change_id: str, voter: str, vote: CABDecision) -> None:
+        """Raise ``ValueError`` unless *vote* may take *voter*'s slot on *change_id*.
+
+        When the voter (compared by ``identity_key``, across every file name) already
+        holds a verified signed vote, the new vote must also be signed and its grant's
+        signed ``issued_at`` must be strictly later than every one held. Otherwise an
+        unsigned vote, or a replayed older grant (an approval Chef has since revoked
+        with a signed rejection), could roll the decision back (card bada5c86).
+        """
+        key = _identity_key(voter)
+        held = [
+            existing
+            for existing in self.get_cab_votes(change_id)
+            if _identity_key(existing.agent) == key and _is_authenticated_vote(existing)
+        ]
+        if not held:
+            return
+        if not _is_authenticated_vote(vote):
+            raise ValueError(
+                f"refusing to replace the authenticated CAB vote of {voter!r} on "
+                f"{change_id} with an unauthenticated one"
+            )
+        times = [t for t in (_signed_issued_at(v) for v in held) if t is not None]
+        newest = max(times) if times else None
+        issued = _signed_issued_at(vote)
+        if issued is None or newest is None or issued <= newest:
+            raise ValueError(
+                f"refusing to replace the authenticated CAB vote of {voter!r} on "
+                f"{change_id}: the new grant was issued at {issued and issued.isoformat()}, "
+                f"not after the one held ({newest and newest.isoformat()})"
+            )
 
     def get_cab_votes(self, change_id: str) -> list[CABDecision]:
         """Get all CAB votes for a change."""
@@ -1888,10 +2156,18 @@ class ITILManager:
             return votes
         for f in self.cab_dir.glob(f"{change_id}-*.json"):
             try:
-                data = json.loads(f.read_text(encoding="utf-8"))
-                votes.append(CABDecision.model_validate(data))
+                raw = f.read_bytes()
+                vote = CABDecision.model_validate(json.loads(raw.decode("utf-8")))
+                vote._source_sha256 = hashlib.sha256(raw).hexdigest()
             except (json.JSONDecodeError, Exception):
                 continue
+            # Card bada5c86: a vote counts only under the name it was written
+            # to. A file copied under another change's or another voter's name
+            # (the change id or voter inside differs from the one in the
+            # filename) is ignored, so it can neither approve nor block.
+            if not vote_file_matches(f.name, change_id, vote):
+                continue
+            votes.append(vote)
         return votes
 
     # ── KEDB ──────────────────────────────────────────────────────────

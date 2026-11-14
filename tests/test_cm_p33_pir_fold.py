@@ -21,6 +21,7 @@ from __future__ import annotations
 import sys
 
 import pytest
+from cab_grants import signed_vote  # card bada5c86: real signed grants
 
 from skcoord.itil import ITILManager
 
@@ -47,7 +48,7 @@ def _deployed_change(mgr: ITILManager, title: str):
         managed_by="lumina",
         rollback_plan="revert the deploy",
     )
-    mgr.submit_cab_vote(chg.id, agent="human", decision="approved")
+    mgr.submit_cab_vote(chg.id, **signed_vote(chg.id))
     assert mgr.list_changes()[0].status.value == "approved"
     mgr.update_change(chg.id, "lumina", new_status="implementing")
     mgr.update_change(chg.id, "lumina", new_status="deployed", note="deploy step reported success")
@@ -63,7 +64,7 @@ def _failed_change(mgr: ITILManager, title: str):
         managed_by="lumina",
         rollback_plan="revert the deploy",
     )
-    mgr.submit_cab_vote(chg.id, agent="human", decision="approved")
+    mgr.submit_cab_vote(chg.id, **signed_vote(chg.id))
     mgr.update_change(chg.id, "lumina", new_status="implementing")
     mgr.update_change(chg.id, "lumina", new_status="failed", note="deploy step errored out")
     assert mgr.list_changes()[0].status.value == "failed"
@@ -171,7 +172,8 @@ def test_rejected_to_closed_does_not_require_a_note(tmp_path):
     is."""
     mgr = ITILManager(tmp_path)
     chg = mgr.propose_change(title="reject me", change_type="normal", managed_by="lumina")
-    mgr.submit_cab_vote(chg.id, agent="human", decision="rejected")
+    # Card bada5c86: a named voter's veto; a placeholder's no longer counts.
+    mgr.submit_cab_vote(chg.id, agent="chef", decision="rejected", subject="chef")
     assert mgr.list_changes()[0].status.value == "rejected"
 
     mgr.update_change(chg.id, "human", new_status="closed")
@@ -202,7 +204,7 @@ def test_pre_existing_change_folds_byte_identically(tmp_path):
         tags=["legacy"],
     )
     mgr.update_change(chg.id, "lumina", new_status="reviewing", note="looks fine")
-    mgr.submit_cab_vote(chg.id, agent="human", decision="approved")
+    mgr.submit_cab_vote(chg.id, **signed_vote(chg.id))
 
     before = mgr.list_changes()[0]
     # Fold again from disk (fresh read) - must be byte-identical.
