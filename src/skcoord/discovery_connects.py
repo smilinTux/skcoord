@@ -246,6 +246,17 @@ def collect_container_networks(runner: CommandRunner) -> list[DiscoveredCI]:
         NETWORK CIs (one per inspected network) and SERVICE sightings for
         member containers carrying their ``connects_to`` network edges.
     """
+    # Same fixed, non-secret runtime probe as collect_docker_containers: a host
+    # with no container runtime (a hypervisor) then reads as partial coverage,
+    # not as an unavailable collector that marks the whole target incomplete.
+    runner.run(
+        [
+            "python3",
+            "-c",
+            "import json,shutil; print(json.dumps({n: bool(shutil.which(n)) "
+            "for n in ('docker','podman')}))",
+        ]
+    )
     networks: list[DiscoveredCI] = []
     membership: dict[str, tuple[str, set[str]]] = {}
     for runtime in ("docker", "podman"):

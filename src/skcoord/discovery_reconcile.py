@@ -217,6 +217,22 @@ def reconcile(
                 )
         by_id[ci_id] = item
 
+    # A host or device sighting resolved to an existing CI under another id
+    # (identity aliases). Every edge that names the sighting's own id must
+    # follow it, or it dangles: chg-a543c87b left 701 runs_on edges on
+    # ci-host-192.168.0.41 while the CI is ci-host-cbrd21-laptop12thgenintelcore.
+    remap = {item.ci_id: ci_id for ci_id, item in by_id.items() if item.ci_id != ci_id}
+    if remap:
+        by_id = {
+            ci_id: replace(
+                item,
+                relationships=tuple(
+                    (rel_type, remap.get(target, target)) for rel_type, target in item.relationships
+                ),
+            )
+            for ci_id, item in by_id.items()
+        }
+
     for ci_id, item in by_id.items():
         current = existing.get(ci_id)
         derived_status = _observed_status(item)

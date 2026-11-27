@@ -15,6 +15,7 @@ from __future__ import annotations
 import sys
 
 import pytest
+from cab_grants import signed_vote  # card bada5c86: real signed grants
 
 from skcoord.itil import ITILManager
 
@@ -64,7 +65,7 @@ def test_pre_existing_change_folds_byte_identically(tmp_path):
     # Old-style events only: no pr_link/validation/schedule/unschedule/
     # window_missed anywhere in the log.
     mgr.update_change(chg.id, "lumina", new_status="reviewing", note="looks fine")
-    mgr.submit_cab_vote(chg.id, agent="human", decision="approved")
+    mgr.submit_cab_vote(chg.id, **signed_vote(chg.id))
 
     before = mgr.list_changes()[0]
     # Fold again from disk (fresh read) - must be byte-identical.
@@ -162,7 +163,7 @@ def test_validation_fail_leaves_status_unchanged(tmp_path):
 
 
 def _approve_via_human_vote(mgr: ITILManager, change_id: str) -> None:
-    mgr.submit_cab_vote(change_id, agent="human", decision="approved")
+    mgr.submit_cab_vote(change_id, **signed_vote(change_id))
 
 
 def test_schedule_valid_only_while_approved(tmp_path):
@@ -266,13 +267,15 @@ def test_approved_to_implementing_manual_path_still_works(tmp_path):
 # ── (e) CAB vote identity binding (subject) ────────────────────────────
 
 
-def test_submit_cab_vote_without_subject_keeps_legacy_free_text_behavior(tmp_path):
+def test_submit_cab_vote_without_subject_is_recorded_but_never_approves(tmp_path):
+    """Card bada5c86: the free-text label is still recorded as given, but a
+    subject-less vote carries no authenticated provenance, so it never counts."""
     mgr = ITILManager(tmp_path)
     chg = mgr.propose_change(title="legacy caller", change_type="normal", managed_by="lumina")
     vote = mgr.submit_cab_vote(chg.id, agent="human", decision="approved")
     assert vote.agent == "human"
     folded = mgr.list_changes()[0]
-    assert folded.status.value == "approved"
+    assert folded.status.value == "proposed"
 
 
 def test_submit_cab_vote_subject_overrides_free_text_agent(tmp_path):
@@ -294,27 +297,21 @@ def test_submit_cab_vote_subject_overrides_free_text_agent(tmp_path):
     assert folded.status.value == "proposed"
 
 
-def test_submit_cab_vote_subject_true_human_still_unblocks(tmp_path):
+def test_submit_cab_vote_literal_human_subject_no_longer_unblocks(tmp_path):
+    """Card bada5c86: "human" names no one; only authenticated provenance does."""
     mgr = ITILManager(tmp_path)
     chg = mgr.propose_change(title="real human vote", change_type="normal", managed_by="lumina")
     mgr.submit_cab_vote(chg.id, agent="human", decision="approved", subject="human")
-    folded = mgr.list_changes()[0]
-    assert folded.status.value == "approved"
+    assert mgr.list_changes()[0].status.value == "proposed"
+    mgr.submit_cab_vote(chg.id, **signed_vote(chg.id))
+    assert mgr.list_changes()[0].status.value == "approved"
 
 
 def test_authenticated_named_owner_unblocks_without_literal_human(tmp_path):
-    """Chef remains Chef in the audit log while the role proves humanity."""
+    """Chef remains Chef in the audit log while the signed grant proves humanity."""
     mgr = ITILManager(tmp_path)
     chg = mgr.propose_change(title="owner-approved", change_type="normal", managed_by="atlas")
-    vote = mgr.submit_cab_vote(
-        chg.id,
-        agent="ignored",
-        decision="approved",
-        subject="chef",
-        subject_role="owner",
-        subject_fingerprint="A" * 40,
-        authorization_id="authz-123",
-    )
+    vote = mgr.submit_cab_vote(chg.id, **{**signed_vote(chg.id), "agent": "ignored"})
     assert vote.agent == "chef"
     assert vote.subject_role == "owner"
     assert mgr.list_changes()[0].status.value == "approved"
@@ -339,19 +336,19 @@ def test_human_role_without_bound_subject_is_rejected(tmp_path):
 
 def test_no_self_approval_drafters_own_approve_is_ignored(tmp_path):
     """A CAB approve vote from the change's drafter (`prepared_by`) must not
-    count toward approval, even when the voter identity is the one literal
-    the CAB derivation treats as a valid approver ("human"). Models the case
+    count toward approval, even when the vote carries authenticated owner
+    provenance that would otherwise qualify. Models the case
     where the acting identity that prepared the change is later the same
     identity attempting to rubber-stamp its own draft."""
     mgr = ITILManager(tmp_path)
     chg = mgr.propose_change(title="self drafted", change_type="normal", managed_by="lumina")
     mgr._append_event(
-        mgr.changes_dir, chg.id, "human", "pr_link", url="https://x/pull/7", run_id="run-7"
+        mgr.changes_dir, chg.id, "chef", "pr_link", url="https://x/pull/7", run_id="run-7"
     )
     folded_after_prep = mgr.list_changes()[0]
-    assert folded_after_prep.prepared_by == "human"
+    assert folded_after_prep.prepared_by == "chef"
 
-    mgr.submit_cab_vote(chg.id, agent="human", decision="approved", subject="human")
+    mgr.submit_cab_vote(chg.id, **signed_vote(chg.id))
     folded = mgr.list_changes()[0]
     # Self-approval dropped from the approvals pool -> stays unapproved.
     assert folded.status.value == "proposed"
@@ -360,7 +357,7 @@ def test_no_self_approval_drafters_own_approve_is_ignored(tmp_path):
 def test_no_self_approval_a_different_subjects_approve_moves_it_forward(tmp_path):
     """The guard must not block the ordinary case: an AI agent drafts the
     change (prepared_by='lumina'), and a genuinely different identity
-    ('human') approves it - that must still unblock normally."""
+    ('chef', authenticated) approves it - that must still unblock normally."""
     mgr = ITILManager(tmp_path)
     chg = mgr.propose_change(title="ai drafted", change_type="normal", managed_by="lumina")
     mgr._append_event(
@@ -368,7 +365,7 @@ def test_no_self_approval_a_different_subjects_approve_moves_it_forward(tmp_path
     )
     assert mgr.list_changes()[0].prepared_by == "lumina"
 
-    mgr.submit_cab_vote(chg.id, agent="human", decision="approved", subject="human")
+    mgr.submit_cab_vote(chg.id, **signed_vote(chg.id))
     folded = mgr.list_changes()[0]
     assert folded.status.value == "approved"
 
@@ -379,9 +376,10 @@ def test_no_self_approval_drafters_reject_still_blocks(tmp_path):
     mgr = ITILManager(tmp_path)
     chg = mgr.propose_change(title="self drafted reject", change_type="normal", managed_by="lumina")
     mgr._append_event(
-        mgr.changes_dir, chg.id, "human", "pr_link", url="https://x/pull/9", run_id="run-9"
+        mgr.changes_dir, chg.id, "lumina", "pr_link", url="https://x/pull/9", run_id="run-9"
     )
-    mgr.submit_cab_vote(chg.id, agent="human", decision="rejected", subject="human")
+    # Card bada5c86: a named drafter (a placeholder's veto no longer counts).
+    mgr.submit_cab_vote(chg.id, agent="lumina", decision="rejected", subject="lumina")
     folded = mgr.list_changes()[0]
     assert folded.status.value == "rejected"
 
@@ -395,6 +393,6 @@ def test_no_self_approval_is_a_noop_without_a_pr_link_event(tmp_path):
     chg = mgr.propose_change(title="no prep run", change_type="normal", managed_by="lumina")
     assert chg.prepared_by is None
     mgr.submit_cab_vote(chg.id, agent="lumina", decision="approved")
-    mgr.submit_cab_vote(chg.id, agent="human", decision="approved")
+    mgr.submit_cab_vote(chg.id, **signed_vote(chg.id))
     folded = mgr.list_changes()[0]
     assert folded.status.value == "approved"

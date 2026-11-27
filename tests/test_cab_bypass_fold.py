@@ -27,6 +27,7 @@ import sys
 import tempfile
 
 import pytest
+from cab_grants import signed_vote  # card bada5c86: real signed grants
 
 from skcoord.itil import ITILManager
 
@@ -73,7 +74,7 @@ def test_qualifying_cab_vote_still_approves(mgr):
     """Non-regression: the legitimate CAB route is untouched."""
     chg = mgr.propose_change(title="legit change", created_by="lumina")
 
-    mgr.submit_cab_vote(chg.id, agent="human", decision="approved")
+    mgr.submit_cab_vote(chg.id, **signed_vote(chg.id))
 
     assert mgr.list_changes()[0].status.value == "approved"
 
@@ -88,7 +89,7 @@ def test_standard_change_auto_approve_still_works(mgr):
 def test_approved_to_implementing_still_works(mgr):
     """Non-regression: the guard must not strand a properly approved change."""
     chg = mgr.propose_change(title="legit", created_by="lumina")
-    mgr.submit_cab_vote(chg.id, agent="human", decision="approved")
+    mgr.submit_cab_vote(chg.id, **signed_vote(chg.id))
 
     folded = mgr.update_change(
         chg.id, agent="lumina", new_status="implementing", note="go"

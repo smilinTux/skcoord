@@ -8,7 +8,7 @@ import pytest
 
 from skcoord.card import CardEvent, CardEventLog, KanbanBoard
 from skcoord.card_store import CardCore, CardStore, export_to_legacy
-from skcoord.coordination import Board
+from skcoord.coordination import AgentFile, Board, Task
 
 
 def _voided_store(home, card_id: str = "voidterm1") -> CardStore:
@@ -120,3 +120,26 @@ def test_export_does_not_assign_voided_card(tmp_path) -> None:
         and agent.current_task != "voidterm1"
         for agent in Board(tmp_path).load_agents()
     )
+
+
+def test_new_claim_drops_stale_voided_current_task_projection(tmp_path) -> None:
+    store = _voided_store(tmp_path)
+    board = Board(tmp_path)
+    board.create_task(Task(id="claimnew1", title="New claim", created_by="tester"))
+    board.save_agent(
+        AgentFile(agent="jarvis", current_task="voidterm1", claimed_tasks=["voidterm1"])
+    )
+
+    claimed = board.claim_task("jarvis", "claimnew1")
+
+    assert claimed.current_task == "claimnew1"
+    assert claimed.claimed_tasks == ["claimnew1"]
+    voided = store.fold("voidterm1")
+    assert voided is not None
+    assert voided.archived is True
+    assert voided.meta["voided"] is True
+    assert len(store._read_events("voidterm1")) == 1
+    current = store.fold("claimnew1")
+    assert current is not None
+    assert current.owner == "jarvis"
+    assert current.status.value == "doing"
