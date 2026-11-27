@@ -60,6 +60,11 @@ from .coordination import (
     get_briefing_json,
     get_briefing_text,
 )
+from .human_gate_close import (
+    append_human_gate_decision,
+    close_decided_human_gate_cards,
+    find_decided_human_gate_cards,
+)
 from .lifecycle import (
     LifecycleAudit,
     LifecycleConflictError,
@@ -107,6 +112,9 @@ __all__ = [
     "get_briefing_json",
     "get_briefing_text",
     "render_html",
+    "append_human_gate_decision",
+    "close_decided_human_gate_cards",
+    "find_decided_human_gate_cards",
     "repair_lifecycle",
     "scheduler_truth_main",
     "transition_task",
