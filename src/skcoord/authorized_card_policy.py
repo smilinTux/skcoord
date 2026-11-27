@@ -12,6 +12,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Literal, Protocol
 
+import capauth
 from capauth import (
     AuthorizationDecision,
     ControlPlaneBinding,
@@ -43,6 +44,24 @@ UTC = timezone.utc
 MAX_POLICY_ENTRY_BYTES = 384 * 1024
 MAX_POLICY_DOCUMENT_BYTES = 4 * 1024 * 1024
 MAX_POLICY_ENTRIES = 256
+_OPERATOR_SESSION_CURRENTNESS_VERIFIER = getattr(
+    capauth, "OperatorSessionCurrentnessVerifier", None
+)
+_OWNER_READ_CURRENTNESS_TYPES = (ControlPlaneCurrentnessVerifier,)
+if isinstance(_OPERATOR_SESSION_CURRENTNESS_VERIFIER, type):
+    _OWNER_READ_CURRENTNESS_TYPES += (_OPERATOR_SESSION_CURRENTNESS_VERIFIER,)
+
+
+class _OwnerReadCurrentnessVerifier(Protocol):
+    def check_before_owner_read(self, context: object) -> DecisionState: ...
+
+    def check_after_owner_read(self, context: object) -> DecisionState: ...
+
+    def close(self) -> None: ...
+
+
+def _is_owner_read_currentness_verifier(value: object) -> bool:
+    return type(value) in _OWNER_READ_CURRENTNESS_TYPES
 
 
 class _Contract(BaseModel):
@@ -528,7 +547,7 @@ class AuthorizedCardPolicyProvider:
         requested_scope: AuthorizedCardScopeV1,
         home: Path,
         *,
-        currentness_verifier: ControlPlaneCurrentnessVerifier | None = None,
+        currentness_verifier: _OwnerReadCurrentnessVerifier | None = None,
         now: datetime | None = None,
     ) -> dict:
         try:
@@ -542,7 +561,7 @@ class AuthorizedCardPolicyProvider:
             if validated_scope != requested_scope:
                 return denied
             denied = unavailable_authorized_card_snapshot(validated_scope)
-            if type(currentness_verifier) is not ControlPlaneCurrentnessVerifier:
+            if not _is_owner_read_currentness_verifier(currentness_verifier):
                 return denied
             current = self._current(now)
             if not isinstance(context, SanitizedControlPlaneDecisionV1):
@@ -642,7 +661,7 @@ class AuthorizedCardPolicyProvider:
         except Exception:
             return denied
         finally:
-            if type(currentness_verifier) is ControlPlaneCurrentnessVerifier:
+            if _is_owner_read_currentness_verifier(currentness_verifier):
                 currentness_verifier.close()
 
     def _resolve(

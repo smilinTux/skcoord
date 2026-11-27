@@ -1,5 +1,28 @@
 # Changelog
 
+- **Card f0d0ba98: qualify PR130 recovery publication - pin writer identity in the existing-shard revalidation test.**
+  `test_append_revalidates_existing_shard_under_the_writer_lock` now monkeypatches
+  `card_module.socket.gethostname` to `chiap08` before `append`, so the test no
+  longer depends on the runner's real hostname. No production source changed.
+
+- **Warn once per distinct unreadable overlay line, not once per fold.**
+  `_MAX_WARNINGS_PER_FILE` caps warnings per `fold()` CALL, and `fold()` runs
+  once per card, so one malformed overlay line produced the same warning
+  thousands of times in a single process. Measured on the chi estate: a single
+  bad line flooded every fleet worker log and every CLI invocation, and pushed a
+  seat dispatcher JSON receipt past journald's 48KB message cap, so the receipt
+  arrived truncated and unparseable and operators could not see why dispatch
+  failed. Every occurrence is still recorded in `rejected`, so repetition is
+  suppressed and information is not. A `tests/conftest.py` autouse fixture
+  clears the per-process cache between tests, because two tests using the same
+  fixture file name and line number would otherwise depend on execution order.
+
+
+- **Card 73516c8e: make terminal preconditions atomic with graph mutations.**
+  Terminal completion and move operations can now run a precondition while the
+  shared board and card locks are held. Card creation and label updates use the
+  same board lock, closing the child-lifecycle race.
+
 All notable changes to `skcoord` are documented here.
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
@@ -10,6 +33,181 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
 ## [Unreleased]
 
 ### Fixed
+
+- **Lifecycle reconciliation now supports multiple DOING cards per owner.**
+  `AgentFile.current_task` is a scalar projection, but the audit previously
+  required it to equal every owned DOING card and repair overwrote it once per
+  card. Multi-claim owners therefore could never converge, and the transaction
+  rolled back unrelated projection repairs. Audit now accepts any owned DOING
+  card as current while still reporting each missing claim and a genuinely
+  missing or invalid current projection. Repair preserves a valid current card
+  across fenced scopes, otherwise selects the lexically first in-scope owned
+  DOING card, without updating agent liveness or canonical card state.
+
+- **Overlay `verdict` events now fold instead of silently vanishing.**
+  `_OVERLAY_TO_STORE_ACTION` (the map `load_legacy_mutations` uses to turn a
+  `coordination/card_events/*.jsonl` overlay event into a store action `fold`
+  understands) had no entry for `"verdict"`, so any overlay event with that
+  action was dropped with `if action is None: continue` and never reached
+  `CardStore.fold()`. `CardEventLog.append` already refused to write a
+  `verdict` action for the same reason (`OVERLAY_ACTIONS` and
+  `_OVERLAY_TO_STORE_ACTION` are asserted equal by
+  `test_overlay_vocabulary_cannot_drift_from_the_fold_map`), so the two are
+  updated together: `"verdict"` now maps to `"link"` in both. Measured live,
+  2026-09-19: 710 overlay events carried action `verdict`; re-folding the
+  whole board (7215 cards) with the fix applied changes exactly one card's
+  folded state (`e8f3a5b7` gains a genuine, previously-invisible `evidence`
+  link). 698 of the 710 are `fleet-liveness-reaper` events with no
+  `link_key`/`link_value` of their own — their real content lives in a
+  sibling `worker_died` link event at the identical timestamp, which already
+  folded — so they fold harmlessly and are not double-counted.
+
+- **An unclaimable card is now a typed refusal instead of a bare `ValueError`.**
+  Observed live on the builder node ziowk01-wsl, 2026-09-18: card 59553966 was
+  voided and replaced by 59550966 during a source-binding repair while a node
+  worker still held it queued. `Board.claim_task` raised
+  `ValueError: Task 59553966 not found`, which unwound the daemon's main loop
+  and exited the unit, discarding 18h of accumulated process state over one
+  unusable card. The message was also wrong: `void` sets `archived=True` in the
+  fold and `get_task_views` reads `list_cards(include_archived=False)`, so a
+  voided card simply drops out of the projection the claim path searches while
+  still existing on disk and folding perfectly well. `TaskUnclaimable`
+  (a `ValueError` subclass, so every existing `except ValueError` caller is
+  unchanged) now carries `task_id`, `reason`
+  (`absent`/`voided`/`archived`/`done`/`owned`/`dependencies`/`inconsistent`)
+  and `terminal`, letting a card-queue daemon skip exactly one card. A corrupt
+  or unreadable card core still raises and stays loud; it is never downgraded
+  to a refusal.
+
+### Added
+
+- `abandon_reason`, a closed vocabulary recording why a worker's claim ended.
+  Measured cause: 235 of 444 open cards were claimed and then abandoned with no
+  recorded reason, so the board knew that work stopped and never why. Six members
+  describe an abandonment (`criteria-unsatisfiable`, `dependency-unsatisfied`,
+  `capability-missing`, `error`, `superseded`, `unspecified`) and a seventh,
+  `not-abandoned`, marks a release that followed genuinely finished work.
+  Separating that seventh from `unspecified` is the point: without it the success
+  path lands in the same bucket as the unexplained abandonments and the coverage
+  metric measures nothing. Absent normalises to `unspecified` and never raises;
+  an unknown non-empty value raises.
+- `exit_gates`, `non_goals` and `spec_version` on `CardCore`. `exit_gates` entries
+  are objects carrying `gate` and `owner`, so a dispatcher can route a gate to the
+  seat that owns it instead of a worker looping on a criterion it can never
+  satisfy alone. A gate missing either field is rejected at construction.
+- Dependency-cycle rejection on edge creation, wired into both `amend_dependency`
+  and `create()`. The guard began on `amend_dependency` alone, a path with zero
+  recorded events in this estate's history, while 700 cards received their edges
+  through `create()`. The check short-circuits when a card declares no
+  dependencies, so only that minority pays for the graph walk.
+- `abandon_reason` threaded through `mirror_coord_release` and
+  `Board.release_claim`, both optional and defaulting to existing behaviour.
+
+- A constrained exact-head GitHub review broker now requires a terminal local
+  CI-parity receipt before submitting a review. The broker verifies the exact
+  canonical receipt bytes, atomically reserves each request across processes,
+  requires completed-success checks, and never retries an uncertain review
+  side effect. Card `dec5a948`.
+
+- Board scan-cost helpers: `Board.prune_stale_locks`, live-only defaults for
+  `generate_board_md` / `get_briefing_*` (`include_done`), and CardStore folds
+  that stash `_board_updated_at` for archive aging. Cards b0a0d002/b0a0d003/b0a0d005.
+
+- Hash-chain event log integrity: `append_event` now computes `prev_hash`
+  (SHA-256 of the preceding line in the same writer file) and `_read_events`
+  verifies the chain at fold time. Tamper or truncation raises `ValueError`
+  with the exact break point. Backward compatible: legacy unchained events
+  pass (the chain starts at the first chained event). Card 887643f5.
+
+
+### Changed
+
+- Docs: SOP.md now grounds the CHI census and the shared home path in
+  `SITE_AND_HOST_NAMING_STANDARD`. The estate boundary is the control plane (one
+  `~/.skcapstone`, one Syncthing ring, one trust root, one operator), not the
+  tailnet, which is why unrelated tailnet devices are correctly out of census
+  scope; and a CI is never renamed to adopt the standard, because a CI id is a key
+  whose rename deletes the event history that current state is folded from.
+  `docs/cmdb-workflow-proposals.md` P8 gets the same boundary: canonicalisation
+  collapses addresses, never respells names. The `chioc09` alias of canonical
+  `chiap09` and every other host reference are statements of fact and are
+  unchanged.
+
+### Fixed
+
+- `CardEventLog.read_all` no longer drops an unreadable overlay line in silence.
+  A line it cannot admit is logged at WARNING with the shard, the physical line
+  number and a 200-character excerpt, and is recorded in `CardEventLog.rejected`
+  so a health check can assert on the damage instead of scraping log text.
+  Measured on the chi fleet 2026-09-19: `card_events/chiap02.jsonl` held 54
+  unparseable lines (three pretty-printed JSON objects written into an
+  append-only JSONL log) and `chiap08.jsonl` held a prose line plus a line that
+  was valid JSON in an invented `card`/`agent`/`event` schema. All of them were
+  swallowed by a bare `except Exception: continue`, so every fold over the
+  affected cards answered from a damaged record and said nothing.
+
+  This logs and continues rather than failing closed, deliberately. The overlay
+  is fleet-wide (every host appends to its own `<host>.jsonl` and Syncthing
+  replicates all of them into every host), so raising here would let one bad
+  line written anywhere stop dispatch everywhere. The per-card structure store
+  `CardStore._read_events` keeps failing closed, where the blast radius of
+  refusing is a single card. Warnings are capped at 5 per shard plus a total,
+  so a badly damaged shard cannot flood the log.
+
+- `CardEventLog.append` now rejects an `action` outside the fold's vocabulary.
+  `action` was a free-form `str`, so a caller could write a flawless event with
+  `action: "verdict"` that `fold` then discarded as unknown, with no error at
+  either end. The new `OVERLAY_ACTIONS` constant is asserted equal to
+  `card_store._OVERLAY_TO_STORE_ACTION` by the suite so the guard and the fold
+  cannot drift apart.
+
+- Card `7bc6fd06`: explicit caller-supplied card IDs now use an append-only,
+  hardened creation-attempt ledger under the CardStore governor. Rejected IDs
+  stay reserved, accepted IDs replay only with identical semantics, and
+  claimed creates validate dependencies before materializing a core.
+
+- Repeating `claim_task` for an already-current same-owner claim now preserves
+  its exact claim revision and appends no duplicate claim event, so worker
+  startup verification cannot invalidate the running wrapper generation. A
+  demoted ready claim still receives a new generation when resumed. Card
+  22da3167.
+
+- Timed-out parity snapshots now hand partial-directory removal to a detached
+  cleanup process, so CLI timeout reporting never waits on an unbounded tree
+  deletion. Card d488a14e.
+
+- Parity snapshot inventory and copy now run under the same wall-clock alarm
+  as projection, so blocking snapshot construction fails closed at the
+  configured deadline. Card 3cbe5bbd.
+
+- CardStore parity checks now capture consistent legacy and card snapshots,
+  reject concurrent mutation, and fail closed within a bounded timeout instead
+  of hanging on a large shared estate. Card 150d28ab.
+
+- Atomic create-and-claim retries now require exact equality across every
+  immutable card field before accepting an existing ID, including concurrent
+  same-owner requests with different payloads. An exact replay also fails
+  read-only when its original claim is no longer current. Card c1a1c003.
+
+- Bounded CardStore estate scans now isolate an unreadable card instead of
+  aborting the whole page, while direct folds remain strict and source event
+  bytes remain untouched. Card c0bfab02.
+
+- `archive_done_tasks` ages done cards from the legacy+CardStore union and
+  prefers CardStore `updated_at` as completion time, while `age_stale_open`
+  still trusts authoritative legacy claim status and skips `human-gate` /
+  `[HUMAN]` cards.
+
+- Card daeac75b refreshes the exact guarded claim-conflict release candidate
+  against current main while preserving authoritative owner state and requiring
+  the exact losing owner and claim revision before mutation.
+
+- Completed agent work now projects availability as `idle`, preserves `offline`,
+  and normalizes malformed legacy `state=completed` input before serialization.
+
+- Card fc2d87bf makes void terminal at the mutation boundary: lifecycle moves
+  now refuse any card carrying a void audit event, preventing later bulk moves
+  from overriding the archive event and returning retired work to the board.
 
 - `lifecycle_reassessment` now reads supersession from the EVIDENCE store, not
   only from the structure store. `superseded_by` is normally recorded as an
@@ -37,8 +235,31 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
   class and added to `excluded_card_ids`, so the failure mode is to withhold
   one card rather than to stop all work.
 
+- Datastore discovery now normalizes container identity against restart tokens, the
+  same `_stable_container_name` rule PR 50 added for the service collector. The
+  SKLegal job launcher names PostgreSQL containers `<subject>-<pid>-<8 hex run
+  token>`, and `collect_datastores` embedded the raw name, so every restart of a
+  job database minted a new undeclared datastore CI (47 such CIs were created after
+  the PR 50 merge, most recently 2026-08-31). Identity is now derived from the
+  stable subject; the launcher PID and restart token are preserved as attributes
+  and the raw name is kept as an alias, exactly like `collect_docker_containers`.
+  Regression tests cover the restart pair and the no-suffix negative control
+  (card 151323cb, follows 72f49960).
+
 ### Added
 
+- Card b426f8e6 adds a versioned scheduler-truth contract with separate
+  structural and runtime reasons, exclusive primary counts, diagnostic facets,
+  canonical legacy aliases, a read-only JSON interface, and operator actions.
+
+- Card creation now enforces review-chain governance at `CardStore.create`, so
+  coordination CLI and MCP callers share the same fail-closed policy. Live
+  review or repair duplicates for one parent and class are refused with the
+  existing card ID, review depth is capped at one review plus one re-review,
+  and only the exact `human-override` label bypasses those checks. Refused
+  mirrored creates no longer leave a legacy task projection behind. CapAuth is
+  temporarily bounded below 0.3.10 because that release makes the existing
+  operator-session currentness contract fail closed in clean installations.
 - Schemas and validators for the two coordination stores, derived from live data
   rather than intent: `schemas/itil-record.v1.schema.json` and
   `schemas/itil-event.v1.schema.json` (all 318 records and 1702 events scanned,
@@ -376,6 +597,8 @@ version (setuptools-scm); a push to `main` cuts the next patch tag (see
   inventory. Decision recorded in `adr/ADR-002-cmdb-canonical-store.md`.
 
 ### Fixed
+- Lifecycle reassessment now keeps completed, voided, and archived cards terminal
+  when a late claim event appears, preventing false dead worker claims.
 - **Ephemeral listening ports accreted as permanent CIs.** The port collector
   recorded every socket in LISTEN, including the random high ports that RPC,
   mDNS, tailscale and short-lived servers bind. The CMDB is append-only and the

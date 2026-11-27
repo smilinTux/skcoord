@@ -5,9 +5,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import time
 from concurrent.futures import ProcessPoolExecutor
 from multiprocessing import Event, Process
+from threading import Thread
 
 import pytest
 
@@ -151,6 +153,128 @@ def test_board_lock_times_out_when_another_process_holds_it(tmp_path) -> None:
     assert process.exitcode == 0
 
 
+@pytest.mark.parametrize("operation", ["create", "relabel"])
+def test_terminal_precondition_excludes_child_graph_mutations(tmp_path, operation) -> None:
+    """Creation and relabeling wait until a terminal transition is appended."""
+    board = Board(tmp_path)
+    parent = _create_claimed(board)
+    if operation == "relabel":
+        board.create_task(Task(id="hard0002", title="child"))
+    precondition_entered = Event()
+    release_precondition = Event()
+    mutation_done = Event()
+    errors: list[BaseException] = []
+
+    def precondition() -> None:
+        precondition_entered.set()
+        if not release_precondition.wait(timeout=5):
+            raise TimeoutError("precondition release timeout")
+
+    def complete() -> None:
+        try:
+            Board(tmp_path).complete_task("owner", parent.id, precondition=precondition)
+        except BaseException as exc:
+            errors.append(exc)
+
+    def mutate() -> None:
+        try:
+            if operation == "create":
+                Board(tmp_path).create_task(
+                    Task(id="hard0002", title="child", tags=[f"parent-{parent.id}"])
+                )
+            else:
+                Board(tmp_path).update_task("hard0002", add_tags=[f"parent-{parent.id}"])
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            mutation_done.set()
+
+    completion_thread = Thread(target=complete)
+    completion_thread.start()
+    assert precondition_entered.wait(timeout=2)
+    mutation_thread = Thread(target=mutate)
+    mutation_thread.start()
+    assert not mutation_done.wait(timeout=0.2)
+    release_precondition.set()
+    completion_thread.join(timeout=5)
+    mutation_thread.join(timeout=5)
+
+    assert errors == []
+    assert CardStore(tmp_path).fold(parent.id).status == Column.DONE
+    assert mutation_done.is_set()
+
+
+def test_move_precondition_runs_inside_shared_board_lock(tmp_path) -> None:
+    """The generic lifecycle move exposes the same atomic precondition hook."""
+    board = Board(tmp_path)
+    task = _create_claimed(board)
+    observed: list[bool] = []
+
+    def precondition() -> None:
+        with pytest.raises(TimeoutError, match="board mutation"):
+            with _board_mutation_lock(tmp_path, timeout_seconds=0.01):
+                pass
+        observed.append(True)
+
+    transition_task(
+        tmp_path,
+        task_id=task.id,
+        column="done",
+        actor="owner",
+        precondition=precondition,
+    )
+
+    assert observed == [True]
+    assert CardStore(tmp_path).fold(task.id).status == Column.DONE
+
+
+def test_home_replacement_keeps_direct_same_card_writer_excluded(tmp_path) -> None:
+    parent = tmp_path / "namespace"
+    home = parent / "home"
+    home.mkdir(parents=True)
+    CardStore(home).create(CardCore(id="hard0001", title="home replacement"))
+    helper_entered = Event()
+    release_helper = Event()
+    ordinary_done = Event()
+    errors: list[BaseException] = []
+
+    def helper() -> None:
+        try:
+            with card_mutation_lock(home, "hard0001"):
+                helper_entered.set()
+                if not release_helper.wait(timeout=5):
+                    raise TimeoutError("helper release timeout")
+        except BaseException as exc:
+            errors.append(exc)
+
+    def ordinary() -> None:
+        try:
+            CardStore(home).append_event("hard0001", "note", "ordinary")
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            ordinary_done.set()
+
+    helper_thread = Thread(target=helper)
+    helper_thread.start()
+    assert helper_entered.wait(timeout=2)
+    old_home = parent / "home-old"
+    home.rename(old_home)
+    shutil.copytree(old_home, home)
+    ordinary_thread = Thread(target=ordinary)
+    ordinary_thread.start()
+
+    assert not ordinary_done.wait(timeout=0.2)
+    release_helper.set()
+    helper_thread.join(timeout=5)
+    ordinary_thread.join(timeout=5)
+
+    assert not helper_thread.is_alive()
+    assert not ordinary_thread.is_alive()
+    assert errors == []
+    assert any(event.get("action") == "note" for event in CardStore(home)._read_events("hard0001"))
+
+
 @pytest.mark.parametrize("task_id", ["../escape", "bad\x00id", "bad\ncontrol", "x" * 129])
 def test_invalid_identifier_is_rejected_before_any_lock_path_is_opened(tmp_path, task_id) -> None:
     home = tmp_path / "new-home"
@@ -174,8 +298,11 @@ def test_board_and_card_lock_symlinks_and_hardlinks_are_rejected(tmp_path) -> No
     locks = home / "coordination" / "locks"
     outside = tmp_path / "outside"
     home.mkdir()
-    (home / "coordination").mkdir()
+    CardStore(home).create(CardCore(id="hard0001", title="lock fixture"))
     outside.mkdir()
+    for path in locks.iterdir():
+        path.unlink()
+    locks.rmdir()
     locks.symlink_to(outside, target_is_directory=True)
     with pytest.raises(ValueError, match="lock directory"):
         with _board_mutation_lock(home):
@@ -416,7 +543,9 @@ def test_card_event_log_symlink_is_rejected_at_open_time(tmp_path) -> None:
     card_events.symlink_to(outside, target_is_directory=True)
 
     with pytest.raises(ValueError, match="card event directory"):
-        CardEventLog(tmp_path).append(CardEvent(card_id="hard0001", action="move"))
+        CardEventLog(tmp_path).append(
+            CardEvent(card_id="hard0001", action="move", writer="operator", column="doing")
+        )
     assert list(outside.iterdir()) == []
 
 
@@ -650,7 +779,7 @@ def test_cardstore_listing_and_card_event_reads_reject_symlinked_content(tmp_pat
         store.list_card_ids()
 
     events = CardEventLog(tmp_path)
-    events.append(CardEvent(card_id="hard0002", action="move"))
+    events.append(CardEvent(card_id="hard0002", action="move", writer="operator", column="doing"))
     event_file = next((tmp_path / "coordination" / "card_events").glob("*.jsonl"))
     external_event = outside / "card-events.jsonl"
     external_event.write_text('{"card_id":"external","action":"move"}\n', encoding="utf-8")

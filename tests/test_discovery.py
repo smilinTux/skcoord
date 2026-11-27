@@ -275,6 +275,15 @@ def test_agents_are_collected_with_soul_facts(home: Path) -> None:
     assert found[0].attributes["soul_role"] == "devops"
 
 
+def test_agent_collector_skips_dot_and_placeholder_dirs(home: Path) -> None:
+    # Live 2026-11-11: ~/.skcapstone/agents/.git and a literal
+    # __unresolved-profile__ directory became ci-agent-.git and
+    # ci-agent-__unresolved-profile__ (card a518e362).
+    (home / "agents" / ".git").mkdir()
+    (home / "agents" / "__unresolved-profile__").mkdir()
+    assert [a.name for a in collect_agents(home)] == ["lumina"]
+
+
 def test_declared_collectors_are_empty_on_an_empty_home(tmp_path: Path) -> None:
     assert collect_fleet_objects(tmp_path) == []
     assert collect_registry(tmp_path) == []
@@ -523,6 +532,42 @@ def test_mounts_and_database_containers_are_datastore_cis() -> None:
     assert not any(ci.attributes.get("mountpoint") == "/proc" for ci in found)
 
 
+def test_datastore_restart_identity_excludes_pid_and_run_token() -> None:
+    """Card 151323cb: the datastore collector must normalize identity exactly
+    like the service collector, so a restarted sklegal job container keeps one
+    CI instead of minting a new undeclared one per restart."""
+    first = FakeRunner(
+        answers={
+            "docker": "sklegal-s102-3620007-4e13b305\tpostgres:17.7-alpine\n",
+        }
+    )
+    restarted = FakeRunner(
+        answers={
+            "docker": "sklegal-s102-3521761-73688fd1\tpostgres:17.7-alpine\n",
+        }
+    )
+
+    before = collect_datastores(first)[0]
+    after = collect_datastores(restarted)[0]
+
+    assert before.name == after.name == "testnode:container:sklegal-s102"
+    assert before.attributes["launcher_pid"] == "3620007"
+    assert after.attributes["restart_token"] == "73688fd1"
+    assert before.attributes["image"] == "postgres:17.7-alpine"
+    assert before.aliases == ("sklegal-s102-3620007-4e13b305",)
+    assert after.aliases == ("sklegal-s102-3521761-73688fd1",)
+
+
+def test_datastore_container_without_known_restart_suffix_keeps_full_name() -> None:
+    runner = FakeRunner(answers={"podman": "api-1234-deadbeef-extra\tpostgres:16\n"})
+
+    found = collect_datastores(runner)[0]
+
+    assert found.name == "testnode:container:api-1234-deadbeef-extra"
+    assert "launcher_pid" not in found.attributes
+    assert found.aliases == ()
+
+
 def test_remote_agent_homes_are_observed_on_their_host() -> None:
     found = collect_observed_agents(
         FakeRunner(host="alpha", answers={"python3": '["jarvis", "lumina-template"]\n'})
@@ -531,6 +576,17 @@ def test_remote_agent_homes_are_observed_on_their_host() -> None:
     assert [ci.name for ci in found] == ["jarvis"]
     assert found[0].observed is True
     assert found[0].node == "alpha"
+
+
+def test_remote_agent_listing_skips_dot_and_placeholder_dirs() -> None:
+    found = collect_observed_agents(
+        FakeRunner(
+            host="alpha",
+            answers={"python3": '[".git", "__unresolved-profile__", "jarvis"]\n'},
+        )
+    )
+
+    assert [ci.name for ci in found] == ["jarvis"]
 
 
 def test_model_endpoint_records_health_version_and_bounded_models() -> None:
@@ -1304,3 +1360,67 @@ def test_drift_reports_stored_cis_no_collector_saw(tmp_path: Path) -> None:
     findings = drift([], mgr)
 
     assert [f.kind for f in findings] == ["stored_not_discovered"]
+
+
+def _host_known_by_other_id(mgr: CMDBManager):
+    # Live 2026-11-11 (chg-a543c87b): the scan target 192.168.0.41 is the
+    # existing host CI ci-host-cbrd21-laptop12thgenintelcore, so the sighting
+    # is re-keyed, but every runs_on edge kept ci-host-192.168.0.41.
+    return mgr.create_ci(
+        "192.0.2.10",
+        "host",
+        attributes={"aliases": ["192.0.2.10"]},
+        tags=[DISCOVERED_TAG],
+        ci_id="ci-host-alpha",
+    )
+
+
+def _sightings():
+    host = DiscoveredCI("host", "192.0.2.10", "host", observed=True, aliases=("192.0.2.10",))
+    service = DiscoveredCI(
+        "service",
+        "skgateway",
+        "systemd",
+        observed=True,
+        node="192.0.2.10",
+        relationships=(("runs_on", host.ci_id),),
+        authority="network:192.0.2.10",
+    )
+    return host, service
+
+
+def test_edges_follow_a_host_that_resolves_to_an_existing_ci(tmp_path: Path) -> None:
+    mgr = CMDBManager(tmp_path)
+    canonical = _host_known_by_other_id(mgr)
+    host, service = _sightings()
+    assert host.ci_id != canonical.id
+
+    report = reconcile(mgr, [host, service], apply=True)
+
+    assert {r["target"] for r in report.relationships if r["rel_type"] == "runs_on"} == {
+        canonical.id
+    }
+    assert mgr.audit_relationships() == []
+    assert any(
+        r.rel_type == "runs_on" and r.target == canonical.id
+        for r in mgr.get_ci(service.ci_id).relationships
+    )
+
+
+def test_reconcile_corrects_edges_left_dangling_by_the_old_remap(tmp_path: Path) -> None:
+    mgr = CMDBManager(tmp_path)
+    canonical = _host_known_by_other_id(mgr)
+    host, service = _sightings()
+    mgr.create_ci("skgateway", "service", tags=[DISCOVERED_TAG], ci_id=service.ci_id)
+    mgr.add_relationship(
+        service.ci_id, "cmdb-discovery", "runs_on", host.ci_id, authority="network:192.0.2.10"
+    )
+    assert mgr.audit_relationships(), "fixture must start with the dangling edge"
+
+    reconcile(mgr, [host, service], apply=True)
+
+    assert mgr.audit_relationships() == []
+    targets = {
+        r.target for r in mgr.get_ci(service.ci_id).relationships if r.rel_type == "runs_on"
+    }
+    assert targets == {canonical.id}

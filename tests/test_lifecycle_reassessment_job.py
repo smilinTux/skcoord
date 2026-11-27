@@ -188,6 +188,49 @@ def test_unassign_clears_a_claim_so_it_is_not_stale(tmp_path: Path) -> None:
     assert report["classes"]["dead_worker_claims"] == []
 
 
+def test_claim_after_terminal_card_does_not_resurrect_dead_worker(
+    tmp_path: Path,
+) -> None:
+    cards = tmp_path / "cards"
+    card = _card(cards, "a80f87a9")
+    _events(
+        card,
+        [
+            {"action": "claim", "owner": "pi-qwen-old", "ts": "2026-09-04T20:00:00Z"},
+            {"action": "release_claim", "ts": "2026-09-04T20:30:00Z"},
+            {"action": "void", "ts": "2026-09-04T21:49:18Z"},
+            {"action": "archive", "ts": "2026-09-04T21:49:19Z"},
+            {
+                "action": "claim",
+                "owner": "pi-codex-chiap02-a80f87a9",
+                "ts": "2026-09-04T22:46:19Z",
+            },
+        ],
+    )
+
+    report = assess(cards, [], now=datetime(2026, 9, 10, tzinfo=timezone.utc))
+
+    assert report["classes"]["stale_claims"] == []
+    assert report["classes"]["dead_worker_claims"] == []
+
+
+def test_reclaim_before_terminal_state_remains_current(tmp_path: Path) -> None:
+    cards = tmp_path / "cards"
+    card = _card(cards, "reclaim1")
+    _events(
+        card,
+        [
+            {"action": "claim", "owner": "pi-worker-old", "ts": "2026-09-04T20:00:00Z"},
+            {"action": "release_claim", "ts": "2026-09-04T20:30:00Z"},
+            {"action": "claim", "owner": "pi-worker-new", "ts": "2026-09-04T21:00:00Z"},
+        ],
+    )
+
+    report = assess(cards, [], now=datetime(2026, 9, 10, tzinfo=timezone.utc))
+
+    assert report["classes"]["dead_worker_claims"][0]["owner"] == "pi-worker-new"
+
+
 def test_named_agent_claim_is_never_a_dead_worker(tmp_path: Path) -> None:
     """jarvis and lumina hold claims deliberately; only ephemeral workers die."""
     cards = tmp_path / "cards"
