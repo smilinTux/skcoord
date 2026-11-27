@@ -230,6 +230,25 @@ The 2026-08-21 review resolves `chioc09` as an alias of canonical `chiap09`,
 includes `chipv05`, treats the Windows/WSL endpoints of `chiwk12` as one asset,
 and keeps `chiwk11` in discovery-only scope pending role qualification.
 
+Those hostnames are facts about specific machines and are not rewritten here.
+`chi` is a **legacy site prefix** under
+[`SITE_AND_HOST_NAMING_STANDARD.md`](https://github.com/smilinTux/sk-standards/blob/main/standards/SITE_AND_HOST_NAMING_STANDARD.md),
+carried as a registry alias so both spellings resolve; a host that is never
+renamed is not out of compliance. Two consequences bind this repo specifically:
+
+- **Never rename a CI to adopt the naming standard.** A CI id is a key, not a
+  label, so renaming `ci-host-chiap08` is a delete plus a create and discards the
+  event log that current state is folded from. The rename destroys the history it
+  looks like it is moving. The standard says this outright, and it is why
+  migration is alias-first.
+- **The census scope is the estate's control plane, not the network.** An estate
+  is one `~/.skcapstone`, one Syncthing ring, one trust root, one operator. The
+  tailnet is transport and carries other tenants, which is exactly why "unrelated
+  tailnet devices are out of scope" above is the correct call rather than a
+  conservative one. A peer estate's nodes belong to the peer's registry, are
+  referenced by fqid (`<host>@<operator>.<org-domain>`), and never get a local
+  CI minted for them.
+
 Run `skcapstone cmdb scan` or a credentialed network reconcile without
 `--apply` first. An approved change (currently `chg-a76c0aee`) authorizes the
 window but does not waive explicit vault references, backup evidence, complete
@@ -342,6 +361,13 @@ Layout created under that root:
 | `coordination/archive/<host>.jsonl` | that host, append-only | Archive index. Task files are never mutated to archive them. |
 | `cards/<id>/core.json` | the creator, write-once via `O_EXCL` | CardStore birth facts. |
 | `cards/<id>/events/<agent>@<host>.jsonl` | that writer, append-only | CardStore events, folded on read. |
+
+That shared root is also the **estate** boundary in the sense of
+[`SITE_AND_HOST_NAMING_STANDARD.md`](https://github.com/smilinTux/sk-standards/blob/main/standards/SITE_AND_HOST_NAMING_STANDARD.md):
+one `~/.skcapstone`, one Syncthing ring, one trust root, one operator, one board.
+A peer estate is a separate root on a separate ring, and boards are not merged
+across estates. Anything crossing that line goes through a bridge node as one
+enumerated exchange, not by pointing two estates at one home path.
 
 Note that the CardStore lives at `<home>/cards/`, a **sibling** of
 `<home>/coordination/`, not inside it. Every `home` argument must name that

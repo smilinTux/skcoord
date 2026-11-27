@@ -153,6 +153,81 @@ def test_board_lock_times_out_when_another_process_holds_it(tmp_path) -> None:
     assert process.exitcode == 0
 
 
+@pytest.mark.parametrize("operation", ["create", "relabel"])
+def test_terminal_precondition_excludes_child_graph_mutations(tmp_path, operation) -> None:
+    """Creation and relabeling wait until a terminal transition is appended."""
+    board = Board(tmp_path)
+    parent = _create_claimed(board)
+    if operation == "relabel":
+        board.create_task(Task(id="hard0002", title="child"))
+    precondition_entered = Event()
+    release_precondition = Event()
+    mutation_done = Event()
+    errors: list[BaseException] = []
+
+    def precondition() -> None:
+        precondition_entered.set()
+        if not release_precondition.wait(timeout=5):
+            raise TimeoutError("precondition release timeout")
+
+    def complete() -> None:
+        try:
+            Board(tmp_path).complete_task("owner", parent.id, precondition=precondition)
+        except BaseException as exc:
+            errors.append(exc)
+
+    def mutate() -> None:
+        try:
+            if operation == "create":
+                Board(tmp_path).create_task(
+                    Task(id="hard0002", title="child", tags=[f"parent-{parent.id}"])
+                )
+            else:
+                Board(tmp_path).update_task("hard0002", add_tags=[f"parent-{parent.id}"])
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            mutation_done.set()
+
+    completion_thread = Thread(target=complete)
+    completion_thread.start()
+    assert precondition_entered.wait(timeout=2)
+    mutation_thread = Thread(target=mutate)
+    mutation_thread.start()
+    assert not mutation_done.wait(timeout=0.2)
+    release_precondition.set()
+    completion_thread.join(timeout=5)
+    mutation_thread.join(timeout=5)
+
+    assert errors == []
+    assert CardStore(tmp_path).fold(parent.id).status == Column.DONE
+    assert mutation_done.is_set()
+
+
+def test_move_precondition_runs_inside_shared_board_lock(tmp_path) -> None:
+    """The generic lifecycle move exposes the same atomic precondition hook."""
+    board = Board(tmp_path)
+    task = _create_claimed(board)
+    observed: list[bool] = []
+
+    def precondition() -> None:
+        with pytest.raises(TimeoutError, match="board mutation"):
+            with _board_mutation_lock(tmp_path, timeout_seconds=0.01):
+                pass
+        observed.append(True)
+
+    transition_task(
+        tmp_path,
+        task_id=task.id,
+        column="done",
+        actor="owner",
+        precondition=precondition,
+    )
+
+    assert observed == [True]
+    assert CardStore(tmp_path).fold(task.id).status == Column.DONE
+
+
 def test_home_replacement_keeps_direct_same_card_writer_excluded(tmp_path) -> None:
     parent = tmp_path / "namespace"
     home = parent / "home"
@@ -468,7 +543,9 @@ def test_card_event_log_symlink_is_rejected_at_open_time(tmp_path) -> None:
     card_events.symlink_to(outside, target_is_directory=True)
 
     with pytest.raises(ValueError, match="card event directory"):
-        CardEventLog(tmp_path).append(CardEvent(card_id="hard0001", action="move"))
+        CardEventLog(tmp_path).append(
+            CardEvent(card_id="hard0001", action="move", writer="operator", column="doing")
+        )
     assert list(outside.iterdir()) == []
 
 
@@ -702,7 +779,7 @@ def test_cardstore_listing_and_card_event_reads_reject_symlinked_content(tmp_pat
         store.list_card_ids()
 
     events = CardEventLog(tmp_path)
-    events.append(CardEvent(card_id="hard0002", action="move"))
+    events.append(CardEvent(card_id="hard0002", action="move", writer="operator", column="doing"))
     event_file = next((tmp_path / "coordination" / "card_events").glob("*.jsonl"))
     external_event = outside / "card-events.jsonl"
     external_event.write_text('{"card_id":"external","action":"move"}\n', encoding="utf-8")

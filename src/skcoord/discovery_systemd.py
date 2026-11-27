@@ -20,6 +20,10 @@ ORIGIN_DISTRO = "distro"
 ORIGIN_UNKNOWN = "unknown"
 
 _DISTRO_UNIT_DIRS = ("/usr/lib/systemd/", "/lib/systemd/", "/usr/local/lib/systemd/")
+# D-Bus activation and systemd-run write units here with per-session names
+# (dbus-:1.1-org.cinnamon.ScreenSaver@7, run-u42). They are not assets, and
+# collecting them minted new CIs every login.
+_TRANSIENT_UNIT_DIR = "/systemd/transient/"
 _CONTAINER_RESTART_SUFFIX = re.compile(r"^(?P<stable>.+)-(?P<pid>[1-9]\d*)-(?P<token>[0-9a-f]{8})$")
 
 
@@ -190,6 +194,8 @@ def collect_systemd_units(
         for unit, kind, load, active, sub in rows:
             unit_id = f"{unit}.{kind}"
             fragment = paths.get(unit_id, "")
+            if _TRANSIENT_UNIT_DIR in fragment:
+                continue
             self_ci_id = make_ci_id(CIType.SERVICE.value, unit)
             relationships = [("runs_on", make_ci_id(CIType.HOST.value, runner.host))]
             for dep in sorted(deps.get(unit_id, set()) - {unit_id}):

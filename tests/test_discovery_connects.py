@@ -282,3 +282,16 @@ def test_scan_surfaces_network_cis(tmp_path) -> None:
         make_ci_id(CIType.NETWORK.value, "testnode:bridge"),
         make_ci_id(CIType.NETWORK.value, "testnode:appnet"),
     }
+
+
+def test_no_container_runtime_is_partial_not_unavailable_under_coverage() -> None:
+    """A host with no docker or podman (a Proxmox hypervisor) must not read as
+    an unavailable collector: that marks the whole target incomplete and, with
+    failure_budget 0, refuses every governed network apply. Found 2026-11-26
+    adding norpv1200/norpv1300 to the nor CMDB scan."""
+    from skcoord.cmdb_reconcile import _CoverageRunner
+
+    probe = '{"docker": false, "podman": false}'
+    covered = _CoverageRunner(FakeRunner(answers={"shutil.which": probe}))
+    assert collect_container_networks(covered) == []
+    assert covered.record("collect_container_networks", 0).status == "partial"

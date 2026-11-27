@@ -29,11 +29,73 @@ from enum import Enum
 from pathlib import Path
 from typing import Callable, Optional, Sequence
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from .atomic_io import atomic_write_text
 
 logger = logging.getLogger(__name__)
+
+#: Syncthing conflict copy, e.g. ``name.sync-conflict-20261011-184807-ANXXYPM.json``.
+SYNC_CONFLICT_RE = re.compile(r"\.sync-conflict-\d{8}-\d{6}-[A-Za-z0-9]+(?:\.|$)")
+
+#: Conflict copies already counted in THIS process, so each is noted once.
+_SEEN_CONFLICT_COPIES: set[str] = set()
+
+
+def is_sync_conflict_copy(name: str) -> bool:
+    """True when ``name`` is a Syncthing conflict copy, never a real record."""
+    return SYNC_CONFLICT_RE.search(name) is not None
+
+
+def _note_conflict_copy(path: Path) -> None:
+    """Count a skipped conflict copy once per process, at debug level."""
+    key = str(path)
+    if key in _SEEN_CONFLICT_COPIES:
+        return
+    _SEEN_CONFLICT_COPIES.add(key)
+    logger.debug(
+        "Ignoring Syncthing conflict copy %s (%d seen this process)",
+        path.name,
+        len(_SEEN_CONFLICT_COPIES),
+    )
+
+#: Refusal reasons that can never resolve on their own. A caller that parks a
+#: card on a terminal refusal is correct; parking a transient one strands work.
+_TERMINAL_REFUSALS = frozenset({"absent", "voided", "archived", "done"})
+
+
+class TaskUnclaimable(ValueError):
+    """One specific task cannot be claimed. Every other card is unaffected.
+
+    This is the typed refusal the claim path owes its callers. A daemon holding
+    a queue of cards (sknoded's builder dispatch) must be able to skip exactly
+    this and keep running, without reaching for a blanket ``except Exception``
+    that would also swallow a corrupt store, a vanished coordination home, or a
+    permissions failure.
+
+    Subclasses ``ValueError`` deliberately: ``coord claim``, the MCP
+    ``coord_claim`` tool, ``auction`` and ``spawner`` all catch ValueError to
+    render a user-facing message, and the message text is unchanged for every
+    pre-existing reason. Narrowing the type is purely additive.
+
+    Attributes:
+        task_id: The card that was refused.
+        reason: One of ``absent``, ``voided``, ``archived``, ``done``,
+            ``owned``, ``dependencies``, ``inconsistent``.
+        terminal: True when the refusal can never resolve, so a scheduler may
+            stop re-offering the card. False for ``owned``/``dependencies``,
+            which are ordinary contention and clear on their own.
+    """
+
+    def __init__(self, task_id: str, reason: str, message: str) -> None:
+        self.task_id = task_id
+        self.reason = reason
+        super().__init__(message)
+
+    @property
+    def terminal(self) -> bool:
+        """Whether this refusal is permanent for the card's current identity."""
+        return self.reason in _TERMINAL_REFUSALS
 
 
 def validate_shared_home(home: Path) -> Path:
@@ -195,6 +257,12 @@ class AgentFile(BaseModel):
     capabilities: list[str] = Field(default_factory=list)
     itil_claims: list[str] = Field(default_factory=list)
     notes: str = ""
+
+    @field_validator("state", mode="before")
+    @classmethod
+    def normalize_legacy_terminal_state(cls, value: object) -> object:
+        """Map the old task outcome spelling to an availability state."""
+        return AgentState.IDLE if value == "completed" else value
 
     @field_validator("agent", mode="before")
     @classmethod
@@ -360,6 +428,9 @@ class Board:
         if not self.tasks_dir.exists():
             return tasks
         for f in sorted(self.tasks_dir.glob("*.json")):
+            if is_sync_conflict_copy(f.name):
+                _note_conflict_copy(f)
+                continue
             try:
                 data = json.loads(f.read_text(encoding="utf-8"))
                 task = Task.model_validate(data)
@@ -386,6 +457,9 @@ class Board:
         if self.agents_dir.is_symlink() or not self.agents_dir.is_dir():
             raise ValueError("agent projection directory must be a regular directory")
         for f in sorted(self.agents_dir.glob("*.json")):
+            if is_sync_conflict_copy(f.name):
+                _note_conflict_copy(f)
+                continue
             try:
                 if f.is_symlink() or not f.is_file():
                     raise ValueError("agent projection must be a regular file")
@@ -703,6 +777,48 @@ class Board:
                 return False
         return True
 
+    def _release_transition_is_applied(
+        self,
+        task_id: str,
+        transition_id: str,
+        owner: str,
+        revision: str,
+        before,
+    ) -> bool:
+        """Return whether one exact current or conflicting claim was released."""
+        from .card import Column
+        from .card_store import CardStore
+
+        store = CardStore(self.home)
+        if not store.has_transition(task_id, transition_id):
+            return False
+        card = store.fold(task_id)
+        if card is None:
+            return False
+        if before.owner == owner and before.meta.get("_claim_revision") == revision:
+            return (
+                card.owner is None
+                and card.status == Column.BACKLOG
+                and "_claim_revision" not in card.meta
+            )
+        conflicts = list(before.meta.get("claim_conflicts", []))
+        matching = [
+            conflict
+            for conflict in conflicts
+            if isinstance(conflict, dict)
+            and conflict.get("owner") == owner
+            and conflict.get("claim_revision") == revision
+        ]
+        if len(matching) != 1:
+            return False
+        expected_conflicts = [conflict for conflict in conflicts if conflict is not matching[0]]
+        return (
+            card.owner == before.owner
+            and card.status == before.status
+            and card.meta.get("_claim_revision") == before.meta.get("_claim_revision")
+            and list(card.meta.get("claim_conflicts", [])) == expected_conflicts
+        )
+
     def _card_matches_snapshot(self, task_id: str, snapshot) -> bool:
         """Return whether a CardStore card has its captured owner and column."""
         from .card_store import CardStore
@@ -815,15 +931,184 @@ class Board:
             Path to the written file.
         """
         self.ensure_dirs()
-        slug = _slugify_filename(task.title)[:40]
-        # Reason: filename includes id + slug for human readability
-        filename = f"{task.id}-{slug}.json"
-        path = self.tasks_dir / filename
-        # CardStore is the creation policy choke point. Govern before writing the
-        # legacy projection so a refused CLI or MCP call cannot leave an orphan.
-        self._mirror_card_store("create", task=task)
+        with _board_mutation_lock(self.home):
+            slug = _slugify_filename(task.title)[:40]
+            # Reason: filename includes id + slug for human readability
+            filename = f"{task.id}-{slug}.json"
+            path = self.tasks_dir / filename
+            # CardStore is the creation policy choke point. Govern before writing the
+            # legacy projection so a refused CLI or MCP call cannot leave an orphan.
+            self._mirror_card_store("create", task=task)
+            atomic_write_text(path, json.dumps(task.model_dump(), indent=2) + "\n")
+            return path
+
+    def create_explicit_task(self, task: Task, digest: str, actor: str) -> Path:
+        """Create or exactly replay one caller-supplied task ID."""
+        self.ensure_dirs()
+        with _board_mutation_lock(self.home):
+            return self._create_explicit_task_unlocked(task, digest, actor)
+
+    def _create_explicit_task_unlocked(
+        self, task: Task, digest: str, actor: str
+    ) -> Path:
+        """Create/replay with the caller holding the board mutation lock."""
+        from .card_store import mirror_coord_create_explicit
+
+        path = self.tasks_dir / f"{task.id}-{_slugify_filename(task.title)[:40]}.json"
+        created = mirror_coord_create_explicit(self.home, task, digest, actor)
+        if created:
+            atomic_write_text(path, json.dumps(task.model_dump(), indent=2) + "\n")
+            return path
+        if path.exists() or path.is_symlink():
+            try:
+                payload = self._read_regular_file_bytes(path)
+            except ValueError as exc:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                raise ValueError("legacy projection is unsafe") from exc
+            try:
+                stored = Task.model_validate(json.loads(payload.decode("utf-8")))
+            except (UnicodeDecodeError, json.JSONDecodeError, ValidationError) as exc:
+                raise ValueError(
+                    f"Task {task.id} has an explicit creation conflict"
+                ) from exc
+            if stored != task:
+                raise ValueError(f"Task {task.id} has an explicit creation conflict")
+            return path
         atomic_write_text(path, json.dumps(task.model_dump(), indent=2) + "\n")
         return path
+
+    def create_helper_task(
+        self,
+        task: Task,
+        digest: str,
+        actor: str,
+        parent_id: str,
+        expected_claim_revision: str,
+    ) -> Path:
+        """Delegate isolated source assistance under the current parent's claim.
+
+        The local authority owns the board then parent locks through validation
+        and durable explicit creation. This never transfers the parent's claim.
+        """
+        from .card_store import CardStore, card_mutation_lock
+        from .owner_helpers import validate_helper_request
+
+        self.ensure_dirs()
+        with _board_mutation_lock(self.home):
+            with card_mutation_lock(self.home, parent_id):
+                store = CardStore(self.home)
+                validate_helper_request(
+                    store, task, digest, actor, parent_id, expected_claim_revision
+                )
+                return self._create_explicit_task_unlocked(task, digest, actor)
+
+    def create_claimed_task(
+        self, task: Task, agent_name: str, request_digest: str = "", actor: str = ""
+    ) -> tuple[Path, str]:
+        """Create a task whose authoritative first fold is owned by ``agent_name``."""
+        from .card_store import (
+            CardStore,
+            card_store_write_enabled,
+            mirror_coord_create_claimed,
+        )
+
+        canonical = AgentFile.validate_agent_name(agent_name)
+        if not card_store_write_enabled():
+            raise ValueError("atomic create-and-claim requires the CardStore")
+        with _board_mutation_lock(self.home):
+            store = CardStore(self.home)
+            existing_core = store._load_core(task.id)
+            if request_digest and existing_core is not None:
+                # Reason: exact claimed replay must win before mutable dependency checks.
+                revision = mirror_coord_create_claimed(
+                    self.home,
+                    task,
+                    canonical,
+                    request_digest=request_digest,
+                    actor=actor,
+                )
+                self.ensure_dirs()
+                slug = _slugify_filename(task.title)[:40]
+                path = self.tasks_dir / f"{task.id}-{slug}.json"
+                if path.exists() or path.is_symlink():
+                    try:
+                        payload = self._read_regular_file_bytes(path)
+                    except ValueError as exc:
+                        raise ValueError("legacy projection is unsafe") from exc
+                    try:
+                        stored = Task.model_validate(json.loads(payload.decode("utf-8")))
+                    except (UnicodeDecodeError, json.JSONDecodeError, ValidationError) as exc:
+                        raise ValueError(
+                            f"Task {task.id} has an explicit creation conflict"
+                        ) from exc
+                    if stored != task:
+                        raise ValueError(
+                            f"Task {task.id} has an explicit creation conflict"
+                        )
+                else:
+                    atomic_write_text(path, json.dumps(task.model_dump(), indent=2) + "\n")
+                card = store.fold(task.id)
+                if (
+                    card is None
+                    or card.owner != canonical
+                    or card.status.value != "doing"
+                    or card.meta.get("_claim_revision") != revision
+                ):
+                    raise RuntimeError("atomic create-and-claim readback failed")
+                return path, revision
+
+            if task.dependencies:
+                views = {
+                    view.task.id: view for view in self.get_task_views(include_archived=True)
+                }
+                incomplete = [
+                    dependency
+                    for dependency in task.dependencies
+                    if dependency not in views
+                    or views[dependency].status != TaskStatus.DONE
+                ]
+                if incomplete:
+                    message = f"Task {task.id} has incomplete dependencies: {', '.join(incomplete)}"
+                    if request_digest:
+                        store.reserve_explicit_rejection(
+                            task.id, request_digest, actor, message
+                        )
+                    raise ValueError(message)
+            revision = mirror_coord_create_claimed(
+                self.home, task, canonical,
+                request_digest=request_digest, actor=actor,
+            )
+            self.ensure_dirs()
+            slug = _slugify_filename(task.title)[:40]
+            path = self.tasks_dir / f"{task.id}-{slug}.json"
+            if not request_digest or not path.exists():
+                atomic_write_text(path, json.dumps(task.model_dump(), indent=2) + "\n")
+            agent, bumped = self._claim_task(canonical, task.id)
+            if bumped is not None:
+                self._mirror_card_store(
+                    "demote",
+                    task_id=bumped,
+                    agent=canonical,
+                    transition_id=uuid.uuid4().hex,
+                )
+            card = store.fold(task.id)
+            if (
+                card is None
+                or card.owner != agent.agent
+                or card.status.value != "doing"
+                or card.meta.get("_claim_revision") != revision
+            ):
+                raise RuntimeError("atomic create-and-claim readback failed")
+            return path, revision
+
+    def create_claimed_explicit_task(
+        self, task: Task, agent_name: str, digest: str, actor: str
+    ) -> tuple[Path, str]:
+        """Create and claim a caller-supplied ID with durable rejection memory."""
+        return self.create_claimed_task(task, agent_name, digest, actor)
 
     def _mirror_card_store(self, op: str, **kw) -> None:
         """Flag-gated dual-write into the event-sourced CardStore (Phase 4).
@@ -896,6 +1181,7 @@ class Board:
                     kw["actor"],
                     kw["expected_claim_revision"],
                     transition_id=kw.get("transition_id", ""),
+                    abandon_reason=kw.get("abandon_reason"),
                 )
         except Exception as exc:  # noqa: BLE001
             logger.warning("CardStore mirror (%s) failed: %s", op, exc)
@@ -1278,6 +1564,29 @@ class Board:
         the atomic raw-dict helper.
         """
 
+        from .card_store import card_mutation_lock, validate_card_lock_identifier
+
+        validate_card_lock_identifier(task_id)
+        with _board_mutation_lock(self.home), card_mutation_lock(self.home, task_id):
+            return self._update_task_unlocked(
+                task_id,
+                description=description,
+                acceptance_criteria=acceptance_criteria,
+                add_tags=add_tags,
+                remove_tags=remove_tags,
+                run_id=run_id,
+            )
+
+    def _update_task_unlocked(
+        self,
+        task_id: str,
+        description: str | None = None,
+        acceptance_criteria: list[str] | None = None,
+        add_tags: list[str] | None = None,
+        remove_tags: list[str] | None = None,
+        run_id: str | None = None,
+    ) -> Path:
+        """Apply an update while the caller holds board and card locks."""
         tag_events: list[tuple[str, str, str]] = []
 
         def _mutate(d: dict) -> None:
@@ -1659,6 +1968,25 @@ class Board:
             )
         return views
 
+    @staticmethod
+    def _parse_board_timestamp(raw: object, *, cutoff: datetime) -> datetime:
+        """Parse an ISO timestamp; unparseable values count as older than cutoff."""
+        try:
+            ts = datetime.fromisoformat(str(raw))
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            return ts
+        except (ValueError, TypeError):
+            return cutoff - timedelta(days=1)
+
+    @staticmethod
+    def _is_human_held_task(task: Task) -> bool:
+        """True when backlog aging must not treat the card as abandoned."""
+        tags = {str(tag).lower() for tag in task.tags}
+        if "human-gate" in tags:
+            return True
+        return "[human]" in task.title.lower()
+
     def archive_done_tasks(
         self,
         older_than_days: int = 14,
@@ -1667,10 +1995,12 @@ class Board:
     ) -> list[str]:
         """Age done tasks off the active board.
 
-        A done task is eligible when its age (from the task's created_at, the
-        only timestamp available on the derived-status model) exceeds
-        ``older_than_days``. Archiving appends to this host's archive index and
-        never mutates the task file.
+        Status for eligibility prefers the authoritative legacy claim/completion
+        projection (Phase 4e). CardStore-only done cards are also eligible, and
+        CardStore ``updated_at`` is preferred as the completion age when present.
+
+        Archiving appends to this host's archive index and never mutates the
+        task file.
 
         Args:
             older_than_days: Age threshold in days.
@@ -1682,22 +2012,42 @@ class Board:
         """
         ref = now or datetime.now(timezone.utc)
         cutoff = ref - timedelta(days=older_than_days)
-        eligible: list[str] = []
-        # Authoritative legacy status: never age off a task on best-effort store
-        # state (a completion recorded only in the legacy agent file must count).
+        done_ages: dict[str, object] = {}
+
+        # Authoritative legacy status: a completion recorded only in the legacy
+        # agent file must count even when the store mirror is behind.
         for view in self._legacy_task_views():
             if view.status != TaskStatus.DONE:
                 continue
-            created = view.task.created_at
-            try:
-                ts = datetime.fromisoformat(created)
-                if ts.tzinfo is None:
-                    ts = ts.replace(tzinfo=timezone.utc)
-            except (ValueError, TypeError):
-                # No parseable timestamp: treat as old enough to archive.
-                ts = cutoff - timedelta(days=1)
+            done_ages[view.task.id] = (
+                view.task.meta.get("_board_updated_at") or view.task.created_at
+            )
+
+        # CardStore may hold done cards with no legacy task file (cutover gap).
+        try:
+            from . import card_store
+            from .card import Column
+
+            if card_store.card_store_read_enabled():
+                store = card_store.CardStore(self.home)
+                for card in store.list_cards(include_archived=False, degrade_unreadable=True):
+                    if getattr(card.kind, "value", card.kind) not in ("task", "epic"):
+                        continue
+                    if card.status != Column.DONE:
+                        continue
+                    age = card.updated_at or card.created_at or done_ages.get(card.id)
+                    if card.updated_at:
+                        done_ages[card.id] = card.updated_at
+                    else:
+                        done_ages.setdefault(card.id, age)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("CardStore archive scan failed: %s", exc)
+
+        eligible: list[str] = []
+        for tid, age_raw in done_ages.items():
+            ts = self._parse_board_timestamp(age_raw, cutoff=cutoff)
             if ts <= cutoff:
-                eligible.append(view.task.id)
+                eligible.append(tid)
         if not dry_run:
             for tid in eligible:
                 self.archive_task(tid, by="archive-done")
@@ -1711,9 +2061,11 @@ class Board:
     ) -> list[str]:
         """Archive ancient unclaimed open tasks (backlog rot).
 
-        Only tasks that are still OPEN (never claimed, never worked) and whose
-        created_at exceeds ``older_than_days`` are eligible. Conservative by
-        default so live backlog is not swept prematurely.
+        Only tasks that are still OPEN on the authoritative legacy projection
+        (never claimed, never worked) and whose created_at exceeds
+        ``older_than_days`` are eligible. Cards tagged ``human-gate`` or titled
+        with ``[HUMAN]`` are skipped so recorded decisions are not archived as
+        abandoned backlog.
 
         Args:
             older_than_days: Age threshold in days.
@@ -1731,12 +2083,9 @@ class Board:
         for view in self._legacy_task_views():
             if view.status != TaskStatus.OPEN:
                 continue
-            try:
-                ts = datetime.fromisoformat(view.task.created_at)
-                if ts.tzinfo is None:
-                    ts = ts.replace(tzinfo=timezone.utc)
-            except (ValueError, TypeError):
-                ts = cutoff - timedelta(days=1)
+            if self._is_human_held_task(view.task):
+                continue
+            ts = self._parse_board_timestamp(view.task.created_at, cutoff=cutoff)
             if ts <= cutoff:
                 eligible.append(view.task.id)
         if not dry_run:
@@ -1744,8 +2093,95 @@ class Board:
                 self.archive_task(tid, by="age-backlog")
         return eligible
 
+    def prune_stale_locks(
+        self,
+        older_than_days: int = 7,
+        now: Optional[datetime] = None,
+        dry_run: bool = False,
+    ) -> list[str]:
+        """Remove idle coordination lock files older than the threshold.
+
+        Lock files are empty flock targets. Stale ones accumulate under
+        Syncthing and slow directory scans. Only unlinks by mtime; does not
+        touch locks newer than the cutoff.
+
+        Args:
+            older_than_days: Keep locks touched more recently than this.
+            now: Reference time (defaults to UTC now); injectable for tests.
+            dry_run: When True, return paths that would be removed.
+
+        Returns:
+            list[str]: Relative lock filenames removed (or that would be).
+        """
+        ref = now or datetime.now(timezone.utc)
+        cutoff_ts = (ref - timedelta(days=older_than_days)).timestamp()
+        locks_dir = self.coord_dir / "locks"
+        removed: list[str] = []
+        if not locks_dir.is_dir():
+            return removed
+        for path in sorted(locks_dir.glob("*.lock")):
+            try:
+                if path.stat().st_mtime > cutoff_ts:
+                    continue
+            except OSError:
+                continue
+            removed.append(path.name)
+            if not dry_run:
+                try:
+                    path.unlink()
+                except OSError as exc:
+                    logger.warning("Failed to prune lock %s: %s", path.name, exc)
+                    removed.pop()
+        return removed
+
+    def _unclaimable_absent(self, task_id: str) -> "TaskUnclaimable":
+        """Name the real reason a task is missing from the claim projection.
+
+        ``get_task_views`` reads ``list_cards(include_archived=False)`` and the
+        ``void`` fold sets ``archived=True`` (see the ``void`` branch in
+        ``card_store.fold``). A voided card therefore drops out of the
+        projection the claim path searches while still existing on disk and
+        folding perfectly well, so the old bare ``Task <id> not found`` sent
+        operators hunting for a card sitting right in front of them. Observed
+        live on ziowk01-wsl 2026-09-18: card 59553966 was voided and replaced
+        by 59550966 during a source-binding repair while sknoded still held it
+        queued, and the bare ValueError killed the whole node worker.
+
+        The fold here is a diagnosis, not a gate: if it raises, the store is
+        genuinely unreadable and that propagates untouched. An unreadable store
+        is infrastructure failure and must stay loud; only an individual card
+        being absent, voided or archived degrades to a skippable refusal.
+        """
+        from .card_store import CardStore
+
+        card = CardStore(self.home).fold(task_id)
+        if card is None:
+            return TaskUnclaimable(task_id, "absent", f"Task {task_id} not found")
+        if card.meta.get("voided"):
+            return TaskUnclaimable(
+                task_id,
+                "voided",
+                f"Task {task_id} was voided at {card.meta.get('voided_at') or 'unknown time'} "
+                f"by {card.meta.get('voided_by') or 'unknown writer'}",
+            )
+        if card.archived:
+            return TaskUnclaimable(task_id, "archived", f"Task {task_id} is archived")
+        # Foldable, live, yet absent from the projection: the board and the
+        # store disagree. That is a consistency fault rather than a card
+        # lifecycle outcome, so it is non-terminal and nothing parks on it.
+        return TaskUnclaimable(
+            task_id,
+            "inconsistent",
+            f"Task {task_id} folds but is missing from the claim projection",
+        )
+
     def _claim_task(
-        self, agent_name: str, task_id: str, force: bool = False
+        self,
+        agent_name: str,
+        task_id: str,
+        force: bool = False,
+        *,
+        drop_bumped_claim: bool = False,
     ) -> tuple[AgentFile, str | None]:
         """Have an agent claim a task.
 
@@ -1771,7 +2207,7 @@ class Board:
                 break
 
         if target is None:
-            raise ValueError(f"Task {task_id} not found")
+            raise self._unclaimable_absent(task_id)
         # Kanban moves to ready/doing/review carry no owner, yet the card
         # folds to CLAIMED/IN_PROGRESS/REVIEW with claimed_by None. The
         # lifecycle reconciler only projects claims for cards WITH an owner
@@ -1798,9 +2234,11 @@ class Board:
             and not ownerless_active
             and target.claimed_by != agent_name
         ):
-            raise ValueError(
+            raise TaskUnclaimable(
+                task_id,
+                "done" if target.status == TaskStatus.DONE else "owned",
                 f"Task {task_id} already {target.status.value} by "
-                f"{target.claimed_by or 'unknown owner'}"
+                f"{target.claimed_by or 'unknown owner'}",
             )
         if target.task.dependencies:
             # Dependency statuses are looked up across archived tasks too, so a
@@ -1815,8 +2253,10 @@ class Board:
                 if dep_id not in dep_views or dep_views[dep_id].status != TaskStatus.DONE
             ]
             if incomplete:
-                raise ValueError(
-                    f"Task {task_id} has incomplete dependencies: {', '.join(incomplete)}"
+                raise TaskUnclaimable(
+                    task_id,
+                    "dependencies",
+                    f"Task {task_id} has incomplete dependencies: {', '.join(incomplete)}",
                 )
 
         agent = self.load_agent(agent_name) or AgentFile(agent=agent_name)
@@ -1824,6 +2264,8 @@ class Board:
         # is no longer in_progress, so legacy derives it as CLAIMED (ready). The
         # store must demote it too, else the cutover read shows it as doing.
         bumped = agent.current_task if agent.current_task not in (None, task_id) else None
+        if drop_bumped_claim and bumped is not None:
+            agent.claimed_tasks = [claimed for claimed in agent.claimed_tasks if claimed != bumped]
         if task_id not in agent.claimed_tasks:
             agent.claimed_tasks.append(task_id)
         agent.current_task = task_id
@@ -1847,6 +2289,28 @@ class Board:
 
         canonical = AgentFile.validate_agent_name(agent_name)
         validate_card_lock_identifier(task_id)
+        # A card with no directory at all cannot be locked: card_mutation_lock
+        # raises a bare "has no foldable core" ValueError from inside the
+        # ExitStack, which is the same daemon-killing shape as the voided-card
+        # crash this refusal exists to stop. Diagnose it up front so absent and
+        # voided both arrive as TaskUnclaimable. Gated on the write flag for
+        # exactly the reason card_mutation_lock is: explicit legacy-only
+        # rollback mode has no card directory for a perfectly claimable task
+        # and falls back to the hashed lock. _load_core returns None only for a
+        # genuinely absent card; a malformed or unreadable core raises from
+        # inside it and stays loud, which is correct.
+        if card_store_write_enabled() and CardStore(self.home)._load_core(task_id) is None:
+            # The message is deliberately byte-identical to the one
+            # card_mutation_lock raises from _open_existing_card_lock. That
+            # exact string is pinned by an existing downstream fence
+            # (skcapstone tests/test_coordination.py::test_claim_nonexistent_task,
+            # anchored ^...$), and this change is about the TYPE of the
+            # refusal, not its wording: the caller now gets a skippable
+            # TaskUnclaimable where it used to get a bare ValueError, and
+            # every reader of the message sees what it always saw.
+            raise TaskUnclaimable(
+                task_id, "absent", f"CardStore card {task_id} has no foldable core"
+            )
         with _board_mutation_lock(self.home):
             current = self.load_agent(canonical)
             affected = {task_id}
@@ -1859,10 +2323,99 @@ class Board:
                 target_snapshot = (
                     CardStore(self.home).fold(task_id) if card_store_write_enabled() else None
                 )
-                agent, bumped = self._claim_task(canonical, task_id, force)
+                existing_revision = (
+                    target_snapshot.meta.get("_claim_revision")
+                    if target_snapshot is not None
+                    and target_snapshot.owner == canonical
+                    and target_snapshot.status.value in {"doing", "review"}
+                    else None
+                )
+                if isinstance(existing_revision, str) and existing_revision:
+                    if current is not None and current.current_task == task_id:
+                        return current
+                    projected_bumped = current.current_task if current is not None else None
+                    bumped_snapshot = (
+                        CardStore(self.home).fold(projected_bumped)
+                        if projected_bumped is not None
+                        else None
+                    )
+                    bumped_requires_demote = (
+                        bumped_snapshot is not None
+                        and bumped_snapshot.owner == canonical
+                        and bumped_snapshot.status.value in {"doing", "review"}
+                    )
+                    bumped_is_owned_claim = (
+                        bumped_snapshot is not None
+                        and bumped_snapshot.owner == canonical
+                        and bumped_snapshot.status.value in {"ready", "doing", "review"}
+                    )
+                    _, original = self._snapshot_agent_projection(canonical)
+                    agent, bumped = self._claim_task(
+                        canonical,
+                        task_id,
+                        force,
+                        drop_bumped_claim=not bumped_is_owned_claim,
+                    )
+                    if bumped is None:
+                        return agent
+                    if not bumped_requires_demote:
+                        return agent
+                    transition = (bumped, uuid.uuid4().hex)
+                    try:
+                        self._mirror_card_store(
+                            "demote",
+                            task_id=bumped,
+                            agent=canonical,
+                            transition_id=transition[1],
+                        )
+                    except Exception as exc:
+                        if self._store_transitions_are_applied(
+                            [transition], [(bumped, canonical, "ready")]
+                        ):
+                            return agent
+                        self._recover_store_failure(
+                            operation="claim",
+                            task_id=task_id,
+                            owner=canonical,
+                            actor=canonical,
+                            original=original,
+                            error=exc,
+                            transition_ids=[transition],
+                        )
+                        raise
+                    return agent
+                bumped = current.current_task if current is not None else None
+                bumped_snapshot = (
+                    CardStore(self.home).fold(bumped)
+                    if bumped is not None and card_store_write_enabled()
+                    else None
+                )
+                bumped_is_owned_claim = (
+                    bumped_snapshot is not None
+                    and bumped_snapshot.owner == canonical
+                    and bumped_snapshot.status.value in {"ready", "doing", "review"}
+                )
+                bumped_requires_demote = bumped is not None and (
+                    not card_store_write_enabled()
+                    or (
+                        bumped_snapshot is not None
+                        and bumped_snapshot.owner == canonical
+                        and bumped_snapshot.status.value in {"doing", "review"}
+                    )
+                )
+                agent, bumped = self._claim_task(
+                    canonical,
+                    task_id,
+                    force,
+                    drop_bumped_claim=(
+                        card_store_write_enabled()
+                        and bumped is not None
+                        and not bumped_is_owned_claim
+                    ),
+                )
                 transitions = [(task_id, uuid.uuid4().hex)]
                 target_claim_revision = uuid.uuid4().hex
-                if bumped is not None:
+                if bumped_requires_demote:
                     transitions.append((bumped, uuid.uuid4().hex))
                 try:
                     self._mirror_card_store(
@@ -1872,7 +2425,7 @@ class Board:
                         transition_id=transitions[0][1],
                         claim_revision=target_claim_revision,
                     )
-                    if bumped is not None:
+                    if bumped_requires_demote:
                         self._mirror_card_store(
                             "demote",
                             task_id=bumped,
@@ -1881,12 +2434,12 @@ class Board:
                         )
                 except Exception as exc:
                     expected_states = [(task_id, canonical, "doing")]
-                    if bumped is not None:
+                    if bumped_requires_demote:
                         expected_states.append((bumped, canonical, "ready"))
                     if self._store_transitions_are_applied(transitions, expected_states):
                         return agent
                     compensation: list[tuple[str, str]] = []
-                    if bumped is not None:
+                    if bumped_requires_demote:
                         try:
                             compensation = self._compensate_partial_claim(
                                 task_id=task_id,
@@ -1920,15 +2473,33 @@ class Board:
                     raise
                 return agent
 
-    def release_claim(self, owner: str, task_id: str, actor: str = "") -> bool:
-        """Release one exact active claim without completing the task."""
+    def release_claim(
+        self,
+        owner: str,
+        task_id: str,
+        actor: str = "",
+        expected_claim_revision: str | None = None,
+        abandon_reason: str | None = None,
+    ) -> bool:
+        """Release one exact active claim without completing the task.
+
+        ``abandon_reason`` is optional so every existing caller keeps recording
+        "unspecified" unchanged; a caller that knows why the claim is ending
+        should pass one of the closed vocabulary members explicitly.
+        """
         from .card_store import card_mutation_lock, validate_card_lock_identifier
 
         canonical_owner = AgentFile.validate_agent_name(owner)
         validate_card_lock_identifier(task_id)
         audit_actor = AgentFile.validate_agent_name(actor or canonical_owner)
         with _board_mutation_lock(self.home), card_mutation_lock(self.home, task_id):
-            return self._release_claim_locked(canonical_owner, task_id, actor=audit_actor)
+            return self._release_claim_locked(
+                canonical_owner,
+                task_id,
+                actor=audit_actor,
+                expected_claim_revision=expected_claim_revision,
+                abandon_reason=abandon_reason,
+            )
 
     def _release_claim_locked(
         self,
@@ -1936,7 +2507,9 @@ class Board:
         task_id: str,
         *,
         actor: str,
+        expected_claim_revision: str | None = None,
         allow_missing_card_store: bool = False,
+        abandon_reason: str | None = None,
     ) -> bool:
         """Release one exact claim while the board and card locks are held."""
         from .card_store import (
@@ -1950,11 +2523,28 @@ class Board:
             raise ValueError(f"claim owner {owner} not found")
         if task_id not in agent.claimed_tasks and agent.current_task != task_id:
             return False
-        expected_claim_revision: str | None = None
+        current_claim_revision: str | None = None
+        card_before = None
         should_mirror = card_store_write_enabled()
         if should_mirror:
             try:
-                expected_claim_revision = current_claim_precondition(self.home, task_id, owner)
+                card_before = CardStore(self.home).fold(task_id)
+                current_claim_revision = current_claim_precondition(self.home, task_id, owner)
+                releases_conflict = card_before is not None and card_before.owner != owner
+                if releases_conflict and (
+                    not isinstance(expected_claim_revision, str) or not expected_claim_revision
+                ):
+                    raise ValueError(
+                        f"exact expected claim revision required to release conflict on {task_id}"
+                    )
+                if (
+                    expected_claim_revision is not None
+                    and current_claim_revision != expected_claim_revision
+                ):
+                    raise ValueError(
+                        f"claim revision conflict for {task_id}: expected "
+                        f"{expected_claim_revision}, current {current_claim_revision}"
+                    )
             except ValueError:
                 if (
                     not allow_missing_card_store
@@ -1976,11 +2566,34 @@ class Board:
                 task_id=task_id,
                 owner=owner,
                 actor=actor,
-                expected_claim_revision=expected_claim_revision,
+                expected_claim_revision=current_claim_revision,
                 transition_id=transitions[0][1],
+                abandon_reason=abandon_reason,
             )
+            if (
+                card_before is None
+                or current_claim_revision is None
+                or not self._release_transition_is_applied(
+                    task_id,
+                    transitions[0][1],
+                    owner,
+                    current_claim_revision,
+                    card_before,
+                )
+            ):
+                raise RuntimeError("release transition did not reach its postcondition")
         except Exception as exc:
-            if self._store_transitions_are_applied(transitions, [(task_id, None, "backlog")]):
+            if (
+                card_before is not None
+                and current_claim_revision is not None
+                and self._release_transition_is_applied(
+                    task_id,
+                    transitions[0][1],
+                    owner,
+                    current_claim_revision,
+                    card_before,
+                )
+            ):
                 return True
             self._recover_store_failure(
                 operation="release_claim",
@@ -2011,6 +2624,10 @@ class Board:
             agent.completed_tasks.append(task_id)
         if agent.current_task == task_id:
             agent.current_task = agent.claimed_tasks[0] if agent.claimed_tasks else None
+        if agent.current_task:
+            agent.state = AgentState.ACTIVE
+        elif agent.state == AgentState.ACTIVE:
+            agent.state = AgentState.IDLE
         self.save_agent(agent)
 
         return agent
@@ -2044,7 +2661,12 @@ class Board:
             if dependency_id not in by_id or by_id[dependency_id].status != TaskStatus.DONE
         ]
 
-    def complete_task(self, agent_name: str, task_id: str) -> AgentFile:
+    def complete_task(
+        self,
+        agent_name: str,
+        task_id: str,
+        precondition: Callable[[], None] | None = None,
+    ) -> AgentFile:
         """Complete under locks, then mint Joules after those locks are released."""
         from .card_store import card_mutation_lock, validate_card_lock_identifier
 
@@ -2061,6 +2683,8 @@ class Board:
                 raise ValueError(
                     f"Task {task_id} has incomplete dependencies: {', '.join(incomplete)}"
                 )
+            if precondition is not None:
+                precondition()
             _, original = self._snapshot_agent_projection(canonical)
             agent = self._complete_task(canonical, task_id)
             transitions = [(task_id, uuid.uuid4().hex)]
@@ -2091,8 +2715,18 @@ class Board:
             _mint_joules_for_task(self, task_id, canonical)
         return agent
 
-    def generate_board_md(self) -> str:
+    def generate_board_md(
+        self,
+        include_done: bool = False,
+        include_idle_agents: bool = False,
+    ) -> str:
         """Generate a human-readable BOARD.md from current state.
+
+        Args:
+            include_done: When False (default), list live columns only and
+                summarize Done as a count so agents are not flooded.
+            include_idle_agents: When False (default), list only agents with a
+                current task or non-idle state.
 
         Returns:
             Markdown string for the board overview.
@@ -2107,12 +2741,13 @@ class Board:
             "",
         ]
 
+        done_views = [v for v in views if v.status == TaskStatus.DONE]
         for section_status, header in [
             (TaskStatus.IN_PROGRESS, "In Progress"),
             (TaskStatus.CLAIMED, "Claimed"),
             (TaskStatus.OPEN, "Open"),
             (TaskStatus.BLOCKED, "Blocked"),
-            (TaskStatus.DONE, "Done"),
+            (TaskStatus.REVIEW, "Review"),
         ]:
             section_tasks = [v for v in views if v.status == section_status]
             if not section_tasks:
@@ -2131,10 +2766,34 @@ class Board:
                     lines.append(f"  > {t.description[:120]}")
             lines.append("")
 
-        if agents:
-            lines.append("## Agents")
+        if include_done and done_views:
+            lines.append(f"## Done ({len(done_views)})")
             lines.append("")
-            for ag in agents:
+            for v in done_views:
+                t = v.task
+                assignee = f" @{v.claimed_by}" if v.claimed_by else ""
+                lines.append(f"- **[{t.id}]** {t.title}{assignee}")
+            lines.append("")
+        elif done_views:
+            lines.append(f"## Done ({len(done_views)} hidden)")
+            lines.append("")
+            lines.append(
+                "- Done rows omitted from the default board. "
+                "Regenerate with include_done=True or `coord status --include-done`."
+            )
+            lines.append("")
+
+        if agents:
+            shown = agents
+            if not include_idle_agents:
+                shown = [ag for ag in agents if ag.current_task or ag.state == AgentState.ACTIVE]
+            lines.append(
+                f"## Agents ({len(shown)}"
+                + (f" of {len(agents)}" if len(shown) != len(agents) else "")
+                + ")"
+            )
+            lines.append("")
+            for ag in shown:
                 state_icon = {"active": "🟢", "idle": "🟡", "offline": "⚫"}.get(
                     ag.state.value, "?"
                 )
@@ -2146,14 +2805,14 @@ class Board:
 
         return "\n".join(lines)
 
-    def write_board_md(self) -> Path:
+    def write_board_md(self, include_done: bool = False) -> Path:
         """Write BOARD.md to the coordination directory.
 
         Returns:
             Path to the written file.
         """
         self.ensure_dirs()
-        content = self.generate_board_md()
+        content = self.generate_board_md(include_done=include_done)
         path = self.coord_dir / "BOARD.md"
         atomic_write_text(path, content)
         return path
@@ -2325,14 +2984,15 @@ When you update your agent file or create a task, it propagates to:
 """
 
 
-def get_briefing_text(home: Path) -> str:
+def get_briefing_text(home: Path, include_done: bool = False) -> str:
     """Return the full coordination protocol as plain text.
 
     Appends a live snapshot of current tasks and agents if the
-    coordination directory exists.
+    coordination directory exists. Done cards are summarized by default.
 
     Args:
         home: Path to ~/.skcapstone
+        include_done: When True, list every done card in the snapshot.
 
     Returns:
         Protocol text with optional live status appended.
@@ -2340,16 +3000,24 @@ def get_briefing_text(home: Path) -> str:
     text = _BRIEFING_PROTOCOL
 
     board = Board(home)
-    tasks = board.load_tasks()
+    views = board.get_task_views()
     agents = board.load_agents()
 
-    if tasks or agents:
+    if views or agents:
         text += "\n## Current Board Snapshot\n\n"
-        views = board.get_task_views()
-        for v in views:
+        live = [v for v in views if v.status != TaskStatus.DONE]
+        done = [v for v in views if v.status == TaskStatus.DONE]
+        snapshot = list(live)
+        if include_done:
+            snapshot.extend(done)
+        else:
+            text += f"  Done cards hidden: {len(done)} (pass include_done=True for full list)\n"
+        for v in snapshot:
             status_icon = {
                 "open": "[ ]",
                 "claimed": "[~]",
+                "in_progress": "[>]",
+                "review": "[?]",
                 "done": "[x]",
             }.get(v.status.value, "[?]")
             text += f"  {status_icon} [{v.task.id}] {v.task.title}"
@@ -2358,8 +3026,9 @@ def get_briefing_text(home: Path) -> str:
             text += "\n"
 
         if agents:
-            text += "\n### Active Agents\n\n"
-            for ag in agents:
+            active = [ag for ag in agents if ag.current_task or ag.state == AgentState.ACTIVE]
+            text += f"\n### Active Agents ({len(active)} of {len(agents)})\n\n"
+            for ag in active:
                 text += f"  - {ag.agent} ({ag.state.value})"
                 if ag.current_task:
                     text += f" -> {ag.current_task}"
@@ -2368,13 +3037,14 @@ def get_briefing_text(home: Path) -> str:
     return text
 
 
-def get_briefing_json(home: Path) -> str:
+def get_briefing_json(home: Path, include_done: bool = False) -> str:
     """Return the coordination protocol and live state as JSON.
 
     Useful for machine consumption by agents that prefer structured data.
 
     Args:
         home: Path to ~/.skcapstone
+        include_done: When True, include done tasks in the tasks array.
 
     Returns:
         JSON string with protocol info and current board state.
@@ -2382,10 +3052,15 @@ def get_briefing_json(home: Path) -> str:
     board = Board(home)
     views = board.get_task_views()
     agents = board.load_agents()
+    done_count = sum(1 for v in views if v.status == TaskStatus.DONE)
+    if not include_done:
+        views = [v for v in views if v.status != TaskStatus.DONE]
+    active_agents = [ag for ag in agents if ag.current_task or ag.state == AgentState.ACTIVE]
 
     payload = {
         "protocol_version": "1.0",
         "coordination_dir": str(board.coord_dir),
+        "done_hidden": done_count if not include_done else 0,
         "commands": {
             "status": "skcapstone coord status",
             "create": 'skcapstone coord create --title "..." --by <agent>',
@@ -2393,6 +3068,7 @@ def get_briefing_json(home: Path) -> str:
             "complete": "skcapstone coord complete <id> --agent <name>",
             "board": "skcapstone coord board",
             "briefing": "skcapstone coord briefing",
+            "maintain": "skcapstone coord maintain",
         },
         "rules": [
             "Read before you write",
@@ -2427,7 +3103,7 @@ def get_briefing_json(home: Path) -> str:
                 "claimed": ag.claimed_tasks,
                 "completed": ag.completed_tasks,
             }
-            for ag in agents
+            for ag in active_agents
         ],
     }
     return json.dumps(payload, indent=2)

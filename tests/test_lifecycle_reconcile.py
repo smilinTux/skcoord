@@ -114,6 +114,142 @@ def test_duplicate_complete_and_repair_are_idempotent(tmp_path) -> None:
     assert second.actions == ()
 
 
+def test_multiple_doing_cards_share_one_stable_current_projection(tmp_path) -> None:
+    board = Board(tmp_path)
+    first = _task(board, "doing001")
+    second = _task(board, "doing002")
+    board.claim_task("jarvis", first.id)
+    board.claim_task("jarvis", second.id)
+    _move(CardStore(tmp_path), first.id, "doing")
+    agent = board.load_agent("jarvis")
+    assert agent is not None
+    original_last_seen = agent.last_seen
+
+    before = audit_lifecycle(tmp_path)
+    first_receipt = repair_lifecycle(tmp_path, actor="operator")
+    second_receipt = repair_lifecycle(tmp_path, actor="operator")
+
+    repaired = board.load_agent("jarvis")
+    assert before.clean is True
+    assert first_receipt.after.clean is True
+    assert second_receipt.actions == ()
+    assert repaired is not None
+    assert repaired.current_task == second.id
+    assert repaired.claimed_tasks == [first.id, second.id]
+    assert repaired.last_seen == original_last_seen
+
+
+def test_multiple_doing_repair_adds_missing_claim_and_uses_deterministic_fallback(
+    tmp_path,
+) -> None:
+    board = Board(tmp_path)
+    later = _task(board, "doing002")
+    earlier = _task(board, "doing001")
+    board.claim_task("jarvis", later.id)
+    board.claim_task("jarvis", earlier.id)
+    store = CardStore(tmp_path)
+    _move(store, later.id, "doing")
+    _move(store, earlier.id, "doing")
+    agent = board.load_agent("jarvis")
+    assert agent is not None
+    agent.current_task = "invalid-current"
+    agent.claimed_tasks = [later.id]
+    board.save_agent(agent)
+
+    before = audit_lifecycle(tmp_path)
+    receipt = repair_lifecycle(tmp_path, actor="operator")
+
+    repaired = board.load_agent("jarvis")
+    assert {issue.code for issue in before.issues} == {
+        "current_not_claimed",
+        "doing_owner_not_current",
+        "owner_claim_missing",
+    }
+    assert receipt.after.clean is True
+    assert repaired is not None
+    assert repaired.current_task == earlier.id
+    assert repaired.claimed_tasks == [later.id, earlier.id]
+
+
+def test_scoped_multi_doing_repair_preserves_valid_current_outside_scope(tmp_path) -> None:
+    board = Board(tmp_path)
+    current = _task(board, "doing001")
+    scoped = _task(board, "doing002")
+    board.claim_task("jarvis", current.id)
+    board.claim_task("jarvis", scoped.id)
+    _move(CardStore(tmp_path), current.id, "doing")
+    agent = board.load_agent("jarvis")
+    assert agent is not None
+    agent.current_task = current.id
+    agent.claimed_tasks.remove(scoped.id)
+    board.save_agent(agent)
+
+    receipt = repair_lifecycle(tmp_path, actor="operator", task_ids={scoped.id})
+
+    repaired = board.load_agent("jarvis")
+    assert receipt.after.clean is True
+    assert repaired is not None
+    assert repaired.current_task == current.id
+    assert scoped.id in repaired.claimed_tasks
+
+
+def test_scoped_terminal_repair_restores_current_from_outside_scope(tmp_path) -> None:
+    board = Board(tmp_path)
+    outside = _task(board, "doing001")
+    scoped = _task(board, "review01")
+    board.claim_task("jarvis", outside.id)
+    board.claim_task("jarvis", scoped.id)
+    store = CardStore(tmp_path)
+    _move(store, outside.id, "doing")
+    _move(store, scoped.id, "review")
+    agent = board.load_agent("jarvis")
+    assert agent is not None
+    original_claims = list(agent.claimed_tasks)
+    original_last_seen = agent.last_seen
+
+    receipt = repair_lifecycle(tmp_path, actor="operator", task_ids={scoped.id})
+
+    repaired = board.load_agent("jarvis")
+    assert receipt.after.clean is True
+    assert audit_lifecycle(tmp_path).clean is True
+    assert repaired is not None
+    assert repaired.current_task == outside.id
+    assert repaired.claimed_tasks == original_claims
+    assert repaired.last_seen == original_last_seen
+
+
+def test_scoped_terminal_repair_does_not_select_unclaimed_out_of_scope_doing(
+    tmp_path,
+) -> None:
+    board = Board(tmp_path)
+    outside = _task(board, "doing001")
+    scoped = _task(board, "review01")
+    board.claim_task("jarvis", outside.id)
+    board.claim_task("jarvis", scoped.id)
+    store = CardStore(tmp_path)
+    _move(store, outside.id, "doing")
+    _move(store, scoped.id, "review")
+    agent = board.load_agent("jarvis")
+    assert agent is not None
+    agent.current_task = scoped.id
+    agent.claimed_tasks.remove(outside.id)
+    board.save_agent(agent)
+
+    receipt = repair_lifecycle(tmp_path, actor="operator", task_ids={scoped.id})
+
+    repaired = board.load_agent("jarvis")
+    global_audit = audit_lifecycle(tmp_path)
+    assert receipt.after.clean is True
+    assert repaired is not None
+    assert repaired.current_task is None
+    assert repaired.claimed_tasks == [scoped.id]
+    assert global_audit.clean is False
+    assert {issue.code for issue in global_audit.issues} == {
+        "doing_owner_not_current",
+        "owner_claim_missing",
+    }
+
+
 def test_stale_orphan_claim_is_released_but_history_is_preserved(tmp_path) -> None:
     board = Board(tmp_path)
     stale = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()

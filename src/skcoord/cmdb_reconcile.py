@@ -14,6 +14,7 @@ import re
 import threading
 import time
 import uuid
+from collections import Counter
 from concurrent.futures import (
     Future,
     ThreadPoolExecutor,
@@ -40,8 +41,21 @@ from .discovery import (
     merge,
     reconcile,
 )
+from .discovery_connects import CONNECTS_COLLECTORS
 
 _SCHEMA = "skcoord.cmdb.reconcile-run/v1"
+
+
+def _network_collectors() -> tuple:
+    """The per-host collectors a network scan runs: the same set as a local scan.
+
+    discovery_scan.scan() runs OBSERVED_COLLECTORS plus CONNECTS_COLLECTORS
+    (port ownership and container network membership). scan_network ran only
+    the first, so a network pass never saw docker networks or port-to-service
+    edges, reported every stored one as stored_not_discovered, and a governed
+    network apply would have orphaned them.
+    """
+    return (*OBSERVED_COLLECTORS, *CONNECTS_COLLECTORS)
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -241,6 +255,7 @@ def scan_network(
     scan_id = uuid.uuid4().hex
     observed_at = _now().isoformat()
     declared_failures: list[str] = []
+    collectors = _network_collectors()
     for collector in DECLARED_COLLECTORS:
         try:
             found.extend(collector(Path(home)))
@@ -248,7 +263,7 @@ def scan_network(
             declared_failures.append(f"{collector.__name__}:{type(exc).__name__}")
 
     results = {
-        target.host: TargetResult(target.host, target.provenance, len(OBSERVED_COLLECTORS))
+        target.host: TargetResult(target.host, target.provenance, len(collectors))
         for target in targets
     }
     semaphores = {
@@ -285,7 +300,7 @@ def scan_network(
     )
     futures: dict[Future, tuple[str, str]] = {}
     for target in targets:
-        for observer in OBSERVED_COLLECTORS:
+        for observer in collectors:
             futures[pool.submit(invoke, target.host, observer)] = (target.host, observer.__name__)
     deadline_exceeded = False
     try:
@@ -322,7 +337,7 @@ def scan_network(
         tuple(
             sorted(
                 f"{collector.__module__}.{collector.__qualname__}"
-                for collector in (*DECLARED_COLLECTORS, *OBSERVED_COLLECTORS)
+                for collector in (*DECLARED_COLLECTORS, *collectors)
             )
         ),
         hashlib.sha256(
@@ -571,6 +586,7 @@ def run_reconcile(
     config_version: str = "unknown",
     lifecycle_actions: Sequence[dict] = (),
     agent: str = "cmdb-discovery",
+    scope: str = "network",
 ) -> tuple[dict, list[NormalizedDrift]]:
     """Reconcile one scan and construct its durable operator-facing record."""
     scan_id, started = str(uuid.uuid4()), _now()
@@ -622,6 +638,10 @@ def run_reconcile(
         "applied": apply,
         "code_version": code_version,
         "config_version": config_version,
+        # SKBrain's CmdbDriftBounded keys its baseline by ``scope`` and gates
+        # on ``drift.by_kind``, the same fields local artifacts carry (card
+        # d3aa9751). Without them a network shadow read as "no drift summary".
+        "scope": scope,
         "scope_fingerprint": scope_fingerprint,
         "completeness": scan_result.completeness(),
         "reconcile": report_data,
@@ -639,6 +659,7 @@ def run_reconcile(
         },
         "drift": {
             "count": len(normalized),
+            "by_kind": dict(sorted(Counter(item.kind for item in normalized).items())),
             "by_severity": {
                 severity: sum(item.severity == severity for item in normalized)
                 for severity in ("high", "medium", "low")

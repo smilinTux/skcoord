@@ -99,6 +99,13 @@ attribute (or relationship) on host CIs collapses duplicate entries so the
 CMDB does not count one machine twice across DNS / ssh config / vault
 records.
 
+Canonicalisation resolves a machine's several *addresses* onto one CI. It must
+not be used to respell a machine's *name*: under
+[`SITE_AND_HOST_NAMING_STANDARD.md`](https://github.com/smilinTux/sk-standards/blob/main/standards/SITE_AND_HOST_NAMING_STANDARD.md)
+the `nor` and `chi` prefixes are legacy site prefixes carried as registry
+aliases, both spellings resolve, and a CI is never renamed to adopt the
+standard because a CI id is a key whose rename discards the event history.
+
 ## Suggested order
 
 1. P1 (facts) and P5 (retire) land first, small and self-contained.
