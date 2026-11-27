@@ -2,10 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
-import pytest
-
 from skcoord.card_store import CardCore, CardStore
 from skcoord.human_gate_close import (
     append_human_gate_decision,
@@ -124,7 +120,7 @@ def test_close_only_targets_named_cards(tmp_path):
 def test_append_human_gate_decision_is_hash_pinned(tmp_path):
     store = CardStore(tmp_path)
     _make_card(store, "gate-card")
-    event = append_human_gate_decision(
+    append_human_gate_decision(
         tmp_path,
         "gate-card",
         "jarvis",

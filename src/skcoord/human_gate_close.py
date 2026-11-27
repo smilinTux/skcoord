@@ -14,18 +14,13 @@ column moves.
 
 from __future__ import annotations
 
-import fcntl
-import os
-import stat
 import uuid
 from pathlib import Path
 
-from .card import Column
 from .card_store import (
-    _HOSTNAME,
     _COMPLETE_COLUMN,
-    _now_iso,
     CardStore,
+    _now_iso,
     card_mutation_lock,
     validate_card_lock_identifier,
 )
